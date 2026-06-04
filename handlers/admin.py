@@ -46,11 +46,14 @@ async def add_room(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Usage: /add_room <location_id> <room_number>")
         return
     location_id, room_number = context.args[0].upper(), context.args[1]
-    room_id = sheets.add_room(location_id, room_number)
-    await update.message.reply_text(
-        f"✅ Room {room_number} added as `{room_id}` at {location_id}.",
-        parse_mode="Markdown",
-    )
+    try:
+        room_id = sheets.add_room(location_id, room_number)
+        await update.message.reply_text(
+            f"✅ Room {room_number} added as `{room_id}` at {location_id}.",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error adding room: {e}")
 
 
 @admin_only
@@ -72,18 +75,21 @@ async def list_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Usage: /list_rooms <location_id>")
         return
     location_id = context.args[0].upper()
-    rooms = sheets.get_rooms_by_location(location_id)
-    if not rooms:
-        await update.message.reply_text(f"No rooms found for {location_id}.")
-        return
-    lines = [
-        f"🚪 Room {r['room_number']} (`{r['room_id']}`) — "
-        f"{'✅ Available' if str(r['is_available']).upper() == 'TRUE' else '❌ Unavailable'}"
-        for r in rooms
-    ]
-    await update.message.reply_text(
-        f"Rooms at {location_id}:\n" + "\n".join(lines), parse_mode="Markdown"
-    )
+    try:
+        rooms = sheets.get_rooms_by_location(location_id)
+        if not rooms:
+            await update.message.reply_text(f"No rooms found for {location_id}.")
+            return
+        lines = [
+            f"🚪 Room {r['room_number']} (`{r['room_id']}`) — "
+            f"{'✅ Available' if str(r['is_available']).upper() == 'TRUE' else '❌ Unavailable'}"
+            for r in rooms
+        ]
+        await update.message.reply_text(
+            f"Rooms at {location_id}:\n" + "\n".join(lines), parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error listing rooms: {e}")
 
 
 @admin_only
