@@ -70,7 +70,12 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     location_id = query.data[4:]
     locations = sheets.get_locations()
-    location = next(loc for loc in locations if loc["location_id"] == location_id)
+    location = next((loc for loc in locations if loc["location_id"] == location_id), None)
+    if location is None:
+        await query.message.reply_text(
+            "⚠️ This location is no longer available. Please start again."
+        )
+        return await _show_locations(update, context)
     context.user_data.update({
         "location_id": location_id,
         "location_name": location["name"],
@@ -112,6 +117,11 @@ async def handle_room(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return await _show_locations(update, context)
     room_id = query.data[5:]
     room = sheets.get_room(room_id)
+    if room is None:
+        await query.message.reply_text(
+            "⚠️ This room is no longer available. Please choose another."
+        )
+        return await _show_rooms(update, context)
     context.user_data["room_id"] = room_id
     context.user_data["room_number"] = room["room_number"]
     photo_ids = [p.strip() for p in room["photo_file_ids"].split(",") if p.strip()]
@@ -248,10 +258,11 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # confirm_agree — save booking
     try:
-        counter = sheets.increment_booking_counter()
-        ref = format_ref(counter)
         config = sheets.get_config()
         d = context.user_data
+
+        counter = sheets.increment_booking_counter()
+        ref = format_ref(counter)
 
         booking_data = {
             "booking_ref": ref,
@@ -284,9 +295,12 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"📞 Phone: {d['phone']}\n"
                 f"🤖 Telegram ID: {update.effective_user.id}"
             )
-            await context.bot.send_message(
-                chat_id=int(host_chat_id), text=host_msg, parse_mode="Markdown"
-            )
+            try:
+                await context.bot.send_message(
+                    chat_id=int(host_chat_id), text=host_msg, parse_mode="Markdown"
+                )
+            except Exception:
+                pass  # notification failure must not block confirmation message
 
         host_phone = config.get("host_phone", "")
         await query.edit_message_text(
@@ -384,6 +398,13 @@ async def handle_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if target == "check_in":
         context.user_data["check_in"] = text.strip()
         context.user_data["check_in_date"] = result
+        context.user_data.pop("check_out", None)
+        context.user_data.pop("edit_target", None)
+        await update.message.reply_text(
+            f"📅 Check-in updated to {text.strip()}.\n"
+            f"Now enter your new check-out date (DD/MM/YYYY, must be after {text.strip()}):"
+        )
+        return CHECK_OUT
     else:
         context.user_data[field_key_map[target]] = result
 
