@@ -46,6 +46,8 @@ def set_room_availability(room_id: str, is_available: bool) -> None:
 def increment_booking_counter() -> int:
     ws = _worksheet("Config")
     cell = ws.find("booking_counter", in_column=1)
+    if cell is None:
+        raise ValueError("booking_counter key missing from Config sheet")
     header = ws.row_values(1)
     val_col = header.index("value") + 1
     current = int(ws.cell(cell.row, val_col).value or 0)
@@ -71,7 +73,15 @@ def add_room(location_id: str, room_number: str) -> str:
     nums = [int(r["room_id"][2:]) for r in rooms if r["room_id"][2:].isdigit()]
     next_num = max(nums) + 1 if nums else 1
     room_id = f"RM{next_num:03d}"
-    ws.append_row([room_id, location_id, room_number, "TRUE", ""])
+    header = ws.row_values(1)
+    row_data = {
+        "room_id": room_id,
+        "location_id": location_id,
+        "room_number": room_number,
+        "is_available": "TRUE",
+        "photo_file_ids": "",
+    }
+    ws.append_row([row_data.get(col, "") for col in header])
     return room_id
 
 

@@ -4,7 +4,8 @@ os.environ.setdefault("SHEET_ID", "test")
 os.environ.setdefault("GOOGLE_CREDENTIALS_JSON", "test.json")
 os.environ.setdefault("ADMIN_IDS", "")
 
-from unittest.mock import MagicMock, patch, call
+import pytest
+from unittest.mock import MagicMock, patch
 import sheets
 
 
@@ -82,7 +83,6 @@ def test_set_room_availability_raises_if_not_found(mock_ws):
     ws = MagicMock()
     ws.find.return_value = None
     mock_ws.return_value = ws
-    import pytest
     with pytest.raises(ValueError, match="RM999"):
         sheets.set_room_availability("RM999", True)
 
@@ -122,3 +122,12 @@ def test_get_booking_by_ref_found(mock_ws):
 def test_get_booking_by_ref_not_found(mock_ws):
     mock_ws.return_value = _make_ws(records=[])
     assert sheets.get_booking_by_ref("BK-000099") is None
+
+
+@patch("sheets._worksheet")
+def test_increment_booking_counter_raises_if_key_missing(mock_ws):
+    ws = MagicMock()
+    ws.find.return_value = None
+    mock_ws.return_value = ws
+    with pytest.raises(ValueError, match="booking_counter"):
+        sheets.increment_booking_counter()
