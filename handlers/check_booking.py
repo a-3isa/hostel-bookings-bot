@@ -30,32 +30,40 @@ async def handle_ref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return CHECK_REF
 
-    booking = sheets.get_booking_by_ref(ref)
-    if booking is None:
+    try:
+        booking = sheets.get_booking_by_ref(ref)
+        if booking is None:
+            await update.message.reply_text(
+                f"❌ Booking reference {ref} not found.\nTry again or /cancel:"
+            )
+            return CHECK_REF
+
+        config = sheets.get_config()
+        host_phone = config.get("host_phone", "")
+        location_display = booking.get("location_name") or booking.get("location_id", "N/A")
+        room_display = booking.get("room_number") or booking.get("room_id", "N/A")
+
+        details = (
+            f"📋 *Your Booking*\n\n"
+            f"📍 {location_display}\n"
+            f"🚪 Room {room_display}\n"
+            f"📅 {booking.get('check_in', 'N/A')} → {booking.get('check_out', 'N/A')}\n"
+            f"🕐 Arrival: {booking.get('arrival_time', 'N/A')}\n"
+            f"👤 {booking.get('guest_name', 'N/A')}\n"
+            f"📞 {booking.get('phone', 'N/A')}\n"
+            f"🔖 Ref: {booking.get('booking_ref', ref)}\n"
+        )
+        if host_phone:
+            details += f"📞 Host: {host_phone}\n"
+        details += "\n📞 Please call the host 1 hour before your arrival time."
+
+        await update.message.reply_text(details, parse_mode="Markdown")
+        return ConversationHandler.END
+    except Exception:
         await update.message.reply_text(
-            f"❌ Booking reference {ref} not found.\nTry again or /cancel:"
+            "⚠️ Something went wrong. Please try again or /cancel:"
         )
         return CHECK_REF
-
-    config = sheets.get_config()
-    host_phone = config.get("host_phone", "")
-    location_display = booking.get("location_name") or booking.get("location_id", "")
-    room_display = booking.get("room_number") or booking.get("room_id", "")
-
-    details = (
-        f"📋 *Your Booking*\n\n"
-        f"📍 {location_display}\n"
-        f"🚪 Room {room_display}\n"
-        f"📅 {booking['check_in']} → {booking['check_out']}\n"
-        f"🕐 Arrival: {booking['arrival_time']}\n"
-        f"👤 {booking['guest_name']}\n"
-        f"📞 {booking['phone']}\n"
-        f"🔖 Ref: {booking['booking_ref']}\n"
-        f"📞 Host: {host_phone}\n\n"
-        f"📞 Please call the host 1 hour before your arrival time."
-    )
-    await update.message.reply_text(details, parse_mode="Markdown")
-    return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
