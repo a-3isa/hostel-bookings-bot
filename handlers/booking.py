@@ -86,21 +86,22 @@ async def _show_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     rooms = sheets.get_available_rooms(location_id)
     if not rooms:
         keyboard = [[InlineKeyboardButton("⬅️ Back to locations", callback_data="rooms_back")]]
-        await update.callback_query.edit_message_text(
-            "😔 No rooms available at this location right now.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+        text = "😔 No rooms available at this location right now."
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return ROOM
     keyboard = [
         [InlineKeyboardButton(f"🚪 Room {r['room_number']}", callback_data=f"room_{r['room_id']}")]
         for r in rooms
     ]
     keyboard.append([InlineKeyboardButton("⬅️ Back to locations", callback_data="rooms_back")])
-    await update.callback_query.edit_message_text(
-        f"🚪 Available rooms at *{context.user_data['location_name']}*:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    text = f"🚪 Available rooms at *{context.user_data['location_name']}*:"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
     return ROOM
 
 
@@ -126,16 +127,18 @@ async def _show_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     ]
     if photo_ids:
         media = [InputMediaPhoto(pid) for pid in photo_ids[:10]]
-        await update.callback_query.message.reply_media_group(media)
-        await update.callback_query.message.reply_text(
+        msg = update.callback_query.message if update.callback_query else update.effective_message
+        await msg.reply_media_group(media)
+        await msg.reply_text(
             "Does this room work for you?",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
     else:
-        await update.callback_query.edit_message_text(
-            "📷 No photos available for this room.\n\nDoes this room work for you?",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+        text = "📷 No photos available for this room.\n\nDoes this room work for you?"
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return PHOTOS
 
 
@@ -244,55 +247,61 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return await _show_edit_menu(update, context)
 
     # confirm_agree — save booking
-    counter = sheets.increment_booking_counter()
-    ref = format_ref(counter)
-    config = sheets.get_config()
-    d = context.user_data
+    try:
+        counter = sheets.increment_booking_counter()
+        ref = format_ref(counter)
+        config = sheets.get_config()
+        d = context.user_data
 
-    booking_data = {
-        "booking_ref": ref,
-        "room_id": d["room_id"],
-        "room_number": d["room_number"],
-        "location_id": d["location_id"],
-        "location_name": d["location_name"],
-        "check_in": d["check_in"],
-        "check_out": d["check_out"],
-        "arrival_time": d["arrival_time"],
-        "guest_name": d["guest_name"],
-        "phone": d["phone"],
-        "telegram_id": update.effective_user.id,
-        "created_at": str(dt_date.today()),
-    }
-    sheets.append_booking(booking_data)
-    sheets.set_room_availability(d["room_id"], False)
+        booking_data = {
+            "booking_ref": ref,
+            "room_id": d["room_id"],
+            "room_number": d["room_number"],
+            "location_id": d["location_id"],
+            "location_name": d["location_name"],
+            "check_in": d["check_in"],
+            "check_out": d["check_out"],
+            "arrival_time": d["arrival_time"],
+            "guest_name": d["guest_name"],
+            "phone": d["phone"],
+            "telegram_id": update.effective_user.id,
+            "created_at": str(dt_date.today()),
+        }
+        sheets.append_booking(booking_data)
+        sheets.set_room_availability(d["room_id"], False)
 
-    host_chat_id = config.get("host_chat_id", "")
-    if host_chat_id:
-        host_msg = (
-            f"🔔 *New Booking Confirmed*\n\n"
-            f"🔖 Ref: {ref}\n"
-            f"📍 Location: {d['location_name']}\n"
-            f"🚪 Room: {d['room_number']}\n"
-            f"📅 Check-in: {d['check_in']}\n"
-            f"📅 Check-out: {d['check_out']}\n"
-            f"🕐 Arrival: {d['arrival_time']}\n"
-            f"👤 Guest: {d['guest_name']}\n"
-            f"📞 Phone: {d['phone']}\n"
-            f"🤖 Telegram ID: {update.effective_user.id}"
+        host_chat_id = config.get("host_chat_id", "")
+        if host_chat_id:
+            host_msg = (
+                f"🔔 *New Booking Confirmed*\n\n"
+                f"🔖 Ref: {ref}\n"
+                f"📍 Location: {d['location_name']}\n"
+                f"🚪 Room: {d['room_number']}\n"
+                f"📅 Check-in: {d['check_in']}\n"
+                f"📅 Check-out: {d['check_out']}\n"
+                f"🕐 Arrival: {d['arrival_time']}\n"
+                f"👤 Guest: {d['guest_name']}\n"
+                f"📞 Phone: {d['phone']}\n"
+                f"🤖 Telegram ID: {update.effective_user.id}"
+            )
+            await context.bot.send_message(
+                chat_id=int(host_chat_id), text=host_msg, parse_mode="Markdown"
+            )
+
+        host_phone = config.get("host_phone", "")
+        await query.edit_message_text(
+            f"🎉 *Your booking is confirmed!*\n"
+            f"🔖 Reference: *{ref}*\n"
+            f"📞 Host: {host_phone}\n\n"
+            f"📞 Please call the host 1 hour before your arrival time.",
+            parse_mode="Markdown",
         )
-        await context.bot.send_message(
-            chat_id=int(host_chat_id), text=host_msg, parse_mode="Markdown"
+        return ConversationHandler.END
+    except Exception:
+        await query.message.reply_text(
+            "⚠️ Something went wrong saving your booking. Please try again."
         )
-
-    host_phone = config.get("host_phone", "")
-    await query.edit_message_text(
-        f"🎉 *Your booking is confirmed!*\n"
-        f"🔖 Reference: *{ref}*\n"
-        f"📞 Host: {host_phone}\n\n"
-        f"📞 Please call the host 1 hour before your arrival time.",
-        parse_mode="Markdown",
-    )
-    return ConversationHandler.END
+        return CONFIRM
 
 
 async def _show_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -372,9 +381,11 @@ async def handle_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"{error_map[target]}\nTry again:")
         return EDIT_FIELD
 
-    context.user_data[field_key_map[target]] = text.strip()
     if target == "check_in":
+        context.user_data["check_in"] = text.strip()
         context.user_data["check_in_date"] = result
+    else:
+        context.user_data[field_key_map[target]] = result
 
     context.user_data.pop("edit_target", None)
     return await _show_confirm(update, context)
