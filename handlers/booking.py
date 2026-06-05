@@ -34,7 +34,7 @@ async def show_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton("✅ I Agree — Continue", callback_data="rules_agree")],
         [InlineKeyboardButton("❌ I Disagree — Exit", callback_data="rules_disagree")],
     ]
-    await query.edit_message_text(
+    await query.message.reply_text(
         f"📋 *Booking Rules*\n\n{rules_text}\n\nPlease read before proceeding.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -46,7 +46,7 @@ async def handle_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     query = update.callback_query
     await query.answer()
     if query.data == "rules_disagree":
-        await query.edit_message_text("No problem! Send /start to begin again.")
+        await query.message.reply_text("No problem! Send /start to begin again.")
         return ConversationHandler.END
     return await _show_locations(update, context)
 
@@ -58,10 +58,7 @@ async def _show_locations(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         for loc in locations
     ]
     text = "🏙️ Choose a location:"
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return LOCATION
 
 
@@ -92,10 +89,7 @@ async def _show_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if not rooms:
         keyboard = [[InlineKeyboardButton("⬅️ Back to locations", callback_data="rooms_back")]]
         text = "😔 No rooms available at this location right now."
-        if update.callback_query:
-            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return ROOM
     keyboard = [
         [InlineKeyboardButton(f"🚪 Room {r['room_number']}", callback_data=f"room_{r['room_id']}")]
@@ -103,10 +97,7 @@ async def _show_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     ]
     keyboard.append([InlineKeyboardButton("⬅️ Back to locations", callback_data="rooms_back")])
     text = f"🚪 Available rooms at *{context.user_data['location_name']}*:"
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
     return ROOM
 
 
@@ -145,10 +136,7 @@ async def _show_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         )
     else:
         text = "📷 No photos available for this room.\n\nDoes this room work for you?"
-        if update.callback_query:
-            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return PHOTOS
 
 
@@ -251,7 +239,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
     if query.data == "confirm_cancel":
-        await query.edit_message_text("Booking cancelled. Send /start to begin again.")
+        await query.message.reply_text("Booking cancelled. Send /start to begin again.")
         return ConversationHandler.END
     if query.data == "confirm_change":
         return await _show_edit_menu(update, context)
@@ -303,7 +291,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 pass  # notification failure must not block confirmation message
 
         host_phone = config.get("host_phone", "")
-        await query.edit_message_text(
+        await query.message.reply_text(
             f"🎉 *Your booking is confirmed!*\n"
             f"🔖 Reference: *{ref}*\n"
             f"📞 Host: {host_phone}\n\n"
@@ -328,7 +316,7 @@ async def _show_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [InlineKeyboardButton("🚪 Room",            callback_data="edit_room")],
         [InlineKeyboardButton("📍 Location",        callback_data="edit_location")],
     ]
-    await update.callback_query.edit_message_text(
+    await update.callback_query.message.reply_text(
         "✏️ What would you like to change?",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
