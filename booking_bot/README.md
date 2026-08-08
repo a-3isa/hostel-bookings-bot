@@ -120,12 +120,19 @@ n8n → **Workflows** → **Import from File** → `bookings-bot.workflow.json`.
     `client_email` + `private_key` from your existing `GOOGLE_CREDENTIALS_JSON` —
     that account already has access, so nothing to share.
 
-### Deploying a `brain.js` change
+### Deploying
 
 ```
-python booking_bot/push_brain.py            # update the draft
-python booking_bot/push_brain.py --publish  # update, then activate
+node booking_bot/test_brain.mjs             # the state machine, offline
+node booking_bot/test_reports.mjs           # the scheduled reports, offline
+
+python booking_bot/push_brain.py --publish    # brain.js + the Config lists
+python booking_bot/deploy_graph.py --publish  # nodes, connections, report branch
 ```
+
+`push_brain.py` owns node *contents*; `deploy_graph.py` owns the graph *shape*
+and re-syncs `nodes/build_reports.js`. Both are idempotent — run either twice and
+the second run is a no-op. Run `deploy_graph.py` first when both are pending.
 
 The Brain is ~46 KB of JS, too large to pass through an MCP tool call, so the
 script speaks JSON-RPC to the same endpoint and reads the file off disk. It also
@@ -136,6 +143,27 @@ close it first.
 
 The response includes five `INVALID_PARAMETER` warnings about `resource` on the
 Telegram nodes. They predate this script and those nodes work; ignore them.
+
+### Scheduled reports
+
+`Report Schedule → Report Config → Read Report Formulas → Read Report Values →
+Build Reports → Send Report` posts to the ops group (`REPORT_GROUP_CHAT_ID`):
+
+- a **daily digest** — arrivals, departures, and open stays past 30 days — sent
+  only when there is something in it;
+- a **debt report** on Saturdays, every booking with المتبقي > 0 plus a total.
+
+The range is read **twice** on purpose. Evaluated gives real numbers for المتبقي,
+which is a sheet formula; FORMULA identifies open-ended stays, whose عدد الليالي
+is a live `=TODAY()-J`. Without the second read an open stay reads as departing
+today on every single day, and the digest would announce the same guest as
+leaving for months. FORMULA alone cannot replace the first read either — المتبقي
+and, on nightly-rate rows, اجمالي سعر الحجز come back as formula text.
+
+> **One manual step:** the trigger fires at 08:00 in the **n8n instance's**
+> timezone. The workflow has no timezone set and the MCP surface cannot set one,
+> so change it in the UI (Workflow settings → Timezone → `Africa/Cairo`) if you
+> want 08:00 local. Report *content* already uses Cairo dates regardless.
 
 ### 4. Fill in the Config node
 

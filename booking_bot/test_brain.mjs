@@ -43,14 +43,30 @@ let sessionRow = {};
 // brain.js relies on catching exactly that.
 let sheetRows = null;
 
+// What "Read Locations" returns: the الإتاحة tab's A:B, one row per
+// apartment+room. Room counts match the real sheet — 5, 5, 4, 4, 4, 4 — not the
+// flat 5 the old hardcoded list assumed. Set to null to simulate a failed read.
+const REAL_ROOMS = { 'ذاكر حسين': 5, 'احمد فهيم': 5, 'انبي 3': 4, 'انبي 2': 4, 'ابو حديد 11': 4, 'عبدالله العربي': 4 };
+let locationRows = Object.entries(REAL_ROOMS).flatMap(([apt, n]) =>
+  Array.from({ length: n }, (_, i) => ({ 'الشقة': apt, 'الغرفة': String(i + 1) })));
+
 function run(update) {
   const $ = (name) => {
     const map = { Config: CONFIG, 'Telegram Trigger': update, 'Load Session': sessionRow };
+    if (name === 'Read Locations') {
+      // Gated the same way the graph gates it: unexecuted unless this turn draws
+      // an apartment keyboard, and n8n throws when you reference such a node.
+      if (locationRows === null) throw new Error('Referenced node is unexecuted');
+      return { all: () => locationRows.map(j => ({ json: j })) };
+    }
     if (name === 'Read Bookings For Edit') {
       // Faithful to the graph: "Needs Bookings?" only lets this node run while
       // the LOADED state is a lookup state. Any other turn, referencing it throws.
+      // NOTES is the turn that draws the booking confirmation, which is where
+      // the availability check runs — the only moment the room and the dates are
+      // both known and nothing has been written yet.
       const st = sessionRow.state;
-      if (sheetRows === null || (st !== 'EDIT_FIND' && st !== 'EDIT_PICK')) {
+      if (sheetRows === null || !['EDIT_FIND', 'EDIT_PICK', 'NOTES'].includes(st)) {
         throw new Error('Referenced node is unexecuted');
       }
       // The node reads A:T and adds row_number, so the double must too — an
@@ -77,6 +93,20 @@ function run(update) {
 
 /** Simulate a chat with no stored row at all (Load Session → empty item). */
 function resetSession() { sessionRow = {}; }
+
+/**
+ * Stand in for the "Clear Session" node, which runs only after the sheet write
+ * actually succeeded: it ends the session and parks the undo record on the row.
+ */
+function clearSession() {
+  const save = lastBrain && lastBrain.save ? lastBrain.save : {};
+  sessionRow = {
+    chat_id: lastBrain ? lastBrain.chatId : '999',
+    state: '',
+    data: JSON.stringify({ lastWrite: save.undo || null, lastAppend: !save.undo }),
+    updated_at: Date.now(),
+  };
+}
 
 /**
  * Run the live Build Booking Row node over the last save payload.
@@ -189,7 +219,7 @@ r = run(msg('محمد علي'));
 check('accepts an Arabic name → asks btype', r.reply.text === '📑 نوع الحجز:', r.reply.text);
 check('btype grid has both options', r.reply.reply_markup.inline_keyboard[0].length === 2);
 
-r = run(cb('bt_0'));
+r = run(cb('bt_external'));
 check('btype chosen → asks phone', r.reply.text === '📞 رقم الهاتف:');
 
 r = run(msg('01012345678'));
@@ -233,7 +263,7 @@ check('retired payment methods are gone',
   !JSON.stringify(r.reply.reply_markup.inline_keyboard).includes('شاكر') &&
   !JSON.stringify(r.reply.reply_markup.inline_keyboard).includes('وي باي'));
 
-r = run(cb('pay_0'));
+r = run(cb('pay_cash'));
 check('كاش → asks paid amount', r.reply.text === '💵 اجمالي ما تم دفعه:');
 
 r = run(msg('2000'));
@@ -326,7 +356,7 @@ r = run(cb('nights_inf'));
 check('∞ → calendar', r.reply.text === '📅 اختر تاريخ البداية:');
 run(cb('cal_day_2026_01_02'));
 run(msg('1000'));
-r = run(cb('pay_4'));                    // غير مدفوع
+r = run(cb('pay_unpaid'));                    // غير مدفوع
 check('غير مدفوع skips the paid step', r.reply.text === '📝 ملاحظات (اختياري) أو اضغط تخطي:', r.reply.text);
 r = run(cb('notes_skip'));
 check('∞ shown as مفتوح in summary', r.reply.text.includes('🌙 عدد الليالي: ∞ مفتوح'));
@@ -370,7 +400,7 @@ check('asks payment', r.reply.text === '💳 طريقة الدفع:');
 check('3 expense payment options incl. فودافون كاش',
   JSON.stringify(r.reply.reply_markup.inline_keyboard).includes('فودافون كاش') &&
   r.reply.reply_markup.inline_keyboard.flat().length === 3);
-r = run(cb('epay_1', EXPUSER));                    // انستاباي → receipt step
+r = run(cb('epay_instapay', EXPUSER));                    // انستاباي → receipt step
 check('انستاباي asks for a receipt', r.reply.text === '📎 أرسل صورة إيصال التحويل أو اضغط تخطي:', r.reply.text);
 check('receipt prompt offers skip', r.reply.reply_markup.inline_keyboard[0][0].callback_data === 'ereceipt_skip');
 r = run(msg('not a photo', EXPUSER));
@@ -412,11 +442,21 @@ check('expense group id', r.save.groupChatId === '-5072732996');
 
 // The Brain keeps the session on *_CONFIRM after emitting a save; the
 // "Clear Session" node ends it only once the sheet write succeeded, so a failed
-// write leaves the Save button live (same as handlers/booking.py).
-section('save failure leaves the user on CONFIRM');
+// write leaves the Save button live (same as handlers/booking.py). That is also
+// what let an impatient double tap write the row twice, hence the 60 s lock.
+section('save is locked against a double tap, but a real retry still works');
 check('session still parked on EXP_CONFIRM', sessionRow.state === 'EXP_CONFIRM', sessionRow.state);
 r = run(cb('esave', EXPUSER));
-check('pressing Save again re-emits the write', r.hasSave === true);
+check('a second tap within the window writes nothing', r.hasSave === false);
+check('and it does not nag the user either', r.hasReply === false);
+
+// Wind the lock back past its expiry: the write really did fail and the user is
+// retrying a minute later, which must go through.
+const stale = JSON.parse(sessionRow.data);
+stale.savingAt = Date.now() - 61 * 1000;
+sessionRow = { ...sessionRow, data: JSON.stringify(stale) };
+r = run(cb('esave', EXPUSER));
+check('after the lock expires the retry re-emits the write', r.hasSave === true);
 
 // Simulate the Clear Session node running after a successful write.
 resetSession();
@@ -432,14 +472,14 @@ run(cb('choice_booking'));
 run(cb('bid_skip'));
 run(msg('B999'));
 run(msg('Mona Ali'));
-run(cb('bt_0'));
+run(cb('bt_external'));
 run(msg('01099887766'));
 run(cb('ar_0_2'));
 run(cb('nights_2'));
 run(cb('cal_day_2026_08_10'));
 r = run(msg('3000'));
 check('asks payment', r.reply.text === '💳 طريقة الدفع:');
-r = run(cb('pay_1'));                              // انستاباي
+r = run(cb('pay_instapay'));                              // انستاباي
 check('انستاباي asks the paid amount FIRST', r.reply.text === '💵 اجمالي ما تم دفعه:', r.reply.text);
 r = run(msg('1500'));
 check('receipt is asked after the amount', r.reply.text === '📎 أرسل صورة إيصال التحويل أو اضغط تخطي:', r.reply.text);
@@ -455,8 +495,8 @@ check('paid amount survived the receipt detour', r.save.fields['اجمالي م�
 resetSession();
 run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
 run(msg('B1000')); run(msg('Sara Omar'));
-run(cb('bt_0')); run(msg('01000000000')); run(cb('ar_0_1')); run(cb('nights_1'));
-run(cb('cal_day_2026_08_11')); run(msg('1000')); run(cb('pay_3'));   // فودافون كاش
+run(cb('bt_external')); run(msg('01000000000')); run(cb('ar_0_1')); run(cb('nights_1'));
+run(cb('cal_day_2026_08_11')); run(msg('1000')); run(cb('pay_vcash'));   // فودافون كاش
 r = run(msg('400'));
 check('فودافون كاش also asks for a receipt', r.reply.text === '📎 أرسل صورة إيصال التحويل أو اضغط تخطي:', r.reply.text);
 r = run(cb('receipt_skip'));
@@ -523,7 +563,7 @@ check('paid prompt says it ADDS and shows the current total',
 check('brain survives the unexecuted lookup node', r.hasReply === true);
 r = run(msg('900'));
 check('paid change forces طريقة الدفع', r.reply.text === '💳 طريقة الدفع:', r.reply.text);
-r = run(cb('xpay_1'));                       // انستاباي
+r = run(cb('xpay_instapay'));                       // انستاباي
 check('transfer offers a receipt', r.reply.text === '📎 أرسل صورة إيصال التحويل أو اضغط تخطي:', r.reply.text);
 r = run(photo('EDITFILE55'));
 check('after the receipt the admin is asked whether the guest left',
@@ -563,7 +603,7 @@ sheetRows = SHEET;
 run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));   // paid = 1200
 sheetRows = null;
 run(cb('ef_paid')); run(msg('300'));
-r = run(cb('xpay_0'));                                           // كاش → no receipt
+r = run(cb('xpay_cash'));                                           // كاش → no receipt
 check('cash goes straight to the checkout question',
   r.reply.text === '🚪 هل غادر النزيل؟', r.reply.text);
 r = run(cb('ef_paid'));
@@ -587,7 +627,7 @@ check('cannot push the paid total below zero',
 check('rejection keeps the user on the same step', r.hasSave === false);
 r = run(msg('-200'));
 check('a refund is accepted', r.reply.text === '💳 طريقة الدفع:', r.reply.text);
-run(cb('xpay_0'));
+run(cb('xpay_cash'));
 run(cb('xleft_no'));
 r = run(cb('xedone'));
 check('refund subtracts (1200-200)', r.save.fields['اجمالي ما تم دفعه'] === 1000,
@@ -600,7 +640,7 @@ resetSession();
 sheetRows = SHEET;
 run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
 sheetRows = null;
-run(cb('ef_paid')); run(msg('-1200')); run(cb('xpay_0'));
+run(cb('ef_paid')); run(msg('-1200')); run(cb('xpay_cash'));
 run(cb('xleft_no'));
 r = run(cb('xedone'));
 check('refunding down to exactly zero is allowed', r.save.fields['اجمالي ما تم دفعه'] === 0,
@@ -662,7 +702,7 @@ check('non-numeric amount rejected', r.reply.text === '❌ أدخل رقماً �
 r = run(msg('800', EXPUSER));
 check('amount asks for the payment type', r.reply.text === '💳 طريقة الدفع:', r.reply.text);
 check('full payment list offered', r.reply.reply_markup.inline_keyboard.flat().length === 7);
-r = run(cb('xpay_1', EXPUSER));                  // انستاباي
+r = run(cb('xpay_instapay', EXPUSER));                  // انستاباي
 check('non-cash demands a receipt', r.reply.text === '📎 أرسل صورة إيصال التحويل:', r.reply.text);
 check('cashier receipt has no skip button', r.reply.reply_markup === undefined, r.reply.reply_markup);
 r = run(cb('xreceipt_skip', EXPUSER));
@@ -695,7 +735,7 @@ sheetRows = SHEET;
 run(msg('/start', EXPUSER)); run(cb('choice_paid', EXPUSER)); run(msg('77777', EXPUSER));
 sheetRows = null;
 run(msg('500', EXPUSER));
-r = run(cb('xpay_0', EXPUSER));                  // كاش
+r = run(cb('xpay_cash', EXPUSER));                  // كاش
 check('cash saves without asking for an image', r.hasSave === true);
 check('no receipt on the payload', r.save.receiptFileId === '');
 check('cash payment recorded', r.save.fields['طريقة الدفع'] === 'كاش');
@@ -716,7 +756,7 @@ sheetRows = SHEET;
 run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
 sheetRows = null;
 run(cb('ef_paid')); run(msg('100'));
-r = run(cb('xpay_2'));                           // Airbnb — not a receipt payment
+r = run(cb('xpay_airbnb'));                           // Airbnb — not a receipt payment
 check('a payment with no receipt still reaches the checkout question',
   r.reply.text === '🚪 هل غادر النزيل؟', r.reply.text);
 
@@ -725,7 +765,7 @@ sheetRows = SHEET;
 run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
 sheetRows = null;
 run(cb('ef_paid')); run(msg('50'));
-r = run(cb('xpay_1'));                           // انستاباي
+r = run(cb('xpay_instapay'));                           // انستاباي
 check('admin receipt is still skippable',
   r.reply.reply_markup.inline_keyboard[0][0].callback_data === 'xreceipt_skip');
 r = run(cb('xreceipt_skip'));
@@ -751,7 +791,7 @@ sheetRows = SHEET;
 run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));   // arrival 2026-08-04
 sheetRows = null;
 run(cb('ef_paid')); run(msg('300'));
-r = run(cb('xpay_0'));
+r = run(cb('xpay_cash'));
 check('checkout question offers نعم / لا',
   r.reply.reply_markup.inline_keyboard[0].map(b => b.callback_data).join() === 'xleft_yes,xleft_no',
   r.reply.reply_markup.inline_keyboard);
@@ -788,7 +828,7 @@ resetSession();
 sheetRows = SHEET;
 run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
 sheetRows = null;
-run(cb('ef_paid')); run(msg('10')); run(cb('xpay_0')); run(cb('xleft_yes'));
+run(cb('ef_paid')); run(msg('10')); run(cb('xpay_cash')); run(cb('xleft_yes'));
 r = run(cb('cal_day_2026_08_04'));               // exactly the arrival date
 check('same-day checkout accepted', r.reply.text.startsWith('📋 *مراجعة التعديل:*'), r.reply.text);
 r = run(cb('xedone'));
@@ -799,7 +839,7 @@ resetSession();
 sheetRows = [{ ...SHEET[1], 'عدد الليالي': '=TODAY()-J3' }];
 run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
 sheetRows = null;
-run(cb('ef_paid')); run(msg('10')); run(cb('xpay_0')); run(cb('xleft_yes'));
+run(cb('ef_paid')); run(msg('10')); run(cb('xpay_cash')); run(cb('xleft_yes'));
 r = run(cb('cal_day_2026_08_10'));
 check('the before value is shown as مفتوح', r.reply.text.includes('عدد الليالي: ∞ مفتوح ← 6'),
   r.reply.text);
@@ -809,7 +849,7 @@ resetSession();
 sheetRows = SHEET;
 run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
 sheetRows = null;
-run(cb('ef_paid')); run(msg('300')); run(cb('xpay_0'));
+run(cb('ef_paid')); run(msg('300')); run(cb('xpay_cash'));
 run(cb('xleft_no'));
 r = run(cb('xecancel'));
 check('cancelling posts nothing', r.hasSave === false);
@@ -822,10 +862,242 @@ sheetRows = SHEET;
 run(msg('/start', EXPUSER)); run(cb('choice_paid', EXPUSER)); run(msg('77777', EXPUSER));
 sheetRows = null;
 run(msg('300', EXPUSER));
-r = run(cb('xpay_0', EXPUSER));
+r = run(cb('xpay_cash', EXPUSER));
 check('cashier saves immediately, no checkout question', r.hasSave === true);
 check('cashier never touches عدد الليالي', !('عدد الليالي' in r.save.fields),
   Object.keys(r.save.fields));
+
+// ─── /undo ────────────────────────────────────────────────────────────────────
+
+section('undo: puts an edit back');
+resetSession();
+sheetRows = SHEET;
+run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));   // paid = 1200
+sheetRows = null;
+run(cb('ef_paid')); run(msg('300')); run(cb('xpay_cash')); run(cb('xleft_no'));
+r = run(cb('xedone'));
+check('the save carries a pre-image', Boolean(r.save.undo), r.save);
+check('the pre-image holds the OLD values',
+  r.save.undo.before['اجمالي ما تم دفعه'] === 1200 &&
+  r.save.undo.before['طريقة الدفع'] === 'كاش',
+  r.save.undo.before);
+const undoRec = r.save.undo;
+clearSession();                                   // the write succeeded
+
+r = run(msg('/undo'));
+check('undo asks for confirmation', r.reply.text.startsWith('↩️ *تراجع عن آخر تعديل؟*'),
+  r.reply.text);
+check('it shows the reversal direction', r.reply.text.includes('اجمالي ما تم دفعه: 1500 ← 1200'),
+  r.reply.text);
+r = run(cb('undo_no'));
+check('declining writes nothing', r.hasSave === false);
+
+/** Re-park a known record, as "Clear Session" would have left it. */
+function parkUndo(rec) {
+  sessionRow = { chat_id: '999', state: '', updated_at: Date.now(),
+    data: JSON.stringify({ lastWrite: rec, lastAppend: !rec }) };
+}
+parkUndo(undoRec);
+run(msg('/undo'));
+r = run(cb('undo_yes'));
+check('undo writes', r.hasSave === true);
+check('it targets the same row', r.save.row === 3, r.save.row);
+check('it restores the old values',
+  r.save.fields['اجمالي ما تم دفعه'] === 1200 && r.save.fields['طريقة الدفع'] === 'كاش',
+  r.save.fields);
+check('an undo cannot itself be undone', r.save.undo === undefined, r.save.undo);
+check('the group is told', r.save.groupText.includes('↩️ *تراجع عن تعديل*'), r.save.groupText);
+
+section('undo: window, absence, and appends');
+sessionRow = { chat_id: '999', state: '', updated_at: Date.now(),
+  data: JSON.stringify({ lastWrite: null, lastAppend: false }) };
+r = run(msg('/undo'));
+check('nothing to undo', r.reply.text === 'لا يوجد تعديل يمكن التراجع عنه.', r.reply.text);
+
+sessionRow = { chat_id: '999', state: '', updated_at: Date.now(),
+  data: JSON.stringify({ lastWrite: null, lastAppend: true }) };
+r = run(msg('/undo'));
+check('a new booking says to use إلغاء الحجز instead',
+  r.reply.text.includes('التراجع متاح للتعديلات والدفعات فقط'), r.reply.text);
+
+sessionRow = { chat_id: '999', state: '', updated_at: Date.now(),
+  data: JSON.stringify({ lastWrite: { row: 3, at: Date.now() - 11 * 60 * 1000, before: {} } }) };
+r = run(msg('/undo'));
+check('past 10 minutes it is refused', r.reply.text.startsWith('⌛ انتهت مهلة التراجع'),
+  r.reply.text);
+
+// A blank cell is a value: undo must clear it again, not leave the new one.
+resetSession();
+sheetRows = [{ ...SHEET[1], 'ملاحظات': '' }];
+run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
+sheetRows = null;
+run(cb('ef_notes'));
+run(msg('وصل متأخر'));
+r = run(cb('ef_done'));
+check('a previously blank cell is recorded as empty, not skipped',
+  'ملاحظات' in r.save.undo.before && r.save.undo.before['ملاحظات'] === '',
+  r.save.undo.before);
+clearSession();
+run(msg('/undo'));
+r = run(cb('undo_yes'));
+check('and undo blanks it again', r.save.fields['ملاحظات'] === '', r.save.fields);
+
+// ─── Double-tap protection on every save path ─────────────────────────────────
+
+/** Walk a fresh booking up to the confirm screen. */
+function bookingToConfirm(apt = 'ar_0_1', arrival = 'cal_day_2026_09_10', nights = 'nights_3') {
+  resetSession();
+  run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+  run(msg('ID1')); run(msg('محمد علي')); run(cb('bt_external')); run(msg('0100'));
+  run(cb(apt)); run(cb(nights)); run(cb(arrival));
+  run(msg('5000')); run(cb('pay_cash')); run(msg('1000'));
+  return run(cb('notes_skip'));
+}
+
+section('double tap: booking');
+bookingToConfirm();
+r = run(cb('save'));
+check('first tap saves', r.hasSave === true);
+r = run(cb('save'));
+check('second tap writes nothing', r.hasSave === false);
+
+section('double tap: cancelling a booking');
+resetSession();
+sheetRows = SHEET;
+run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
+run(cb('ef_delete'));
+r = run(cb('edel_yes'));
+check('first tap cancels', r.hasSave === true && r.save.flow === 'cancel');
+r = run(cb('edel_yes'));
+check('second tap writes nothing', r.hasSave === false);
+sheetRows = null;
+
+section('double tap: an edit');
+resetSession();
+sheetRows = SHEET;
+run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
+sheetRows = null;
+run(cb('ef_paid')); run(msg('100')); run(cb('xpay_cash')); run(cb('xleft_no'));
+r = run(cb('xedone'));
+check('first tap saves', r.hasSave === true);
+r = run(cb('xedone'));
+check('second tap writes nothing', r.hasSave === false);
+
+// ─── Availability ─────────────────────────────────────────────────────────────
+
+section('availability: an overlapping stay is flagged');
+// ذاكر حسين room 1, 2026-09-08 → 2026-09-12 (4 nights), plus a cancelled row and
+// an open-ended one in a different room.
+const OCCUPIED = [
+  { 'ID': '900', 'اسم المقيم': 'نزيل قديم', 'اسم الشقة': 'ذاكر حسين', 'رقم الغرفة': '1',
+    'تاريخ البداية': '2026-09-08', 'عدد الليالي': 4, 'ملاحظات': '' },
+  { 'ID': '901', 'اسم المقيم': 'ملغي', 'اسم الشقة': 'ذاكر حسين', 'رقم الغرفة': '2',
+    'تاريخ البداية': '2026-09-08', 'عدد الليالي': 30, 'ملاحظات': 'ملغي' },
+  { 'ID': '902', 'اسم المقيم': 'مفتوح', 'اسم الشقة': 'ذاكر حسين', 'رقم الغرفة': '3',
+    'تاريخ البداية': '2026-01-01', 'عدد الليالي': '=TODAY()-J4', 'ملاحظات': '' },
+];
+sheetRows = OCCUPIED;
+r = bookingToConfirm('ar_0_1', 'cal_day_2026_09_10', 'nights_3');
+check('the clash is shown on the summary', r.reply.text.includes('⚠️ *تعارض في الحجز*'),
+  r.reply.text);
+check('it names the guest already in the room', r.reply.text.includes('نزيل قديم'), r.reply.text);
+check('the save button changes to an explicit override',
+  r.reply.reply_markup.inline_keyboard[0][0].text === '⚠️ احفظ رغم التعارض',
+  r.reply.reply_markup.inline_keyboard[0][0].text);
+r = run(cb('save'));
+check('it warns but does not block', r.hasSave === true);
+
+section('availability: no clash for a free room or free dates');
+sheetRows = OCCUPIED;
+r = bookingToConfirm('ar_0_2', 'cal_day_2026_09_10', 'nights_3');   // room 2 = cancelled row
+check('a cancelled booking does not count as occupied',
+  !r.reply.text.includes('تعارض'), r.reply.text);
+check('normal save button', r.reply.reply_markup.inline_keyboard[0][0].text === '✅ حفظ');
+
+sheetRows = OCCUPIED;
+r = bookingToConfirm('ar_0_1', 'cal_day_2026_09_12', 'nights_3');   // starts as the other ends
+check('same-day turnover is not a clash', !r.reply.text.includes('تعارض'), r.reply.text);
+
+sheetRows = OCCUPIED;
+r = bookingToConfirm('ar_0_3', 'cal_day_2026_09_10', 'nights_3');   // room 3 = open-ended
+check('an open-ended stay blocks everything after it starts',
+  r.reply.text.includes('⚠️ *تعارض في الحجز*') && r.reply.text.includes('∞ مفتوح'),
+  r.reply.text);
+
+sheetRows = OCCUPIED;
+r = bookingToConfirm('ar_1_1', 'cal_day_2026_09_10', 'nights_3');   // a different apartment
+check('the same room number in another apartment is fine',
+  !r.reply.text.includes('تعارض'), r.reply.text);
+sheetRows = null;
+
+// ─── Stable callback data + the apartment registry ────────────────────────────
+
+section('callbacks: values are keyed, not positional');
+resetSession();
+run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+run(msg('ID1')); run(msg('محمد علي'));
+r = run(msg('x'));                                // not a callback → btype grid still up
+resetSession();
+run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+run(msg('ID1'));
+r = run(msg('محمد علي'));
+check('btype buttons carry names, not indexes',
+  r.reply.reply_markup.inline_keyboard[0].map(b => b.callback_data).join() ===
+  'bt_external,bt_booking', r.reply.reply_markup.inline_keyboard[0]);
+r = run(cb('bt_9999'));
+check('an unknown btype key is ignored, not saved as undefined', r.hasReply === false);
+run(cb('bt_external'));
+run(msg('0100'));
+r = run(cb('ar_0_1'));
+run(cb('nights_2')); run(cb('cal_day_2026_09_01')); run(msg('100'));
+check('payment buttons carry names',
+  r.hasReply === true);
+r = run(msg('100'));
+resetSession();
+run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+run(msg('ID1')); run(msg('محمد علي')); run(cb('bt_external')); run(msg('0100'));
+run(cb('ar_0_1')); run(cb('nights_2')); run(cb('cal_day_2026_09_01'));
+r = run(msg('5000'));
+check('payment keyboard is keyed',
+  r.reply.reply_markup.inline_keyboard.flat().map(b => b.callback_data).join() ===
+  'pay_cash,pay_instapay,pay_airbnb,pay_vcash,pay_unpaid,pay_eur,pay_usd',
+  r.reply.reply_markup.inline_keyboard);
+r = run(cb('pay_nonsense'));
+check('an unknown payment key is ignored', r.hasReply === false);
+r = run(cb('pay_unpaid'));
+check('غير مدفوع still skips the paid step by key, not by string compare',
+  r.reply.text.startsWith('📝 ملاحظات'), r.reply.text);
+
+section('registry: apartments and rooms come from الإتاحة');
+resetSession();
+run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+run(msg('ID1')); run(msg('محمد علي')); run(cb('bt_external'));
+r = run(msg('0100'));
+const grid_ = r.reply.reply_markup.inline_keyboard;
+check('six apartments offered', grid_.filter(row => row[0].callback_data === 'ar_hdr').length === 6);
+check('ذاكر حسين offers 5 rooms', grid_[1].length === 5, grid_[1].map(b => b.text));
+check('انبي 3 offers 4 rooms, not the old hardcoded 5', grid_[5].length === 4,
+  grid_[5].map(b => b.text));
+check('room 5 in انبي 3 is not even offered',
+  !grid_[5].some(b => b.callback_data === 'ar_2_5'), grid_[5].map(b => b.callback_data));
+r = run(cb('ar_2_5'));                            // a room that does not exist
+check('a tap for a non-existent room is refused', r.hasReply === false);
+r = run(cb('ar_2_4'));
+check('a real room is accepted', r.reply.text.startsWith('🌙 عدد الليالي'), r.reply.text);
+
+section('registry: a failed read falls back rather than blocking a booking');
+locationRows = null;                              // the Sheets read throws
+resetSession();
+run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+run(msg('ID1')); run(msg('محمد علي')); run(cb('bt_external'));
+r = run(msg('0100'));
+check('the apartment grid is still drawn',
+  r.reply.reply_markup.inline_keyboard.filter(x => x[0].callback_data === 'ar_hdr').length === 6,
+  r.reply.text);
+r = run(cb('ar_0_1'));
+check('and the booking can still proceed', r.reply.text.startsWith('🌙 عدد الليالي'), r.reply.text);
+locationRows = Object.entries(REAL_ROOMS).flatMap(([apt, n]) =>
+  Array.from({ length: n }, (_, i) => ({ 'الشقة': apt, 'الغرفة': String(i + 1) })));
 
 // ─── Free text vs. Markdown ───────────────────────────────────────────────────
 
@@ -844,7 +1116,7 @@ run(msg('E_1', EXPUSER));                       // expense number with an unders
 run(msg('كهرباء 50_60 *عاجل*', EXPUSER));       // free-text item
 run(msg('120', EXPUSER));
 run(cb('eapt_none', EXPUSER));
-run(cb('epay_0', EXPUSER));                     // كاش → no receipt
+run(cb('epay_cash', EXPUSER));                     // كاش → no receipt
 r = run(msg('راجع الفاتورة_2', EXPUSER));       // free-text notes
 check('expense confirm survives Markdown metacharacters', balanced(r.reply.text), r.reply.text);
 check('the item is escaped, not stripped', r.reply.text.includes('كهرباء 50\\_60 \\*عاجل\\*'),
@@ -867,7 +1139,7 @@ run(cb('ar_0_1'));
 run(cb('nights_2'));
 run(cb('cal_day_2026_08_04'));
 run(msg('5000'));
-run(cb('pay_0'));
+run(cb('pay_cash'));
 run(msg('1000'));
 r = run(msg('ملاحظة_مهمة *جدا*'));
 check('booking confirm survives Markdown metacharacters', balanced(r.reply.text), r.reply.text);
@@ -903,7 +1175,7 @@ function editAs(who) {
   sheetRows = null;
   run(cb('ef_paid', who));
   run(msg('100', who));
-  run(cb('xpay_0', who));
+  run(cb('xpay_cash', who));
   run(cb('xleft_no', who));          // recording a payment now asks about checkout
   return run(cb('xedone', who));
 }

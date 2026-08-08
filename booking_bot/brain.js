@@ -44,26 +44,52 @@ const TZ = CFG.TIMEZONE || 'Africa/Cairo';
 
 // ─── Option lists (indexes are baked into callback_data — never reorder) ──────
 
-const BTYPE_OPTS = ['خارجي', 'بوكينج'];
-
-const APARTMENTS = [
-  'ذاكر حسين', 'احمد فهيم', 'انبي 3', 'انبي 2', 'ابو حديد 11', 'عبدالله العربي',
+// callback_data carries a STABLE KEY, never a list position. The old `pay_0`
+// form meant "whatever is 3rd in the array today", so reordering a list silently
+// changed what an in-flight tap saved. Keys are bound to a value for good; the
+// display order above them is free to change.
+const BTYPE_OPTS = [
+  { key: 'external', label: 'خارجي' },
+  { key: 'booking', label: 'بوكينج' },
 ];
 
-const ROOMS_PER_APARTMENT = 5;
-
-// 2026-08-06: dropped 'فودافون كاش علي رقم شاكر', 'علي شاكر' and 'وي باي'. That
-// shifts the indexes of everything after 'فودافون كاش', which callback_data
-// encodes — safe only because it was done while the bot was unpublished and no
-// conversation was in flight. Append-only from here.
 const PAYMENTS = [
-  'كاش', 'انستاباي', 'Airbnb', 'فودافون كاش', 'غير مدفوع', 'يورو', 'دولار',
+  { key: 'cash', label: 'كاش' },
+  { key: 'instapay', label: 'انستاباي' },
+  { key: 'airbnb', label: 'Airbnb' },
+  { key: 'vcash', label: 'فودافون كاش' },
+  { key: 'unpaid', label: 'غير مدفوع' },
+  { key: 'eur', label: 'يورو' },
+  { key: 'usd', label: 'دولار' },
 ];
 
-const EXP_PAYMENTS = ['كاش', 'انستاباي', 'فودافون كاش'];
+const EXP_PAYMENTS = ['cash', 'instapay', 'vcash'];
 
 /** Payment methods that produce a transfer receipt worth attaching. */
-const RECEIPT_PAYMENTS = ['انستاباي', 'فودافون كاش'];
+const RECEIPT_PAYMENT_KEYS = ['instapay', 'vcash'];
+
+const CASH_KEY = 'cash';
+const UNPAID_KEY = 'unpaid';
+
+function payByKey(key) { return PAYMENTS.find(p => p.key === key) || null; }
+function payLabel(key) { const p = payByKey(key); return p ? p.label : ''; }
+
+/**
+ * Apartments and their rooms come from the الإتاحة tab (one row per
+ * apartment+room), so opening a property or changing a room count is a sheet
+ * edit rather than a deploy. This list is only the fallback for a failed read —
+ * a Sheets hiccup must not stop the bot taking a booking. Room counts here match
+ * الإتاحة as of 2026-08-08; the old code offered 5 rooms everywhere, which
+ * invented a room 5 in four of the six apartments.
+ */
+const FALLBACK_REGISTRY = [
+  { apartment: 'ذاكر حسين', rooms: ['1', '2', '3', '4', '5'] },
+  { apartment: 'احمد فهيم', rooms: ['1', '2', '3', '4', '5'] },
+  { apartment: 'انبي 3', rooms: ['1', '2', '3', '4'] },
+  { apartment: 'انبي 2', rooms: ['1', '2', '3', '4'] },
+  { apartment: 'ابو حديد 11', rooms: ['1', '2', '3', '4'] },
+  { apartment: 'عبدالله العربي', rooms: ['1', '2', '3', '4'] },
+];
 
 // Fields an already-saved booking may be edited through. Money + stay details
 // only: the identity columns (اسم المقيم, ID, بوكنج ID, رقم الهاتف, نوع الحجز)
@@ -245,6 +271,24 @@ const S = {
     '💳 الدفع: {payment}\n' +
     '📎 الإيصال: {receipt}\n' +
     '👤 بواسطة: {actor}',
+  // ── Undo ──
+  undo_none: 'لا يوجد تعديل يمكن التراجع عنه.',
+  undo_expired: '⌛ انتهت مهلة التراجع (10 دقائق). استخدم تعديل حجز.',
+  undo_not_supported:
+    'التراجع متاح للتعديلات والدفعات فقط.\nلإلغاء حجز جديد استخدم *تعديل حجز* ← 🗑️ إلغاء الحجز.',
+  undo_confirm: '↩️ *تراجع عن آخر تعديل؟*\n\n{changes}',
+  undo_saved: '✅ تم التراجع وإرساله للجروب.\nأرسل /start من جديد.',
+  undo_saved_no_group: '✅ تم التراجع.\n⚠️ تعذّر الإرسال للجروب.\nأرسل /start من جديد.',
+  undo_group_msg:
+    '↩️ *تراجع عن تعديل*\n\n' +
+    '👤 المقيم: {name}\n' +
+    '🆔 ID: {private_id}\n\n' +
+    '{changes}\n\n' +
+    '👤 بواسطة: {actor}',
+  conflict_warning:
+    '⚠️ *تعارض في الحجز* — {room} محجوزة في نفس الفترة:\n{list}',
+  conflict_line: '• {name}: {arrival} ← {departure}',
+  btn_confirm_anyway: '⚠️ احفظ رغم التعارض',
   btn_confirm: '✅ حفظ',
   btn_cancel: '❌ إلغاء',
   saved: '✅ تم حفظ الحجز وإرساله للجروب.\nأرسل /start لإدخال حجز جديد.',
@@ -291,15 +335,33 @@ function numKeyboard(lo, hi, prefix, extra, perRow) {
   return { inline_keyboard: rows };
 }
 
-function aptRoomKb() {
+/** A grid over [{ key, label }] options, keyed rather than positional. */
+function keyGrid(options, prefix, perRow) {
+  perRow = perRow || 2;
   const rows = [];
-  APARTMENTS.forEach((apt, i) => {
-    rows.push([{ text: `🏠 ${apt}`, callback_data: 'ar_hdr' }]);
-    const nums = [];
-    for (let n = 1; n <= ROOMS_PER_APARTMENT; n++) {
-      nums.push({ text: String(n), callback_data: `ar_${i}_${n}` });
-    }
-    rows.push(nums);
+  for (let i = 0; i < options.length; i += perRow) {
+    rows.push(options.slice(i, i + perRow).map(o => ({
+      text: o.label, callback_data: `${prefix}${o.key}`,
+    })));
+  }
+  return { inline_keyboard: rows };
+}
+
+/**
+ * Apartment + room grid over the registry loaded this turn.
+ *
+ * The callback carries a position into `reg` and `reg` is written to the session
+ * alongside it, so the tap is resolved against exactly the list that was shown.
+ * A sheet edit between the keyboard being drawn and the button being pressed
+ * cannot shift the meaning — which is the whole failure mode a global index has.
+ */
+function aptRoomKb(reg) {
+  const rows = [];
+  reg.forEach((entry, i) => {
+    rows.push([{ text: `🏠 ${entry.apartment}`, callback_data: 'ar_hdr' }]);
+    rows.push(entry.rooms.map(room => ({
+      text: String(room), callback_data: `ar_${i}_${room}`,
+    })));
   });
   return { inline_keyboard: rows };
 }
@@ -480,9 +542,9 @@ const session = readSession(loadedRow);
 const d = session ? session.data : {};
 const state = session ? session.state : null;
 
-// "Read Bookings For Edit" only runs when the loaded state is EDIT_FIND, so on
-// every other turn the node is unexecuted and referencing it throws. That is the
-// point — the lookup costs a Sheets call only on the one turn that needs it.
+// "Read Bookings For Edit" only runs on the turns that need it, so on every
+// other turn the node is unexecuted and referencing it throws. That is the
+// point — the lookup costs a Sheets call only when it is actually used.
 function bookingRows() {
   try {
     return $('Read Bookings For Edit').all().map((i, idx) => ({
@@ -495,6 +557,80 @@ function bookingRows() {
   } catch (e) {
     return [];
   }
+}
+
+/**
+ * Apartments and rooms as the الإتاحة tab has them: one row per apartment+room
+ * in columns A and B, which is exactly the registry this bot needs. Same gated
+ * pattern as bookingRows — unexecuted on turns that draw no apartment keyboard.
+ *
+ * Falls back to the baked-in list rather than returning nothing: an empty grid
+ * would leave a receptionist unable to finish a booking over a transient read.
+ */
+function locationRegistry() {
+  let rows = [];
+  try {
+    rows = $('Read Locations').all().map(i => i.json);
+  } catch (e) {
+    return FALLBACK_REGISTRY;
+  }
+  const byApartment = [];
+  const seen = {};
+  for (const rowJson of rows) {
+    // The tab has no header row in the read range, so the columns arrive under
+    // whatever n8n generated. Take the first two values positionally.
+    const vals = Object.keys(rowJson)
+      .filter(k => k !== 'row_number')
+      .map(k => rowJson[k]);
+    const apartment = String(vals[0] === undefined ? '' : vals[0]).trim();
+    const room = String(vals[1] === undefined ? '' : vals[1]).trim();
+    if (!apartment || !room) continue;
+    if (seen[apartment] === undefined) {
+      seen[apartment] = byApartment.length;
+      byApartment.push({ apartment, rooms: [] });
+    }
+    const entry = byApartment[seen[apartment]];
+    if (entry.rooms.indexOf(room) === -1) entry.rooms.push(room);
+  }
+  return byApartment.length ? byApartment : FALLBACK_REGISTRY;
+}
+
+/**
+ * Bookings that clash with a stay: same apartment, same room, overlapping dates.
+ *
+ * Cancelled rows are ignored, and a stay whose nights cell is a live formula is
+ * open-ended, so it runs to infinity and clashes with anything after its start.
+ * Half-open ranges — a departure and an arrival on the same day do not overlap,
+ * because that is a normal same-day turnover.
+ */
+function findConflicts(apartment, room, arrival, nights, isOpen, skipRow) {
+  const startA = arrival;
+  const endA = isOpen ? null : isoAddDays(arrival, nights);
+  const hits = [];
+  for (const x of bookingRows()) {
+    const j = x.json;
+    if (skipRow && x.row === skipRow) continue;
+    if (String(j['اسم الشقة'] || '').trim() !== String(apartment).trim()) continue;
+    if (String(j['رقم الغرفة'] || '').trim() !== String(room).trim()) continue;
+    if (String(j['ملاحظات'] || '').indexOf(t('del_note')) !== -1) continue;
+    const startB = String(j['تاريخ البداية'] || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startB)) continue;
+    const rawNights = j['عدد الليالي'];
+    const openB = String(rawNights === undefined ? '' : rawNights).trim().startsWith('=');
+    const nB = parseNum(rawNights);
+    const endB = openB || nB === null ? null : isoAddDays(startB, Math.trunc(nB));
+    // [startA, endA) ∩ [startB, endB) ≠ ∅, with null standing in for +∞.
+    const startsBeforeOtherEnds = endB === null || startA < endB;
+    const otherStartsBeforeThisEnds = endA === null || startB < endA;
+    if (startsBeforeOtherEnds && otherStartsBeforeThisEnds) {
+      hits.push({
+        name: j['اسم المقيم'] || t('empty'),
+        arrival: startB,
+        departure: endB === null ? t('infinity_label') : endB,
+      });
+    }
+  }
+  return hits;
 }
 
 // ─── Output builder ───────────────────────────────────────────────────────────
@@ -603,9 +739,26 @@ function askArrival() {
 }
 function showConfirm() {
   const dv = derived(d);
-  reply(t('confirm_summary', summaryVars(d, dv)), {
+  // The one turn where the room is known along with the dates, so it is the only
+  // place a clash can be caught before the row is written.
+  const clashes = findConflicts(d.apartment, d.room, d.arrival_date, d.nights, d.infinity);
+  d.conflict = clashes.length > 0;
+  let body = t('confirm_summary', summaryVars(d, dv));
+  if (d.conflict) {
+    body += '\n\n' + t('conflict_warning', {
+      room: `${mdEscape(d.apartment)} — ${mdEscape(String(d.room))}`,
+      list: clashes
+        .map(c => t('conflict_line', {
+          name: mdEscape(c.name), arrival: c.arrival, departure: c.departure,
+        }))
+        .join('\n'),
+    });
+  }
+  reply(body, {
     inline_keyboard: [
-      [{ text: t('btn_confirm'), callback_data: 'save' }],
+      // A conflict does not block the save — a receptionist standing in front of
+      // a guest knows things the sheet does not. It does make them say so.
+      [{ text: d.conflict ? t('btn_confirm_anyway') : t('btn_confirm'), callback_data: 'save' }],
       [{ text: t('btn_cancel'), callback_data: 'cancel' }],
     ],
   }, true);
@@ -645,6 +798,20 @@ function paidSoFar(dd) {
   const col = 'اجمالي ما تم دفعه';
   if (dd.editNew && dd.editNew[col] !== undefined) return Number(dd.editNew[col]) || 0;
   return parseNum(dd.editOrig ? dd.editOrig[col] : 0) || 0;
+}
+
+/**
+ * True when a save was already fired for this session moments ago.
+ *
+ * The session is deliberately kept until the write succeeds, so a failed write
+ * leaves the button usable — which is also what lets an impatient double tap
+ * write the row twice. Swallow the second tap for a minute; after that the user
+ * is retrying a real failure and is let through.
+ */
+const SAVE_LOCK_MS = 60 * 1000;
+
+function saveLocked(dd) {
+  return Boolean(dd.savingAt) && (Date.now() - Number(dd.savingAt)) < SAVE_LOCK_MS;
 }
 
 /** Record a change, keeping the original value for the group diff. */
@@ -727,6 +894,25 @@ function showValue(v) {
  * (J + I) so it is never written — it is shown here because it is what the person
  * approving actually wants to see.
  */
+/**
+ * Resolve an `ar_<i>_<room>` tap against the registry that was offered.
+ *
+ * `dd.reg` is what the keyboard was drawn from, so the index means the same
+ * thing at tap time as it did at draw time. The FALLBACK_REGISTRY branch only
+ * catches conversations that were mid-flow when this code deployed and so carry
+ * no `reg`; without it those taps would silently do nothing.
+ */
+function pickAptRoom(dd, cb) {
+  const m = /^ar_(\d+)_(.+)$/.exec(cb || '');
+  if (!m) return null;
+  const reg = (dd.reg && dd.reg.length) ? dd.reg : FALLBACK_REGISTRY;
+  const entry = reg[Number(m[1])];
+  if (!entry) return null;
+  const room = String(m[2]);
+  if (entry.rooms.indexOf(room) === -1) return null;
+  return { apartment: entry.apartment, room };
+}
+
 function changeLines(dd) {
   const out_ = [];
   for (const col of Object.keys(dd.editNew || {})) {
@@ -736,6 +922,43 @@ function changeLines(dd) {
   return out_.join('\n');
 }
 
+const UNDO_WINDOW_MS = 10 * 60 * 1000;
+
+/** 'المدفوع: 2100 ← 1200' — the reverse of the diff that produced this record. */
+function undoLines(rec) {
+  return Object.keys(rec.before || {})
+    .map(col => `${col}: ${showValue((rec.after || {})[col])} ← ${showValue(rec.before[col])}`)
+    .join('\n');
+}
+
+/**
+ * The pre-image of an edit: the sheet's value for every column about to change.
+ *
+ * A missing column is restored as an empty string rather than being skipped —
+ * "this cell was blank before" is a value, and skipping it would leave the new
+ * value in place on undo.
+ *
+ * Deliberately not produced for booking/expense appends. Blanking an appended
+ * row would leave a gap, and the next write picks its row with `filled + 2`, so
+ * the row after it would be overwritten. Cancelling a booking is the right tool
+ * there, and it has its own flow.
+ */
+function undoRecord(dd) {
+  const before = {};
+  for (const col of Object.keys(dd.editNew || {})) {
+    const v = dd.editOrig ? dd.editOrig[col] : undefined;
+    before[col] = v === undefined ? '' : v;
+  }
+  return {
+    row: dd.editRow,
+    at: Date.now(),
+    name: dd.editName || '',
+    privateId: dd.editPrivateId || '',
+    before,
+    after: dd.editNew || {},
+  };
+}
+
 /**
  * Hand the changed columns to the sheet writer. Shared by the admin field menu
  * ("تم") and by the cashier's add-a-payment flow, which differ only in what the
@@ -743,10 +966,16 @@ function changeLines(dd) {
  */
 function commitEdit(dd) {
   const paidCol = 'اجمالي ما تم دفعه';
+  if (saveLocked(dd)) return;            // a second tap on the same save
+  dd.savingAt = Date.now();
+  out.sessionData = JSON.stringify(dd);  // the lock must outlive this turn
   out.hasSave = true;
   out.save = {
     flow: 'edit',
     row: dd.editRow,                 // from the lookup, never computed
+    // The pre-image of exactly the columns being changed, so /undo can put them
+    // back. Persisted by "Clear Session" once the write has actually landed.
+    undo: undoRecord(dd),
     fields: dd.editNew,              // only the columns that actually changed
     receiptFileId: dd.editReceipt || '',
     groupChatId: CFG.GROUP_CHAT_ID,
@@ -815,12 +1044,69 @@ if (text === '/cancel' || (text || '').startsWith('/cancel@')) {
   return [{ json: out }];
 }
 
+// ─── /undo ────────────────────────────────────────────────────────────────────
+// "Clear Session" parks the last edit's pre-image on the (now stateless) session
+// row, so the record survives the write that produced it. Undo restores those
+// columns and nothing else.
+
+if (text === '/undo' || (text || '').startsWith('/undo@')) {
+  let parked = {};
+  try { parked = JSON.parse(loadedRow.data || '{}'); } catch (e) { parked = {}; }
+  const rec = parked.lastWrite;
+  if (!rec || !rec.row) { reply(t(parked.lastAppend ? 'undo_not_supported' : 'undo_none'), null, true); }
+  else if (Date.now() - Number(rec.at || 0) > UNDO_WINDOW_MS) { reply(t('undo_expired')); }
+  else {
+    out.sessionState = 'UNDO_CONFIRM';
+    out.sessionData = JSON.stringify({ undo: rec });
+    reply(t('undo_confirm', { changes: undoLines(rec) }), {
+      inline_keyboard: [
+        [{ text: t('btn_confirm'), callback_data: 'undo_yes' }],
+        [{ text: t('btn_cancel'), callback_data: 'undo_no' }],
+      ],
+    }, true);
+  }
+  return [{ json: out }];
+}
+
 // No active conversation and not a command → stay silent (matches PTB).
 if (!state) return [{ json: out }];
 
 // ─── State machine ────────────────────────────────────────────────────────────
 
 switch (state) {
+
+  case 'UNDO_CONFIRM': {
+    if (cbData === 'undo_no') { endSession(); reply(t('cancelled')); break; }
+    if (cbData !== 'undo_yes') break;
+    const rec = d.undo || {};
+    if (!rec.row) { endSession(); reply(t('undo_none')); break; }
+    if (Date.now() - Number(rec.at || 0) > UNDO_WINDOW_MS) {
+      endSession(); reply(t('undo_expired')); break;
+    }
+    if (saveLocked(d)) break;
+    d.savingAt = Date.now();
+    setState('UNDO_CONFIRM', d);
+    out.hasSave = true;
+    out.save = {
+      flow: 'edit',                    // same writer: row + named columns
+      row: rec.row,
+      fields: rec.before,              // put the old values back
+      // No `undo` record: undoing an undo would ping-pong, and the sheet history
+      // is the right tool past this point.
+      receiptFileId: '',
+      groupChatId: CFG.GROUP_CHAT_ID,
+      groupText: t('undo_group_msg', {
+        name: mdEscape(rec.name || t('empty')),
+        private_id: mdEscape(rec.privateId || t('empty')),
+        changes: undoLines(rec),
+        actor,
+      }),
+      savedText: t('undo_saved'),
+      savedNoGroupText: t('undo_saved_no_group'),
+      errorText: t('error'),
+    };
+    break;
+  }
 
   // ── Router ────────────────────────────────────────────────────────────────
   case 'CHOICE':
@@ -849,7 +1135,10 @@ switch (state) {
     const v = parseNum(text);
     if (v === null || v < 0) { reply(t('num_error')); break; }
     d.exp_amount = v;
-    const kb = grid(APARTMENTS, 'eapt_');
+    // Same session-scoped list trick as the booking grid: what was offered is
+    // stored, and the callback indexes into that rather than into a live read.
+    d.aptList = locationRegistry().map(e => e.apartment);
+    const kb = grid(d.aptList, 'eapt_');
     kb.inline_keyboard.push([{ text: t('btn_apt_none'), callback_data: 'eapt_none' }]);
     reply(t('exp_ask_apartment'), kb);
     setState('EXP_APT', d);
@@ -859,16 +1148,17 @@ switch (state) {
   case 'EXP_APT': {
     if (!cbData || !cbData.startsWith('eapt_')) break;
     const suffix = cbData.slice('eapt_'.length);
-    d.exp_apartment = suffix === 'none' ? '' : APARTMENTS[Number(suffix)];
-    reply(t('exp_ask_payment'), grid(EXP_PAYMENTS, 'epay_'));
+    d.exp_apartment = suffix === 'none' ? '' : (d.aptList || [])[Number(suffix)] || '';
+    reply(t('exp_ask_payment'), keyGrid(EXP_PAYMENTS.map(k => payByKey(k)).filter(Boolean), 'epay_'));
     setState('EXP_PAY', d);
     break;
   }
 
   case 'EXP_PAY':
     if (!cbData || !cbData.startsWith('epay_')) break;
-    d.exp_payment = EXP_PAYMENTS[Number(cbData.slice('epay_'.length))];
-    if (RECEIPT_PAYMENTS.includes(d.exp_payment)) {        // transfer → offer receipt
+    d.exp_payment = payLabel(cbData.slice('epay_'.length));
+    if (!d.exp_payment) break;
+    if (RECEIPT_PAYMENT_KEYS.indexOf(cbData.slice('epay_'.length)) !== -1) {
       reply(t('ask_receipt'), skipKb('ereceipt_skip'));
       setState('EXP_RECEIPT', d);
       break;
@@ -893,6 +1183,9 @@ switch (state) {
   case 'EXP_CONFIRM': {
     if (cbData === 'ecancel') { endSession(); reply(t('cancelled')); break; }
     if (cbData !== 'esave') break;
+    if (saveLocked(d)) break;
+    d.savingAt = Date.now();
+    setState('EXP_CONFIRM', d);          // keep the state, persist the lock
     const now = nowStamp();
     out.hasSave = true;
     out.save = {
@@ -950,29 +1243,32 @@ switch (state) {
     if (nm === null) { reply(t('name_error')); break; }
     d.name = nm;
     if (d.booking_id) { d.btype = 'بوكينج'; askPhone(); }
-    else { reply(t('ask_btype'), grid(BTYPE_OPTS, 'bt_')); setState('BTYPE', d); }
+    else { reply(t('ask_btype'), keyGrid(BTYPE_OPTS, 'bt_')); setState('BTYPE', d); }
     break;
   }
 
   case 'BTYPE':
     if (!cbData || !cbData.startsWith('bt_')) break;
-    d.btype = BTYPE_OPTS[Number(cbData.slice('bt_'.length))];
+    const bt = BTYPE_OPTS.find(o => o.key === cbData.slice('bt_'.length));
+    if (!bt) break;
+    d.btype = bt.label;
     askPhone();
     break;
 
   case 'PHONE':
     if (cq) break;
     d.phone = text.trim();
-    reply(t('ask_apt_room'), aptRoomKb());
+    d.reg = locationRegistry();
+    reply(t('ask_apt_room'), aptRoomKb(d.reg));
     setState('APT_ROOM', d);
     break;
 
   case 'APT_ROOM': {
     if (cbData === 'ar_hdr') break;                       // header tap → no-op
-    const m = /^ar_(\d+)_(\d+)$/.exec(cbData || '');
-    if (!m) break;
-    d.apartment = APARTMENTS[Number(m[1])];
-    d.room = m[2];
+    const picked = pickAptRoom(d, cbData);
+    if (!picked) break;
+    d.apartment = picked.apartment;
+    d.room = picked.room;
     reply(t('ask_nights'), numKeyboard(1, 30, 'nights_',
       [{ text: t('btn_infinity'), callback_data: 'nights_inf' }], 5));
     setState('NIGHTS', d);
@@ -1026,15 +1322,18 @@ switch (state) {
     const v = parseNum(text);
     if (v === null || v < 0) { reply(t('num_error')); break; }
     d.total = v;
-    reply(t('ask_payment'), grid(PAYMENTS, 'pay_'));
+    reply(t('ask_payment'), keyGrid(PAYMENTS, 'pay_'));
     setState('PAYMENT', d);
     break;
   }
 
   case 'PAYMENT':
     if (!cbData || !cbData.startsWith('pay_')) break;
-    d.payment = PAYMENTS[Number(cbData.slice('pay_'.length))];
-    if (d.payment === 'غير مدفوع') {                       // nothing paid → skip PAID
+    const payKey = cbData.slice('pay_'.length);
+    if (!payByKey(payKey)) break;
+    d.paymentKey = payKey;
+    d.payment = payLabel(payKey);
+    if (d.paymentKey === UNPAID_KEY) {                     // nothing paid → skip PAID
       d.paid = 0;
       reply(t('ask_notes'), skipKb('notes_skip'));
       setState('NOTES', d);
@@ -1059,7 +1358,7 @@ switch (state) {
     const v = parseNum(text);
     if (v === null || v < 0) { reply(t('num_error')); break; }
     d.paid = v;
-    if (RECEIPT_PAYMENTS.includes(d.payment)) {            // transfer → offer receipt
+    if (RECEIPT_PAYMENT_KEYS.indexOf(d.paymentKey) !== -1) {  // transfer → offer receipt
       reply(t('ask_receipt'), skipKb('receipt_skip'));
       setState('RECEIPT', d);
       break;
@@ -1077,6 +1376,9 @@ switch (state) {
   case 'CONFIRM': {
     if (cbData === 'cancel') { endSession(); reply(t('cancelled')); break; }
     if (cbData !== 'save') break;
+    if (saveLocked(d)) break;
+    d.savingAt = Date.now();
+    setState('CONFIRM', d);              // keep the state, persist the lock
     const dv = derived(d);
 
     // Column I (عدد الليالي): open-ended → live formula; else the integer.
@@ -1191,7 +1493,7 @@ switch (state) {
         reply(t('edit_ask_paid_add', { current: num(paidSoFar(d)) }));
         setState('EDIT_PAID', d);
         break;
-      case 'ef_payment': reply(t('ask_payment'), grid(PAYMENTS, 'xpay_')); setState('EDIT_PAYMENT', d); break;
+      case 'ef_payment': reply(t('ask_payment'), keyGrid(PAYMENTS, 'xpay_')); setState('EDIT_PAYMENT', d); break;
       case 'ef_nights':
         reply(t('ask_nights'), numKeyboard(1, 30, 'xnights_',
           [{ text: t('btn_infinity'), callback_data: 'xnights_inf' }], 5));
@@ -1203,7 +1505,11 @@ switch (state) {
         setState('EDIT_ARRIVAL', d);
         break;
       }
-      case 'ef_aptroom': reply(t('ask_apt_room'), aptRoomKb()); setState('EDIT_APT_ROOM', d); break;
+      case 'ef_aptroom':
+        d.reg = locationRegistry();
+        reply(t('ask_apt_room'), aptRoomKb(d.reg));
+        setState('EDIT_APT_ROOM', d);
+        break;
       case 'ef_notes':   reply(t('ask_notes'), skipKb('xnotes_skip')); setState('EDIT_NOTES', d); break;
       default: break;
     }
@@ -1235,19 +1541,23 @@ switch (state) {
     d.paidAdded = num(v);               // for the cashier's group message
     d.paidTouched = true;               // admins get the checkout question after this
     editSet(d, 'اجمالي ما تم دفعه', num(total));
-    reply(t('ask_payment'), grid(PAYMENTS, 'xpay_'));
+    reply(t('ask_payment'), keyGrid(PAYMENTS, 'xpay_'));
     setState('EDIT_PAYMENT', d);
     break;
   }
 
   case 'EDIT_PAYMENT': {
     if (!cbData || !cbData.startsWith('xpay_')) break;
-    const pay = PAYMENTS[Number(cbData.slice('xpay_'.length))];
+    const payKey = cbData.slice('xpay_'.length);
+    const pay = payLabel(payKey);
+    if (!pay) break;
     editSet(d, 'طريقة الدفع', pay);
     // Admins attach a receipt for the two transfer methods and may skip it. The
     // cashier is recording someone else's money, so anything that is not cash
     // needs proof, and there is no skip.
-    const needsReceipt = d.paidOnly ? pay !== 'كاش' : RECEIPT_PAYMENTS.includes(pay);
+    const needsReceipt = d.paidOnly
+      ? payKey !== CASH_KEY
+      : RECEIPT_PAYMENT_KEYS.indexOf(payKey) !== -1;
     if (needsReceipt) {
       if (d.paidOnly) reply(t('paid_ask_receipt'));
       else reply(t('ask_receipt'), skipKb('xreceipt_skip'));
@@ -1364,10 +1674,10 @@ switch (state) {
 
   case 'EDIT_APT_ROOM': {
     if (cbData === 'ar_hdr') break;
-    const m = /^ar_(\d+)_(\d+)$/.exec(cbData || '');
-    if (!m) break;
-    editSet(d, 'اسم الشقة', APARTMENTS[Number(m[1])]);
-    editSet(d, 'رقم الغرفة', Number(m[2]));
+    const picked = pickAptRoom(d, cbData);
+    if (!picked) break;
+    editSet(d, 'اسم الشقة', picked.apartment);
+    editSet(d, 'رقم الغرفة', Number(picked.room));
     showEditMenu(d);
     break;
   }
@@ -1380,6 +1690,9 @@ switch (state) {
   case 'EDIT_DEL_CONFIRM': {
     if (cbData === 'edel_no') { showEditMenu(d); break; }
     if (cbData !== 'edel_yes') break;
+    if (saveLocked(d)) break;
+    d.savingAt = Date.now();
+    setState('EDIT_DEL_CONFIRM', d);
     const orig = d.editOrig || {};
     // Append rather than clobber, so an existing note is not lost.
     const prevNote = String(orig['ملاحظات'] || '').trim();
