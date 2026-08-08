@@ -42,6 +42,35 @@ E = dict(spent_at=0, item=1, amount=2, apartment=3, notes=4, payment=5,
 ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+# The project's direct host (db.<ref>.supabase.co) publishes an AAAA record only,
+# so it is unreachable from an IPv4-only network. The pooler is dual-stack, which
+# is why SUPABASE_DB_URL is rewritten onto it here rather than being used as-is.
+POOLER_HOST = "aws-1-eu-west-1.pooler.supabase.com"
+POOLER_PORT = 6543
+
+
+def connect_args():
+    """Connection kwargs, read from .env without importing dotenv."""
+    env = os.path.join(REPO, ".env")
+    url = ""
+    with open(env, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if line.strip().startswith("SUPABASE_DB_URL"):
+                url = line.split("=", 1)[1].strip().strip('"').strip("'")
+    if not url:
+        sys.exit("SUPABASE_DB_URL is not set — see supabase/README.md")
+    m = re.match(r"^postgresql://([^:]+):([^@]*)@db\.([^.]+)\.supabase\.co:\d+/(\w+)$", url)
+    if not m:
+        sys.exit("SUPABASE_DB_URL is not the direct-connection URI this expects")
+    _, pw, ref, db = m.groups()
+    return dict(host=POOLER_HOST, port=POOLER_PORT, user=f"postgres.{ref}",
+                password=pw, dbname=db,
+                # Transaction pooling shares connections between clients, so a
+                # named prepared statement would be executed on a connection that
+                # never prepared it.
+                prepare_threshold=None)
+
+
 def q(v):
     """Quote for SQL. None/'' become NULL rather than an empty string."""
     if v is None or v == "":
@@ -117,9 +146,32 @@ def load_bookings(sh):
             "nightly_rate": nightly_rate_of(cell(frow, B["total"])),
             "total_formula": (cell(frow, B["total"])
                               if str(cell(frow, B["total"])).startswith("=") else ""),
+            "segments": rate_segments(cell(frow, B["total"])),
             "cancelled": "ملغي" in cell(row, B["notes"]),
         })
     return out
+
+
+def rate_segments(total_formula):
+    """
+    Split `=940*2+650*8` into [(940, 2), (650, 8)] — rate and nights per segment.
+
+    A hand-typed total made of rate*nights terms is someone recording a stay that
+    changed partway through, usually because the guest moved room. The sheet has
+    nowhere to put that, so it ends up in the formula. Returns [] when the shape
+    is anything else.
+    """
+    body = str(total_formula or "").strip().lstrip("=")
+    if not body:
+        return []
+    terms = body.split("+")
+    out = []
+    for term in terms:
+        m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*\*\s*(\d+)\s*$", term)
+        if not m:
+            return []                    # not a clean rate*nights sum; leave it alone
+        out.append((m.group(1), int(m.group(2))))
+    return out if len(out) > 1 else []
 
 
 def nightly_rate_of(total_formula):
@@ -170,12 +222,13 @@ def build_sql(reg, bookings, expenses):
                         f"where a.name = {q(b['apartment'])} and r.number = {q(b['room'])})")
         out.append(
             "insert into bookings (sheet_row, booking_ref, guest_ref, guest_name, "
-            "booking_type, phone, room_id, apartment_name, room_number, arrival, nights, "
+            "booking_type, phone, room_id, apartment_name, room_number, arrival, nights, open_ended, "
             "nightly_rate, total, total_formula, paid, payment_method, notes, cancelled_at, "
             "source) values ("
             f"{b['sheet_row']}, {q(b['booking_ref'])}, {q(b['guest_ref'])}, {q(b['guest_name'])}, "
             f"{q(b['booking_type'])}, {q(b['phone'])}, {room_sql}, {q(b['apartment'])}, "
             f"{q(b['room'])}, {q(b['arrival'])}::date, {qnum(b['nights'])}, "
+            f"{'true' if b['is_open'] else 'false'}, "
             f"{qnum(b['nightly_rate'])}, {qnum(b['total'])}, {q(b['total_formula'])}, "
             f"coalesce({qnum(b['paid'])}, 0), "
             f"{q(b['payment'])}, {q(b['notes'])}, "
@@ -186,6 +239,7 @@ def build_sql(reg, bookings, expenses):
             "phone = excluded.phone, room_id = excluded.room_id, "
             "apartment_name = excluded.apartment_name, room_number = excluded.room_number, "
             "arrival = excluded.arrival, nights = excluded.nights, "
+            "open_ended = excluded.open_ended, "
             "nightly_rate = excluded.nightly_rate, total = excluded.total, "
             "total_formula = excluded.total_formula, "
             "paid = excluded.paid, payment_method = excluded.payment_method, "
@@ -206,6 +260,37 @@ def build_sql(reg, bookings, expenses):
             "amount = excluded.amount, apartment_name = excluded.apartment_name, "
             "notes = excluded.notes, payment_method = excluded.payment_method, "
             "responsible = excluded.responsible, spent_at = excluded.spent_at;")
+
+    out.append("")
+    out.append("-- stay segments, for bookings that changed room or rate mid-stay")
+    for b in bookings:
+        if not b["segments"]:
+            continue
+        out.append(f"delete from booking_stays where booking_id = "
+                   f"(select id from bookings where sheet_row = {b['sheet_row']});")
+        day = 0
+        for seq, (rate, nights) in enumerate(b["segments"], start=1):
+            last = seq == len(b["segments"])
+            # Only the final segment can still be running.
+            open_seg = "true" if (last and b["is_open"]) else "false"
+            note = ("room unknown — the sheet keeps only the current room"
+                    if not last else "current room, as recorded in the sheet")
+            room_sql = ("NULL" if not last else
+                        (f"(select r.id from rooms r join apartments a on a.id = r.apartment_id "
+                         f"where a.name = {q(b['apartment'])} and r.number = {q(b['room'])})"
+                         if b["apartment"] and b["room"] else "NULL"))
+            out.append(
+                "insert into booking_stays (booking_id, seq, room_id, apartment_name, "
+                "room_number, from_date, nights, open_ended, nightly_rate, note) "
+                f"select id, {seq}, {room_sql}, "
+                f"{q(b['apartment']) if last else 'NULL'}, "
+                f"{q(b['room']) if last else 'NULL'}, "
+                f"{q(b['arrival'])}::date + {day}, {nights}, {open_seg}, {rate}, {q(note)} "
+                f"from bookings where sheet_row = {b['sheet_row']} "
+                "on conflict (booking_id, seq) do update set "
+                "nights = excluded.nights, nightly_rate = excluded.nightly_rate, "
+                "open_ended = excluded.open_ended, note = excluded.note;")
+            day += nights
 
     out += ["", "commit;"]
     return "\n".join(out)
@@ -244,12 +329,18 @@ def report(reg, bookings, expenses):
     rates = [b for b in bookings if b["nightly_rate"]]
     print(f"nightly-rate formulas kept:  {len(rates)} "
           f"{[(b['sheet_row'], b['nightly_rate']) for b in rates]}")
-    odd = [b for b in bookings if b["total_formula"] and not b["nightly_rate"]]
+    multi = [b for b in bookings if b["segments"]]
+    if multi:
+        print("bookings split across rooms/rates (modelled in booking_stays):")
+        for b in multi:
+            print(f"    row {b['sheet_row']}: {b['total_formula']} -> "
+                  + " + ".join(f"{n}n @ {r}" for r, n in b["segments"]))
+    odd = [b for b in bookings
+           if b["total_formula"] and not b["nightly_rate"] and not b["segments"]]
     if odd:
-        print("hand-entered totals with no single rate (value kept, text preserved):")
+        print("hand-entered totals in a shape nothing understands (value kept as-is):")
         for b in odd:
-            print(f"    row {b['sheet_row']}: {b['total_formula']}  "
-                  f"{'OPEN — needs a rate!' if b['is_open'] else 'closed, fixed total, fine'}")
+            print(f"    row {b['sheet_row']}: {b['total_formula']}")
     print(f"cancelled:                   {len([b for b in bookings if b['cancelled']])}")
 
 
@@ -277,14 +368,11 @@ def main():
         print("\n" + "\n".join(sql.splitlines()[:40]) + "\n  …")
 
     if args.apply or args.reconcile:
-        url = os.environ.get("SUPABASE_DB_URL")
-        if not url:
-            sys.exit("SUPABASE_DB_URL is not set — see supabase/README.md")
         try:
             import psycopg
         except ImportError:
             sys.exit("pip install 'psycopg[binary]'")
-        with psycopg.connect(url) as conn:
+        with psycopg.connect(**connect_args()) as conn:
             if args.apply:
                 with conn.cursor() as cur:
                     cur.execute(sql)
