@@ -55,9 +55,15 @@ Three honest options:
    dates move; money columns stay sheet-owned. Half the benefit, none of the
    argument. A reasonable staging post, not an end state.
 
-**Recommendation: option 1**, with `nightly_rate` modelled properly so nobody
-needs to type a formula to express it. This decision gates everything else and is
-yours to make.
+**Chosen: option 1** — Postgres will own the bot's columns, with `nightly_rate`
+modelled properly so nobody needs to type a formula to express it.
+
+**With a dual-write trust period first.** The bot keeps writing the spreadsheet
+exactly as it does today, and additionally writes Postgres. Sheets stays
+authoritative for as long as the user wants; Postgres is a shadow copy that gets
+compared against it daily until it has earned the flip. Nothing about how the
+team works changes until the flip, and the ownership rule above only takes effect
+then. See *Phases*.
 
 ## Schema sketch
 
@@ -154,20 +160,49 @@ your instance. *Half a day, mostly waiting on decisions.*
 expenses with a read-only script. Reconcile every row against the sheet before
 going further. Nothing in the bot changes. *Half a day.*
 
-**Phase 2 — read from Postgres, keep writing to Sheets.** Point the availability
-check, the booking lookup and the apartment registry at Postgres. The bot still
-writes the sheet exactly as today, so this is fully reversible and the
-mid-conversation wait disappears immediately. *One day.*
+**Phase 2 — dual-write. Sheets stays authoritative.** *One day.*
 
-**Phase 3 — write to Postgres, mirror to Sheets.** The cutover. The bot writes
-Postgres; a mirror job writes the same columns the bot writes today (A–J, L, M,
-O, Q — never the formula columns). Because the mirror is a single writer, row
-allocation stops being contended. *One to two days, and the riskiest step.*
+The bot writes the spreadsheet exactly as it does today, then also writes
+Postgres. Nothing else changes: the same reads, the same messages, the same
+behaviour. Two rules make this safe:
 
-**Phase 4 — delete the workarounds** listed above, and move the reports to SQL.
+- **The Postgres write can never fail a booking.** It runs *after* the sheet
+  write, on a branch whose node is set to continue on error. If Supabase is down,
+  asleep, or misconfigured, the receptionist sees the normal ✅ and the shadow
+  copy is simply missing a row — which the next reconcile reports.
+- **Every write is an upsert on `sheet_row`**, so a retry or a replay converges
+  instead of duplicating.
+
+**Phase 3 — reconcile daily, until it is boring.** *Half a day to build, then
+however long trust takes.*
+
+A scheduled job snapshots the sheet into `sheet_snapshot` and posts the output of
+the `reconcile_bookings` view to the ops group: every row where the two disagree,
+or that exists in one and not the other. A clean run is one line. This is the
+phase that earns the flip, and it is the user's call how long it lasts — a week
+of silent mornings is a reasonable bar.
+
+It also catches the thing nothing else would: someone editing the sheet by hand.
+During dual-write that is still allowed, and the reconcile will simply report the
+drift, which is exactly the signal needed to decide whether option 1 is going to
+be tolerable in practice.
+
+**Phase 4 — the flip.** *One day.* Reads move to Postgres (availability, lookup,
+registry — the mid-conversation wait disappears here). The bot writes Postgres
+first; a mirror job writes the sheet's input columns (A–J, L, M, O, Q — never the
+formula columns). Protected ranges go on. Because the mirror is then the sheet's
+only writer, row allocation stops being contended and the concurrency race stops
+existing.
+
+**Phase 5 — delete the workarounds** listed above, and move the reports to SQL.
 *Half a day, and the most satisfying.*
 
-Realistically **three to four days** of focused work, plus your decision time.
+Phases 0–3 are **reversible by deleting one branch of the workflow**. Phase 4 is
+the one that needs a considered go/no-go, and by then the reconcile output will
+have made that decision on the evidence.
+
+Realistically **three to four days** of focused work, spread either side of
+however long the trust period runs.
 
 ## Risks
 
