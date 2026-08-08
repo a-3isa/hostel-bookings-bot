@@ -71,8 +71,31 @@ const RECEIPT_PAYMENT_KEYS = ['instapay', 'vcash'];
 const CASH_KEY = 'cash';
 const UNPAID_KEY = 'unpaid';
 
-function payByKey(key) { return PAYMENTS.find(p => p.key === key) || null; }
+/**
+ * Resolve a payment from callback data.
+ *
+ * Accepts the old positional form (`pay_3`) as well as the current key form
+ * (`pay_vcash`). A keyboard drawn before this code deployed is still on
+ * someone's screen; without this, their next tap does nothing and they have to
+ * start the booking again. The order below is the order those old keyboards
+ * were drawn in — do not rewrite it to match a future PAYMENTS reordering.
+ */
+const LEGACY_PAY_ORDER = ['cash', 'instapay', 'airbnb', 'vcash', 'unpaid', 'eur', 'usd'];
+
+function payByKey(key) {
+  const direct = PAYMENTS.find(p => p.key === key);
+  if (direct) return direct;
+  if (/^\d+$/.test(String(key))) {
+    const legacy = LEGACY_PAY_ORDER[Number(key)];
+    return legacy ? PAYMENTS.find(p => p.key === legacy) || null : null;
+  }
+  return null;
+}
+
 function payLabel(key) { const p = payByKey(key); return p ? p.label : ''; }
+
+/** The canonical key for a payment, whichever form the callback used. */
+function payKeyOf(key) { const p = payByKey(key); return p ? p.key : ''; }
 
 /**
  * Apartments and their rooms come from the الإتاحة tab (one row per
@@ -577,13 +600,18 @@ function locationRegistry() {
   const byApartment = [];
   const seen = {};
   for (const rowJson of rows) {
-    // The tab has no header row in the read range, so the columns arrive under
-    // whatever n8n generated. Take the first two values positionally.
-    const vals = Object.keys(rowJson)
-      .filter(k => k !== 'row_number')
-      .map(k => rowJson[k]);
-    const apartment = String(vals[0] === undefined ? '' : vals[0]).trim();
-    const room = String(vals[1] === undefined ? '' : vals[1]).trim();
+    // The read starts at the tab's header row, so the columns normally arrive
+    // named. Fall back to position if that header is ever edited — the grid
+    // must not empty itself over a renamed column.
+    let apartment = rowJson['الشقة'];
+    let room = rowJson['الغرفة'];
+    if (apartment === undefined || room === undefined) {
+      const vals = Object.keys(rowJson).filter(k => k !== 'row_number').map(k => rowJson[k]);
+      apartment = vals[0];
+      room = vals[1];
+    }
+    apartment = String(apartment === undefined ? '' : apartment).trim();
+    room = String(room === undefined ? '' : room).trim();
     if (!apartment || !room) continue;
     if (seen[apartment] === undefined) {
       seen[apartment] = byApartment.length;
@@ -1148,7 +1176,17 @@ switch (state) {
   case 'EXP_APT': {
     if (!cbData || !cbData.startsWith('eapt_')) break;
     const suffix = cbData.slice('eapt_'.length);
-    d.exp_apartment = suffix === 'none' ? '' : (d.aptList || [])[Number(suffix)] || '';
+    if (suffix === 'none') d.exp_apartment = '';
+    else {
+      // A conversation that started before this code deployed has no aptList;
+      // resolving against the fallback beats silently filing the expense with
+      // no apartment at all.
+      const list = (d.aptList && d.aptList.length)
+        ? d.aptList : FALLBACK_REGISTRY.map(e => e.apartment);
+      const chosen = list[Number(suffix)];
+      if (!chosen) break;
+      d.exp_apartment = chosen;
+    }
     reply(t('exp_ask_payment'), keyGrid(EXP_PAYMENTS.map(k => payByKey(k)).filter(Boolean), 'epay_'));
     setState('EXP_PAY', d);
     break;
@@ -1156,9 +1194,12 @@ switch (state) {
 
   case 'EXP_PAY':
     if (!cbData || !cbData.startsWith('epay_')) break;
-    d.exp_payment = payLabel(cbData.slice('epay_'.length));
+    const expKey = /^\d+$/.test(cbData.slice('epay_'.length))
+      ? EXP_PAYMENTS[Number(cbData.slice('epay_'.length))]   // pre-key keyboards
+      : payKeyOf(cbData.slice('epay_'.length));
+    d.exp_payment = payLabel(expKey);
     if (!d.exp_payment) break;
-    if (RECEIPT_PAYMENT_KEYS.indexOf(cbData.slice('epay_'.length)) !== -1) {
+    if (RECEIPT_PAYMENT_KEYS.indexOf(expKey) !== -1) {
       reply(t('ask_receipt'), skipKb('ereceipt_skip'));
       setState('EXP_RECEIPT', d);
       break;
@@ -1247,13 +1288,16 @@ switch (state) {
     break;
   }
 
-  case 'BTYPE':
+  case 'BTYPE': {
     if (!cbData || !cbData.startsWith('bt_')) break;
-    const bt = BTYPE_OPTS.find(o => o.key === cbData.slice('bt_'.length));
+    const raw = cbData.slice('bt_'.length);
+    const bt = BTYPE_OPTS.find(o => o.key === raw) ||
+      (/^\d+$/.test(raw) ? BTYPE_OPTS[Number(raw)] : null);   // pre-key keyboards
     if (!bt) break;
     d.btype = bt.label;
     askPhone();
     break;
+  }
 
   case 'PHONE':
     if (cq) break;
@@ -1327,12 +1371,12 @@ switch (state) {
     break;
   }
 
-  case 'PAYMENT':
+  case 'PAYMENT': {
     if (!cbData || !cbData.startsWith('pay_')) break;
-    const payKey = cbData.slice('pay_'.length);
-    if (!payByKey(payKey)) break;
-    d.paymentKey = payKey;
-    d.payment = payLabel(payKey);
+    const raw = cbData.slice('pay_'.length);
+    if (!payByKey(raw)) break;
+    d.paymentKey = payKeyOf(raw);
+    d.payment = payLabel(raw);
     if (d.paymentKey === UNPAID_KEY) {                     // nothing paid → skip PAID
       d.paid = 0;
       reply(t('ask_notes'), skipKb('notes_skip'));
@@ -1342,6 +1386,7 @@ switch (state) {
       setState('PAID', d);
     }
     break;
+  }
 
   // The receipt is asked *after* the paid amount, so the user enters the figure
   // first and then attaches the transfer proving it.
@@ -1548,7 +1593,7 @@ switch (state) {
 
   case 'EDIT_PAYMENT': {
     if (!cbData || !cbData.startsWith('xpay_')) break;
-    const payKey = cbData.slice('xpay_'.length);
+    const payKey = payKeyOf(cbData.slice('xpay_'.length));
     const pay = payLabel(payKey);
     if (!pay) break;
     editSet(d, 'طريقة الدفع', pay);

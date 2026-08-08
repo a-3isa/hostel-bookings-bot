@@ -867,6 +867,150 @@ check('cashier saves immediately, no checkout question', r.hasSave === true);
 check('cashier never touches عدد الليالي', !('عدد الليالي' in r.save.fields),
   Object.keys(r.save.fields));
 
+// ─── Every option, every field ────────────────────────────────────────────────
+
+section('matrix: every booking payment key round-trips to its Arabic label');
+const PAY_LABELS = {
+  cash: 'كاش', instapay: 'انستاباي', airbnb: 'Airbnb', vcash: 'فودافون كاش',
+  unpaid: 'غير مدفوع', eur: 'يورو', usd: 'دولار',
+};
+const NEEDS_RECEIPT = ['instapay', 'vcash'];
+for (const [key, label] of Object.entries(PAY_LABELS)) {
+  resetSession();
+  run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+  run(msg('ID1')); run(msg('محمد علي')); run(cb('bt_external')); run(msg('0100'));
+  run(cb('ar_0_1')); run(cb('nights_2')); run(cb('cal_day_2026_09_10'));
+  run(msg('5000'));
+  r = run(cb(`pay_${key}`));
+  if (key === 'unpaid') {
+    check(`${key}: skips the paid step`, r.reply.text.startsWith('📝 ملاحظات'), r.reply.text);
+    r = run(cb('notes_skip'));
+  } else {
+    check(`${key}: asks the paid amount`, r.reply.text.startsWith('💵'), r.reply.text);
+    r = run(msg('1000'));
+    if (NEEDS_RECEIPT.includes(key)) {
+      check(`${key}: asks for a receipt`, r.reply.text.startsWith('📎'), r.reply.text);
+      r = run(cb('receipt_skip'));
+    }
+    check(`${key}: reaches the notes step`, r.reply.text.startsWith('📝 ملاحظات'), r.reply.text);
+    r = run(cb('notes_skip'));
+  }
+  r = run(cb('save'));
+  check(`${key}: saved as "${label}"`, r.save.fields['طريقة الدفع'] === label,
+    r.save.fields['طريقة الدفع']);
+  check(`${key}: unpaid writes 0 paid`,
+    key !== 'unpaid' || r.save.fields['اجمالي ما تم دفعه'] === 0,
+    r.save.fields['اجمالي ما تم دفعه']);
+}
+
+section('matrix: legacy positional callbacks still resolve');
+// A keyboard drawn before the key change is still on someone's screen.
+resetSession();
+run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+run(msg('ID1')); run(msg('محمد علي'));
+r = run(cb('bt_0'));                              // old form for خارجي
+check('legacy bt_0 accepted', r.reply.text === '📞 رقم الهاتف:', r.reply.text);
+run(msg('0100')); run(cb('ar_0_1')); run(cb('nights_2')); run(cb('cal_day_2026_09_10'));
+run(msg('5000'));
+r = run(cb('pay_3'));                             // old index for فودافون كاش
+check('legacy pay_3 resolves to فودافون كاش', r.reply.text.startsWith('💵'), r.reply.text);
+run(msg('1000'));
+r = run(cb('receipt_skip'));
+run(cb('notes_skip'));
+r = run(cb('save'));
+check('and saves the right label', r.save.fields['طريقة الدفع'] === 'فودافون كاش',
+  r.save.fields['طريقة الدفع']);
+check('legacy btype saved', r.save.fields['نوع الحجز'] === 'خارجي', r.save.fields['نوع الحجز']);
+
+section('matrix: every apartment and every one of its rooms');
+for (const [aptIdx, [apt, roomCount]] of Object.entries(REAL_ROOMS).map((e, i) => [i, e])) {
+  for (let room = 1; room <= roomCount; room++) {
+    resetSession();
+    run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+    run(msg('ID1')); run(msg('محمد علي')); run(cb('bt_external')); run(msg('0100'));
+    const res = run(cb(`ar_${aptIdx}_${room}`));
+    if (!res || !res.hasReply) { check(`${apt} room ${room} accepted`, false, res); continue; }
+    run(cb('nights_2')); run(cb('cal_day_2026_09_10'));
+    run(msg('5000')); run(cb('pay_cash')); run(msg('5000')); run(cb('notes_skip'));
+    r = run(cb('save'));
+    check(`${apt} room ${room} saved`,
+      r.save.fields['اسم الشقة'] === apt && r.save.fields['رقم الغرفة'] === room,
+      [r.save.fields['اسم الشقة'], r.save.fields['رقم الغرفة']]);
+  }
+}
+
+section('matrix: every expense payment key');
+for (const [key, label] of [['cash', 'كاش'], ['instapay', 'انستاباي'], ['vcash', 'فودافون كاش']]) {
+  resetSession();
+  run(msg('/start', EXPUSER)); run(cb('choice_expense', EXPUSER));
+  run(cb('eid_skip', EXPUSER)); run(msg('بند', EXPUSER)); run(msg('100', EXPUSER));
+  run(cb('eapt_0', EXPUSER));
+  r = run(cb(`epay_${key}`, EXPUSER));
+  if (key !== 'cash') {
+    check(`expense ${key}: asks for a receipt`, r.reply.text.startsWith('📎'), r.reply.text);
+    r = run(cb('ereceipt_skip', EXPUSER));
+  }
+  check(`expense ${key}: reaches notes`, r.reply.text.startsWith('🗒️'), r.reply.text);
+  run(cb('enotes_skip', EXPUSER));
+  r = run(cb('esave', EXPUSER));
+  check(`expense ${key}: saved as "${label}"`, r.save.fields['طريقة الدفع'] === label,
+    r.save.fields['طريقة الدفع']);
+  check(`expense ${key}: apartment resolved`, r.save.fields['الشقة'] === 'ذاكر حسين',
+    r.save.fields['الشقة']);
+}
+
+section('matrix: expense apartment falls back on a pre-deploy session');
+// aptList absent, as it would be for a conversation started before this deploy.
+sessionRow = { chat_id: '999', state: 'EXP_APT', updated_at: Date.now(),
+  data: JSON.stringify({ exp_item: 'بند', exp_amount: 100 }) };
+r = run(cb('eapt_0', EXPUSER));
+check('resolves against the fallback instead of filing a blank apartment',
+  r.reply.text === '💳 طريقة الدفع:', r.reply.text);
+
+section('matrix: every editable field');
+const EDITS = [
+  ['ef_total', () => run(msg('9999')), 'اجمالي سعر الحجز', 9999],
+  ['ef_notes', () => run(msg('ملاحظة')), 'ملاحظات', 'ملاحظة'],
+  ['ef_nights', () => run(cb('xnights_5')), 'عدد الليالي', 5],
+  ['ef_arrival', () => run(cb('cal_day_2026_09_02')), 'تاريخ البداية', '2026-09-02'],
+];
+for (const [button, act, col, expected] of EDITS) {
+  resetSession();
+  sheetRows = SHEET;
+  run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
+  sheetRows = null;
+  run(cb(button));
+  r = act();
+  check(`${button}: returns to the menu`, r.reply.text === '✏️ اختر ما تريد تعديله:', r.reply.text);
+  r = run(cb('ef_done'));
+  check(`${button}: writes ${col} = ${expected}`, r.save.fields[col] === expected,
+    r.save.fields);
+}
+
+resetSession();
+sheetRows = SHEET;
+run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
+run(cb('ef_aptroom'));
+r = run(cb('ar_1_5'));                            // احمد فهيم has 5 rooms
+check('ef_aptroom writes both columns',
+  r.reply.text === '✏️ اختر ما تريد تعديله:', r.reply.text);
+r = run(cb('ef_done'));
+check('apartment and room written together',
+  r.save.fields['اسم الشقة'] === 'احمد فهيم' && r.save.fields['رقم الغرفة'] === 5,
+  r.save.fields);
+sheetRows = null;
+
+section('matrix: ∞ nights on an edit resolves the row');
+resetSession();
+sheetRows = SHEET;
+run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
+sheetRows = null;
+run(cb('ef_nights'));
+r = run(cb('xnights_inf'));
+r = run(cb('ef_done'));
+check('the formula names the real row, not {r}',
+  r.save.fields['عدد الليالي'] === '=TODAY()-J3', r.save.fields['عدد الليالي']);
+
 // ─── /undo ────────────────────────────────────────────────────────────────────
 
 section('undo: puts an edit back');

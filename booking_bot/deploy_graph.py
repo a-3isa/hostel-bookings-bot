@@ -159,9 +159,13 @@ def main():
     # ── Undo: park the pre-image instead of blanking `data` ───────────────────
     clear = next(n for n in wf["nodes"] if n["name"] == "Clear Session")
     cols = json.loads(json.dumps(clear["parameters"]["columns"]))
+    # lastAppend is derived from the flow, not from "there is no undo record".
+    # An undo is itself an edit with no record of its own, and the two must not
+    # look alike: a second /undo should say "nothing to undo", not send the user
+    # off to إلغاء الحجز.
     cols["value"]["data"] = (
         "={{ JSON.stringify({ lastWrite: $('Brain').first().json.save.undo || null,"
-        " lastAppend: !$('Brain').first().json.save.undo }) }}"
+        " lastAppend: ['booking','expense'].includes($('Brain').first().json.save.flow) }) }}"
     )
     ops.append({"type": "updateNodeParameters", "nodeName": "Clear Session",
                 "parameters": {"columns": cols}})
