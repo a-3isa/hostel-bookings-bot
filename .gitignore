@@ -1,6 +1,16 @@
+# Secrets. Named explicitly rather than with a blanket *.json — that rule kept
+# the service account out of the repo but also silently swallowed every config,
+# fixture and workflow export alongside it.
 .env
-*.json
+service_account.json
+*credentials*.json
+*service_account*.json
+
 __pycache__/
 .pytest_cache/
 *.pyc
 .superpowers/
+.playwright-mcp/
+bot_out.txt
+bot_err.txt
+*.log
