@@ -273,6 +273,56 @@ def main():
         print("      Password <the one in SUPABASE_DB_URL>")
         print("      Port     6543          SSL: require\n")
 
+    # ── Phase 3: the daily reconcile ─────────────────────────────────────────
+    #
+    # Hangs off the same read the reports already do, so it costs no extra Sheets
+    # call: snapshot the sheet, ask the database where the two disagree, post the
+    # answer. It posts even when clean — a report that only appears on trouble is
+    # indistinguishable from one that has quietly stopped running.
+    if pg:
+        for name, src, pos in (("Build Snapshot SQL", "build_snapshot_sql.js", [-240, 1040]),
+                               ("Build Reconcile Message", "build_reconcile_message.js", [480, 1040])):
+            if name not in have:
+                add_node(name, "n8n-nodes-base.code", 2, {"jsCode": read_source(src)}, pos)
+                print(f"  + {name}")
+            else:
+                ops.append({"type": "updateNodeParameters", "nodeName": name,
+                            "parameters": {"jsCode": read_source(src)}})
+                print(f"  ~ {name} code")
+
+        if "Write Snapshot" not in have:
+            add_node("Write Snapshot", "n8n-nodes-base.postgres", 2.6,
+                     {"operation": "executeQuery", "query": "={{ $json.sql }}", "options": {}},
+                     [0, 1040], cred=("postgres", pg["id"], pg["name"]),
+                     settings={"onError": "continueRegularOutput", "alwaysOutputData": True})
+            print("  + Write Snapshot")
+        if "Read Discrepancies" not in have:
+            add_node("Read Discrepancies", "n8n-nodes-base.postgres", 2.6,
+                     {"operation": "executeQuery",
+                      "query": "select * from reconcile_bookings order by sheet_row;",
+                      "options": {}},
+                     [240, 1040], cred=("postgres", pg["id"], pg["name"]),
+                     # alwaysOutputData: agreement returns no rows, and without
+                     # this the branch would stop and never post the all-clear.
+                     settings={"onError": "continueRegularOutput", "alwaysOutputData": True})
+            print("  + Read Discrepancies")
+
+        # addNode does not carry node-level settings, so pin them separately —
+        # the same trap executeOnce fell into. alwaysOutputData on Read
+        # Discrepancies is load-bearing: agreement returns zero rows, and without
+        # it the branch simply stops and the all-clear is never posted. A report
+        # that only appears on trouble cannot be told apart from a dead one.
+        for node in ("Write Snapshot", "Read Discrepancies", "Shadow Write"):
+            ops.append({"type": "setNodeSettings", "nodeName": node,
+                        "settings": {"onError": "continueRegularOutput",
+                                     "alwaysOutputData": True}})
+
+        connect("Read Report Values", "Build Snapshot SQL")
+        connect("Build Snapshot SQL", "Write Snapshot")
+        connect("Write Snapshot", "Read Discrepancies")
+        connect("Read Discrepancies", "Build Reconcile Message")
+        connect("Build Reconcile Message", "Send Report")
+
     ops.extend(creds)          # credentials bind after their node exists
     if not ops:
         print("nothing to do")

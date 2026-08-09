@@ -109,6 +109,7 @@ alter table bookings add column if not exists total_formula text;
 alter table bookings add column if not exists nightly_rate  numeric(12,2);
 alter table bookings add column if not exists receipt_file_id text;
 alter table expenses add column if not exists receipt_file_id text;
+alter table expenses add column if not exists apartment_id bigint references apartments(id);
 
 create index if not exists rooms_apartment_id_idx   on rooms (apartment_id);
 create index if not exists bookings_room_arrival_idx on bookings (room_id, arrival);
@@ -157,7 +158,11 @@ create table if not exists expenses (
   expense_ref     text,                      -- الرقم
   item            text,                      -- البند
   amount          numeric(12,2),
-  apartment_name  text,                      -- الشقة, free text on this tab
+  -- Same shape as bookings: a real reference, plus the name as written so a row
+  -- naming an apartment that is not in الإتاحة still records what it said. All
+  -- 11 live rows resolve, so the reference is the useful one.
+  apartment_id    bigint references apartments(id),
+  apartment_name  text,                      -- الشقة, as written
   notes           text,
   payment_method  text,
   responsible     text,                      -- اسم المسئول
@@ -166,6 +171,8 @@ create table if not exists expenses (
   source          text not null default 'bot' check (source in ('bot', 'backfill', 'sheet')),
   created_at      timestamptz not null default now()
 );
+
+create index if not exists expenses_apartment_id_idx on expenses (apartment_id);
 
 -- ── Sessions ─────────────────────────────────────────────────────────────────
 -- Replaces the n8n `bookings_bot_sessions` data table at the flip. Created now
@@ -201,7 +208,9 @@ create index if not exists booking_audit_booking_id_idx on booking_audit (bookin
 -- Dropped and recreated rather than replaced: this view selects b.*, so adding a
 -- column to `bookings` changes its shape, and CREATE OR REPLACE VIEW cannot
 -- reorder or rename output columns. Nothing depends on these views yet.
-drop view if exists bookings_live;
+-- cascade: reconcile_bookings is built on this one and is recreated further
+-- down the same file, so taking it with us here is intended.
+drop view if exists bookings_live cascade;
 create view bookings_live as
 with seg as (
   -- Bookings split across rooms or rates. Reported, never used to override the
@@ -327,30 +336,41 @@ revoke all on apartments, rooms, bookings, booking_stays, expenses, bot_sessions
               booking_audit, sheet_snapshot
   from anon, authenticated;
 
+-- Compared against `bookings_live`, not `bookings`, and this is the whole trick.
+--
+-- On an open-ended stay the sheet shows an evaluated night count and a total
+-- that grows every day, while the table stores nights NULL and the total as it
+-- was at write time. Comparing the raw columns would report all six open stays
+-- as differing every single morning, and a report that cries wolf daily is one
+-- nobody reads by the end of the week. `effective_nights` and `effective_total`
+-- reproduce exactly what the sheet's own formulas produce, so a difference here
+-- means something really is wrong.
+
 drop view if exists reconcile_bookings;
 create view reconcile_bookings as
 select
-  coalesce(b.sheet_row, s.sheet_row) as sheet_row,
+  coalesce(l.sheet_row, s.sheet_row) as sheet_row,
   case
-    when b.sheet_row is null then 'missing in db'
+    when l.sheet_row is null then 'missing in db'
     when s.sheet_row is null then 'missing in sheet'
     else 'differs'
   end as problem,
-  s.guest_name as sheet_guest,     b.guest_name as db_guest,
-  s.apartment_name as sheet_apt,   b.apartment_name as db_apt,
-  s.room_number as sheet_room,     b.room_number as db_room,
-  s.arrival as sheet_arrival,      b.arrival as db_arrival,
-  s.nights as sheet_nights,        b.nights as db_nights,
-  s.total as sheet_total,          b.total as db_total,
-  s.paid as sheet_paid,            b.paid as db_paid
+  s.guest_name as sheet_guest,     l.guest_name as db_guest,
+  s.apartment_name as sheet_apt,   l.apartment_name as db_apt,
+  s.room_number as sheet_room,     l.room_number as db_room,
+  s.arrival as sheet_arrival,      l.arrival as db_arrival,
+  s.nights as sheet_nights,        l.effective_nights as db_nights,
+  s.total as sheet_total,          l.effective_total as db_total,
+  s.paid as sheet_paid,            l.paid as db_paid
 from sheet_snapshot s
-full outer join bookings b on b.sheet_row = s.sheet_row
-where b.sheet_row is null
+full outer join bookings_live l on l.sheet_row = s.sheet_row
+where l.sheet_row is null
    or s.sheet_row is null
-   or s.guest_name     is distinct from b.guest_name
-   or s.apartment_name is distinct from b.apartment_name
-   or s.room_number    is distinct from b.room_number
-   or s.arrival        is distinct from b.arrival
-   or s.nights         is distinct from b.nights
-   or s.total          is distinct from b.total
-   or s.paid           is distinct from b.paid;
+   or s.guest_name     is distinct from l.guest_name
+   or s.apartment_name is distinct from l.apartment_name
+   or s.room_number    is distinct from l.room_number
+   or s.arrival        is distinct from l.arrival
+   or s.nights         is distinct from l.effective_nights
+   -- Money is compared to the piastre; a rounding difference is a real one.
+   or coalesce(s.total, 0) is distinct from coalesce(l.effective_total, 0)
+   or coalesce(s.paid, 0)  is distinct from coalesce(l.paid, 0);
