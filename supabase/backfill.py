@@ -136,10 +136,18 @@ def cell(row, idx):
     return str(row[idx]).strip()
 
 
-def open_sheet():
+def open_sheet(writable=False):
+    """The bookings spreadsheet.
+
+    Read-only by default, and deliberately: this script's whole job is to copy
+    OUT of the sheet, and a token that cannot write is a stronger guarantee of
+    that than any amount of care in the code. `writable=True` is opt-in for the
+    few tools that must write — currently only write_sheet_ids.py.
+    """
+    scope = "spreadsheets" if writable else "spreadsheets.readonly"
     creds = Credentials.from_service_account_file(
         os.path.join(REPO, "service_account.json"),
-        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+        scopes=[f"https://www.googleapis.com/auth/{scope}"])
     return gspread.authorize(creds).open_by_key(SHEET_ID)
 
 
