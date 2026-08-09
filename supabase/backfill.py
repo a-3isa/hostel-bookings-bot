@@ -42,29 +42,41 @@ E = dict(spent_at=0, item=1, amount=2, apartment=3, notes=4, payment=5,
 ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-# The project's direct host (db.<ref>.supabase.co) publishes an AAAA record only,
-# so it is unreachable from an IPv4-only network. The pooler is dual-stack, which
-# is why SUPABASE_DB_URL is rewritten onto it here rather than being used as-is.
-POOLER_HOST = "aws-1-eu-west-1.pooler.supabase.com"
-POOLER_PORT = 6543
+# Connection. Prefer SUPABASE_TRANSACTION_URL: the project's direct host
+# (db.<ref>.supabase.co) publishes an AAAA record only and is unreachable from an
+# IPv4 network, so the pooler is the way in. If only the direct URL is present it
+# is rewritten onto the pooler, which needs the region — hence the preference for
+# being told outright.
+POOLER_FALLBACK_HOST = "aws-1-eu-west-1.pooler.supabase.com"
+
+
+def env_value(key):
+    with open(os.path.join(REPO, ".env"), encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if line.strip().startswith(key):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
 
 
 def connect_args():
-    """Connection kwargs, read from .env without importing dotenv."""
-    env = os.path.join(REPO, ".env")
-    url = ""
-    with open(env, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            if line.strip().startswith("SUPABASE_DB_URL"):
-                url = line.split("=", 1)[1].strip().strip('"').strip("'")
-    if not url:
-        sys.exit("SUPABASE_DB_URL is not set — see supabase/README.md")
-    m = re.match(r"^postgresql://([^:]+):([^@]*)@db\.([^.]+)\.supabase\.co:\d+/(\w+)$", url)
-    if not m:
-        sys.exit("SUPABASE_DB_URL is not the direct-connection URI this expects")
-    _, pw, ref, db = m.groups()
-    return dict(host=POOLER_HOST, port=POOLER_PORT, user=f"postgres.{ref}",
-                password=pw, dbname=db,
+    url = env_value("SUPABASE_TRANSACTION_URL")
+    if url:
+        m = re.match(r"^postgresql://([^:]+):([^@]*)@([^:]+):(\d+)/(\w+)", url)
+        if not m:
+            sys.exit("SUPABASE_TRANSACTION_URL is not a postgresql:// URI")
+        user, pw, host, port, db = m.groups()
+        port = int(port)
+    else:
+        url = env_value("SUPABASE_DB_URL")
+        if not url:
+            sys.exit("Neither SUPABASE_TRANSACTION_URL nor SUPABASE_DB_URL is set "
+                     "— see supabase/README.md")
+        m = re.match(r"^postgresql://[^:]+:([^@]*)@db\.([^.]+)\.supabase\.co:\d+/(\w+)", url)
+        if not m:
+            sys.exit("SUPABASE_DB_URL is not the direct-connection URI this expects")
+        pw, ref, db = m.groups()
+        user, host, port = f"postgres.{ref}", POOLER_FALLBACK_HOST, 6543
+    return dict(host=host, port=port, user=user, password=pw, dbname=db,
                 # Transaction pooling shares connections between clients, so a
                 # named prepared statement would be executed on a connection that
                 # never prepared it.
@@ -250,12 +262,14 @@ def build_sql(reg, bookings, expenses):
     out.append("-- expenses")
     for e in expenses:
         out.append(
-            "insert into expenses (sheet_row, expense_ref, item, amount, apartment_name, "
-            "notes, payment_method, responsible, spent_at, source) values ("
+            "insert into expenses (sheet_row, expense_ref, item, amount, apartment_id, "
+            "apartment_name, notes, payment_method, responsible, spent_at, source) values ("
             f"{e['sheet_row']}, {q(e['expense_ref'])}, {q(e['item'])}, {qnum(e['amount'])}, "
+            f"(select id from apartments where name = {q(e['apartment'])}), "
             f"{q(e['apartment'])}, {q(e['notes'])}, {q(e['payment'])}, {q(e['responsible'])}, "
             f"{q(e['spent_at'])}::timestamptz, 'backfill')\n"
             "on conflict (sheet_row) do update set "
+            "apartment_id = excluded.apartment_id, "
             "expense_ref = excluded.expense_ref, item = excluded.item, "
             "amount = excluded.amount, apartment_name = excluded.apartment_name, "
             "notes = excluded.notes, payment_method = excluded.payment_method, "

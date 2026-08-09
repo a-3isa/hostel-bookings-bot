@@ -109,14 +109,21 @@ if (flow === 'booking' || flow === 'edit' || flow === 'cancel') {
     `on conflict (sheet_row) do update set ${set.join(', ')}, updated_at = now();`;
 } else if (flow === 'expense') {
   sql =
-    'insert into expenses (sheet_row, expense_ref, item, amount, apartment_name, notes, ' +
-    'payment_method, responsible, receipt_file_id, spent_at, source) values (' +
+    'insert into expenses (sheet_row, expense_ref, item, amount, apartment_id, ' +
+    'apartment_name, notes, payment_method, responsible, receipt_file_id, spent_at, ' +
+    'source) values (' +
     `${row}, ${sqlStr(plain(F['الرقم']))}, ${sqlStr(F['البند'])}, ${sqlNum(F['المبلغ'])}, ` +
+    // Resolved in SQL rather than here: the bot offers the apartment list from
+    // the same الإتاحة tab the registry is seeded from, so the name matches. If
+    // it ever does not, the reference is simply NULL and the name still records
+    // what was chosen.
+    `(select id from apartments where name = ${sqlStr(F['الشقة'])}), ` +
     `${sqlStr(F['الشقة'])}, ${sqlStr(F['ملاحظات'])}, ${sqlStr(F['طريقة الدفع'])}, ` +
     `${sqlStr(F['اسم المسئول'])}, ${sqlStr(save.receiptFileId)}, ` +
     `${sqlStr(F['تاريخ'])}::timestamptz, 'bot') ` +
     'on conflict (sheet_row) do update set expense_ref = excluded.expense_ref, ' +
     'item = excluded.item, amount = excluded.amount, ' +
+    'apartment_id = excluded.apartment_id, ' +
     'apartment_name = excluded.apartment_name, notes = excluded.notes, ' +
     'payment_method = excluded.payment_method, responsible = excluded.responsible, ' +
     'receipt_file_id = excluded.receipt_file_id, spent_at = excluded.spent_at;';
