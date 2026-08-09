@@ -164,6 +164,11 @@ check('the amount and method are the ones just written',
   /insert into payments[\s\S]*2000, 'كاش'/.test(s.sql), s.sql);
 check('a continuation line pays its parent booking',
   s.sql.includes('coalesce(b.merged_into, b.id)'), s.sql);
+check('كاش is recorded in pounds',
+  s.sql.includes("else 'EGP' end"), s.sql);
+check('the currency is derived from the method, not assumed',
+  s.sql.includes("like '%دولار%' then 'USD'") &&
+  s.sql.includes("like '%يورو%' then 'EUR'"), s.sql);
 
 section('payments: nothing paid, nothing recorded');
 newBooking({ pay: 'pay_unpaid' });

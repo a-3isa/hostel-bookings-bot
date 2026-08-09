@@ -179,6 +179,11 @@ create table if not exists payments (
   booking_id      bigint not null references bookings(id) on delete cascade,
   amount          numeric(12,2) not null,
   method          text,
+  -- The sheet has no currency column: طريقة الدفع carries it. دولار means the
+  -- figure in اجمالي ما تم دفعه is dollars. Found on 2026-08-09 when امير سيف
+  -- الدين's two lines — 40 دولار and 650 كاش — were folded into one booking and
+  -- summed to "690", a number denominated in nothing.
+  currency        text not null default 'EGP',
   receipt_file_id text,
   paid_at         timestamptz,
   -- The sheet line this payment was recorded on, when it came from one. Unique
@@ -200,6 +205,7 @@ create index if not exists payments_booking_id_idx on payments (booking_id);
 -- null` means "this is a real booking"; anything else is a continuation line.
 -- At the flip the mirror writes those lines back out from `payments`, and this
 -- column becomes the record of which sheet line each one owns.
+alter table payments add column if not exists currency text not null default 'EGP';
 alter table bookings add column if not exists merged_into bigint references bookings(id);
 
 create index if not exists bookings_merged_into_idx on bookings (merged_into);
@@ -462,7 +468,11 @@ select
   -- What `payments` says, alongside what the sheet lines say. During the trust
   -- period the two must agree; `reconcile_payments` below is what says so.
   pay.payments_total,
-  pay.payments_n
+  pay.payments_n,
+  pay.currencies,
+  -- When a booking mixes currencies, `total`, `paid` and `remaining` above are
+  -- sums across them and mean nothing. Read this before believing them.
+  coalesce(array_length(pay.currencies, 1), 1) > 1 as mixed_currency
 from bookings_live b
 join lateral (
   select
@@ -477,12 +487,23 @@ join lateral (
   where coalesce(x.merged_into, x.id) = b.id
 ) agg on true
 left join lateral (
-  select coalesce(sum(p.amount), 0) as payments_total,
-         count(*)                   as payments_n
+  select coalesce(sum(p.amount), 0)     as payments_total,
+         count(*)                       as payments_n,
+         array_agg(distinct p.currency) as currencies
   from payments p
   where p.booking_id = b.id
 ) pay on true
 where b.merged_into is null;
+
+-- Bookings whose money is denominated in more than one currency, and so cannot
+-- be totalled until someone decides a rate. Reported, never guessed at: the bot
+-- offers دولار and يورو as payment methods, so this will happen again.
+drop view if exists mixed_currency_bookings;
+create view mixed_currency_bookings as
+select m.id, m.sheet_rows, m.guest_name, m.arrival, m.methods, m.currencies,
+       m.total as meaningless_total
+from bookings_model m
+where m.mixed_currency;
 
 -- Does `payments` add up to what the sheet lines say was paid? A difference here
 -- means a payment was recorded in one place and not the other — the shadow-phase

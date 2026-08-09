@@ -128,18 +128,26 @@ if (flow === 'booking' || flow === 'edit' || flow === 'cancel') {
     } else {
       // booking_id resolves through merged_into: a continuation line's payment
       // belongs to the booking it continues, not to the line.
+      // The method IS the currency: طريقة الدفع = دولار means the amount is
+      // dollars. Derived in SQL so it works whether the method came from this
+      // edit or fell back to the column.
+      const methodExpr =
+        F['طريقة الدفع'] === undefined ? 'b.payment_method' : sqlStr(F['طريقة الدفع']);
       sql +=
-        ' insert into payments (booking_id, amount, method, receipt_file_id, paid_at, ' +
-        'sheet_row, source) select coalesce(b.merged_into, b.id), ' +
+        ' insert into payments (booking_id, amount, method, currency, receipt_file_id, ' +
+        'paid_at, sheet_row, source) select coalesce(b.merged_into, b.id), ' +
         // An edit that changes only the amount leaves the method field absent.
         // Falling back to the column rather than to NULL, because the row was
         // just upserted above and so already holds the current method — writing
         // NULL here would erase how the guest paid.
-        `${paidSql}, ${F['طريقة الدفع'] === undefined ? 'b.payment_method' : sqlStr(F['طريقة الدفع'])}, ` +
+        `${paidSql}, ${methodExpr}, ` +
+        `case when ${methodExpr} like '%دولار%' then 'USD' ` +
+        `when ${methodExpr} like '%يورو%' then 'EUR' else 'EGP' end, ` +
         `${sqlStr(save.receiptFileId)}, now(), ` +
         `${row}, 'bot' from bookings b where b.sheet_row = ${row} ` +
         'on conflict (sheet_row) do update set booking_id = excluded.booking_id, ' +
         'amount = excluded.amount, method = excluded.method, ' +
+        'currency = excluded.currency, ' +
         'receipt_file_id = coalesce(excluded.receipt_file_id, payments.receipt_file_id), ' +
         'paid_at = excluded.paid_at;';
     }
