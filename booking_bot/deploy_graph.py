@@ -294,6 +294,59 @@ def main():
         ops.append({"type": "setNodeSettings", "nodeName": "Shadow Write",
                     "settings": {"onError": "continueRegularOutput",
                                  "retryOnFail": True, "maxTries": 2}})
+
+        # ── Stamp the booking's id back into column U ─────────────────────────
+        #
+        # The first write that goes Postgres -> sheet, and the seed of the
+        # mirror. Column U is the stable key (write_sheet_ids.py put it there),
+        # but a row the bot appends has no id in it until something writes one —
+        # which until now meant waiting for reindex.py to be run by hand.
+        #
+        # The flow test is baked into the SQL rather than costing an IF node:
+        # the expression renders to `and true` or `and false`, and `and false`
+        # returns no rows, which stops the branch before the Sheets write. That
+        # matters because expenses live on a different tab and their sheet_row
+        # numbering overlaps the bookings tab's — writing row 5's id onto the
+        # expenses sheet would be a quiet corruption.
+        id_sql = (
+            "=select sheet_row as row_number, id::text as \"معرف النظام\""
+            " from bookings where sheet_row ="
+            " {{ $('Build Shadow Write').first().json.sheet_row }}"
+            " and {{ ['booking','edit','cancel']"
+            ".includes($('Build Shadow Write').first().json.flow) }};")
+        if "Read Booking Id" not in have:
+            add_node("Read Booking Id", "n8n-nodes-base.postgres", 2.6,
+                     {"operation": "executeQuery", "query": id_sql, "options": {}},
+                     [3536, 448], cred=("postgres", pg["id"], pg["name"]))
+            print("  + Read Booking Id")
+        else:
+            ops.append({"type": "updateNodeParameters", "nodeName": "Read Booking Id",
+                        "parameters": {"operation": "executeQuery", "query": id_sql,
+                                       "options": {}}})
+            print("  ~ Read Booking Id query")
+
+        if "Write Booking Id" not in have:
+            add_node("Write Booking Id", "n8n-nodes-base.googleSheets", 4.7,
+                     {"operation": "update",
+                      "documentId": {"__rl": True, "mode": "id", "value": SHEET_ID},
+                      "sheetName": {"__rl": True, "mode": "name", "value": BOOKINGS_TAB},
+                      "columns": {"mappingMode": "autoMapInputData",
+                                  "matchingColumns": ["row_number"],
+                                  "attemptToConvertTypes": False,
+                                  "convertFieldsToString": True},
+                      "options": {}},
+                     [3776, 448], cred=SHEETS_CRED)
+            print("  + Write Booking Id")
+
+        connect("Shadow Write", "Read Booking Id")
+        connect("Read Booking Id", "Write Booking Id")
+        # Neither may ever surface to a receptionist: the ✅ has already been
+        # sent by the time this branch runs, and a missing id in U is something
+        # reindex.py fixes on its next pass.
+        for node in ("Read Booking Id", "Write Booking Id"):
+            ops.append({"type": "setNodeSettings", "nodeName": node,
+                        "settings": {"onError": "continueRegularOutput",
+                                     "retryOnFail": True, "maxTries": 2}})
     else:
         print("\n  ! No Postgres credential in n8n, so the shadow write is not wired up.")
         print("    Create one (Credentials -> New -> Postgres) and re-run this script:")
