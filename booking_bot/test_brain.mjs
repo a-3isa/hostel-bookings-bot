@@ -551,6 +551,31 @@ r = run(msg('/start')); r = run(cb('choice_edit'));
 r = run(msg('77777'));
 check('unique ID opens the menu directly', r.reply.text === '✏️ اختر ما تريد تعديله:', r.reply.text);
 
+section('edit: an ID typed in Arabic digits finds the same booking');
+resetSession();
+sheetRows = SHEET;
+r = run(msg('/start')); r = run(cb('choice_edit'));
+r = run(msg('٧٧٧٧٧'));                       // the keyboard these users actually have
+check('٧٧٧٧٧ finds booking 77777',
+  r.reply.text === '✏️ اختر ما تريد تعديله:', r.reply.text);
+
+resetSession();
+r = run(msg('/start')); r = run(cb('choice_edit'));
+r = run(msg('۵۵۵۵۵'));                       // Persian digits, same story
+check('Persian digits match too',
+  r.reply.text === '🔎 أكثر من حجز بنفس الرقم — اختر الحجز:', r.reply.text);
+
+resetSession();
+r = run(msg('/start')); r = run(cb('choice_edit'));
+r = run(msg('٩٩٩٩٩'));
+check('a genuinely absent ID still says not found',
+  r.reply.text.startsWith('❌ لا يوجد حجز'), r.reply.text);
+
+// Put the session back where the previous section left it: the next section
+// carries on editing 77777 and would otherwise be driving a dead session.
+resetSession();
+r = run(msg('/start')); r = run(cb('choice_edit')); r = run(msg('77777'));
+
 section('edit: changing the paid amount forces a payment method');
 sheetRows = null;                            // lookup node no longer executes
 r = run(cb('ef_notes'));                     // a non-payment edit still uses the menu

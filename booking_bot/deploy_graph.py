@@ -36,6 +36,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 SHEET_ID = "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
 BOOKINGS_TAB = "إدخال الحجوزات"
+# Kept for reference, no longer read by this script: the registry moved to the
+# `apartments`/`rooms` tables at Phase 4b. The tab itself stays — it is a report
+# people use, it just is not the bot's room registry any more.
 AVAILABILITY_TAB = "الإتاحة"
 REPORT_GROUP_CHAT_ID = "-5057362381"
 
@@ -91,6 +94,11 @@ def main():
     conns = wf.get("connections", {})
     print(f"live: {len(have)} nodes")
 
+    # Fetched once and shared: since Phase 4b the two reads are Postgres nodes
+    # too, not just the shadow write.
+    pg = next((c for c in json.loads(pb.call_tool("list_credentials", {"limit": 100}))["data"]
+               if c["type"] == "postgres"), None)
+
     ops = []
     creds = []
 
@@ -135,14 +143,36 @@ def main():
                   "looseTypeValidation": True, "options": {}},
                  [-544, 560])
         print("  + Needs Locations?")
-    if "Read Locations" not in have:
-        # A3 is the header row (الشقة | الغرفة), so the Sheets node names the
-        # columns properly. Row 4 is the tab's own date strip and arrives as a
-        # row with no room number, which the registry builder drops.
-        add_node("Read Locations", "n8n-nodes-base.googleSheets", 4.7,
-                 sheets_read(AVAILABILITY_TAB, "A3:B200"),
-                 [-304, 480], cred=SHEETS_CRED)
-        print("  + Read Locations")
+    # ── The two reads, from Postgres since Phase 4b ───────────────────────────
+    #
+    # Both used to be googleSheets nodes; the swap is what removed the ~0.4–2 s
+    # mid-conversation wait. Their SQL aliases the sheet's own Arabic headers, so
+    # brain.js consumes them unchanged — see the .sql files for why each query is
+    # shaped the way it is.
+    #
+    # alwaysOutputData is load-bearing, the same lesson as *Read Discrepancies*:
+    # a query returning no rows would otherwise stop the branch before the Brain
+    # ever ran, and the bot would answer nothing at all.
+    def postgres_read(name, sql_file, pos):
+        settings = {"alwaysOutputData": True, "onError": "continueRegularOutput",
+                    "retryOnFail": True, "maxTries": 2}
+        params = {"operation": "executeQuery", "query": read_source(sql_file),
+                  "options": {}}
+        if name not in have:
+            if not pg:
+                print(f"  ! {name} skipped — no postgres credential")
+                return
+            add_node(name, "n8n-nodes-base.postgres", 2.6, params, pos,
+                     cred=("postgres", pg["id"], pg["name"]))
+            print(f"  + {name}  (credential: {pg['name']})")
+        else:
+            ops.append({"type": "updateNodeParameters", "nodeName": name,
+                        "parameters": params})
+            print(f"  ~ {name} query")
+        ops.append({"type": "setNodeSettings", "nodeName": name, "settings": settings})
+
+    postgres_read("Read Bookings For Edit", "read_bookings_for_edit.sql", [-304, 240])
+    postgres_read("Read Locations", "read_locations.sql", [-304, 480])
 
     def disconnect(src, tgt, index=0):
         """Drop a connection only if it is actually there — n8n errors otherwise,
@@ -222,8 +252,10 @@ def main():
     # addNode does not carry node-level settings, so pin executeOnce separately.
     ops.append({"type": "setNodeSettings", "nodeName": "Read Report Values",
                 "settings": {"executeOnce": True}})
-    ops.append({"type": "updateNodeParameters", "nodeName": "Read Locations",
-                "parameters": sheets_read(AVAILABILITY_TAB, "A3:B200")})
+    # "Read Locations" used to be re-pinned to the الإتاحة range here. Since
+    # Phase 4b it is a Postgres node owned by postgres_read() above, and leaving
+    # this line in would quietly turn it back into a Sheets read on the next
+    # deploy — reintroducing the mid-conversation wait and nothing else.
 
     connect("Report Schedule", "Report Config")
     connect("Report Config", "Read Report Formulas")
@@ -245,8 +277,6 @@ def main():
                     "parameters": {"jsCode": read_source("build_shadow_write.js")}})
         print("  ~ Build Shadow Write code")
 
-    pg = next((c for c in json.loads(pb.call_tool("list_credentials", {"limit": 100}))["data"]
-               if c["type"] == "postgres"), None)
     if pg:
         if "Shadow Write" not in have:
             add_node("Shadow Write", "n8n-nodes-base.postgres", 2.6,
