@@ -95,6 +95,47 @@ The n8n node was right on all three; only the script was wrong. It also died
 printing its own answer, because the console is cp1252 and every guest name is
 Arabic.
 
+## Phase 4b — the reads, LIVE and not yet exercised
+
+**Read this before doing anything else in the next session.**
+
+`Read Bookings For Edit` and `Read Locations` are now **Postgres nodes**, not
+Sheets nodes. Published at 2026-08-09 ~10:05 UTC as active version
+`7e8fec0a-0ca7-4a09-8dc5-d3faf04e5ab9`. The mid-conversation Sheets wait should
+be gone.
+
+**Rollback:** republish `9433c004-d110-4aba-a37c-5de0cb87abc7` (the 4a version,
+Sheets reads intact) via `publish_workflow` with that `versionId`.
+
+It was deliberately a **source swap, not a rewrite**. Both queries alias their
+columns to the sheet's own Arabic headers, so `brain.js` is untouched and its 379
+tests still describe the live code. Two decisions inside that are load-bearing:
+
+- **`bookings_live`, not `bookings_model`.** The model folds a guest's
+  continuation lines into one booking, which is right for a report and wrong for
+  this node: it feeds the EDIT path, which writes back to a sheet row *by
+  number*. Offering مروان as a single 2200 row would put his next payment on line
+  22 while line 23 still held 1600, and the sheet would double-count. Line for
+  line with the sheet, cancelled rows included, exactly as before.
+- **`'=OPEN'` for an open-ended stay.** The Sheets read was in FORMULA mode, so
+  open stays arrived as `=TODAY()-J5`, and both `findConflicts()` and
+  `showValue()` key off that leading `=`. The sentinel keeps that contract.
+  Phase 5 replaces it with the `open_ended` boolean and deletes the sniffing.
+
+Both nodes are `alwaysOutputData: true` and `onError: continueRegularOutput`: an
+empty result or a Supabase blip must not stop the branch before the Brain runs.
+
+**What has NOT been verified:** no live turn had hit either node when this was
+written — the queries were checked against the live database, and the wiring and
+credential were applied cleanly, but nothing has run end to end. First thing next
+session: check an execution that passes through `Read Bookings For Edit`, and
+confirm the apartment keyboard still draws.
+
+**Repo/live parity gap:** `deploy_graph.py` still *describes* these two as
+`googleSheets` nodes. It will not revert them (it only adds nodes that are
+missing), but it is now lying. Next task: move both queries into
+`booking_bot/nodes/*.sql` and have the script deploy them as Postgres nodes.
+
 ## Two findings that change Phase 4
 
 Both came out of running the reconcile against live data, which is exactly what
