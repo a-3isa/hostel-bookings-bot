@@ -186,10 +186,15 @@ create table if not exists payments (
   currency        text not null default 'EGP',
   receipt_file_id text,
   paid_at         timestamptz,
-  -- The sheet line this payment was recorded on, when it came from one. Unique
-  -- so the backfill and the mirror can both upsert on it instead of duplicating.
-  -- NULL for a payment that never had a line of its own.
+  -- The sheet line this payment was mirrored from, for backfilled rows. Unique
+  -- so the backfill can upsert on it instead of duplicating. NULL for a payment
+  -- recorded as its own EVENT — which is every payment the bot takes now, and
+  -- the only way one booking can hold "500 انستاباي + 400 فودافون كاش" when the
+  -- sheet has room for one method. See client_ref.
   sheet_row       int unique,
+  -- Idempotency key for an event-recorded payment: `<row>:<savingAt>` from the
+  -- bot's own save lock, so an impatient double tap converges on one payment.
+  client_ref      text,
   source          text not null default 'bot' check (source in ('bot', 'backfill', 'sheet')),
   created_at      timestamptz not null default now()
 );
@@ -206,6 +211,19 @@ create index if not exists payments_booking_id_idx on payments (booking_id);
 -- At the flip the mirror writes those lines back out from `payments`, and this
 -- column becomes the record of which sheet line each one owns.
 alter table payments add column if not exists currency text not null default 'EGP';
+
+-- The idempotency key for a payment recorded as its own event: the bot's
+-- `<row>:<savingAt>` from its save lock, so a double tap converges.
+--
+-- NOT a partial index. `where client_ref is not null` looks tidier and cannot be
+-- inferred by `on conflict (client_ref)`, so every payment write failed with
+-- "there is no unique or exclusion constraint matching the ON CONFLICT
+-- specification" — and since the bookings upsert shares the same query, that
+-- rolled back too: the sheet took the new amount and the database took nothing.
+-- Postgres treats NULLs as distinct here, so the line-mirrored rows never
+-- collide anyway.
+alter table payments add column if not exists client_ref text;
+create unique index if not exists payments_client_ref_key on payments (client_ref);
 alter table bookings add column if not exists merged_into bigint references bookings(id);
 
 create index if not exists bookings_merged_into_idx on bookings (merged_into);
