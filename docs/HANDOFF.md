@@ -152,10 +152,41 @@ This is the half of the ownership decision that makes option 1 safe. With an id 
 every row the mirror can tell its own rows from a human's, so a hand-inserted row
 can be **adopted** rather than overwritten.
 
-**Still to do for 4c:** the mirror itself (Postgres writes first, then the sheet's
-input columns A–J, L, M, O, Q plus U), and the adoption path for unrecognised
-rows. New rows appended by the bot get a blank U until `write_sheet_ids.py` runs
-again — the mirror is what closes that.
+### Adoption works, and has already been used in anger
+
+`supabase/reindex.py` is the maintenance pass. It met its own scenario within
+minutes of being written: someone inserted a row at 18, shifting every row below.
+Before column U that meant ~40 false differences in the next reconcile. Instead:
+40 bookings re-pointed, the new row adopted as booking 355, its id written back
+into U, reconcile 0.
+
+    python supabase/reindex.py            # report only
+    python supabase/reindex.py --apply    # re-point, adopt, write U
+
+Three outcomes, deliberately not four:
+
+- **re-point** — U says row 21 is booking 19 and the database says row 20, so the
+  database is corrected. No comparing names and dates.
+- **adopt** — a row with no id was never seen: typed by hand, or appended by the
+  bot. Inserted, and its id written back to U.
+- **orphan** — an id no booking has. Reported, never acted on: it means a row was
+  copied, and which copy is real is a question for a person.
+
+Rows the database has but the sheet does not are only counted, because "deleted"
+and "moved past the range we read" look identical from here.
+
+Payments move by their **old row**, not by their booking: a payment's `sheet_row`
+is the line it was recorded on, and a booking with a continuation line has two.
+Both moves are two-phase through negative row numbers so a swap cannot collide
+with itself half way through.
+
+**Run `reindex.py` before trusting a reconcile that reports many differences.** A
+wall of them almost certainly means rows moved, not that anything is wrong.
+
+**Still to do for 4c:** the mirror itself — Postgres written first, then the
+sheet's input columns A–J, L, M, O, Q plus U. That is the go/no-go, and it is
+what makes U self-maintaining; today a row the bot appends has a blank U until
+`reindex.py` runs.
 
 ## Money can be in more than one currency
 
