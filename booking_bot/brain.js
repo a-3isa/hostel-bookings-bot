@@ -461,8 +461,24 @@ function calKeyboard(year, month) {
 
 // ─── Value helpers (port of _num / _txt / _parse_num / validate_name) ─────────
 
+/**
+ * Arabic-Indic and Persian digits, rewritten as ASCII.
+ *
+ * The keyboard these receptionists type on produces ٢٥, not 25, and everything
+ * downstream — parseFloat, the ID comparison, the sheet — speaks ASCII only.
+ * Observed live on 2026-08-09: an admin looked up "٢٥", guest 25 exists on row
+ * 45, and the bot said "لا يوجد حجز بهذا الـ ID". The same typo class silently
+ * re-prompts on any amount entered in Arabic digits.
+ */
+function asciiDigits(s) {
+  return String(s === undefined || s === null ? '' : s).replace(
+    /[٠-٩۰-۹]/g,
+    ch => String(ch.charCodeAt(0) & 0x0f),
+  );
+}
+
 function parseNum(text) {
-  const v = parseFloat(String(text).trim().replace(/,/g, ''));
+  const v = parseFloat(asciiDigits(text).trim().replace(/,/g, ''));
   return Number.isNaN(v) ? null : v;
 }
 
@@ -1489,7 +1505,10 @@ switch (state) {
     if (!q) { reply(t(d.paidOnly ? 'paid_ask_id' : 'edit_ask_id')); break; }
     // Matches column B (ID) only — not بوكنج ID. The user is told to enter the
     // ID, and B is a required step at entry so every saved booking is reachable.
-    const hits = bookingRows().filter(x => String(x.json['ID'] || '').trim() === q);
+    // Compared in ASCII on both sides: the receptionist's keyboard produces
+    // ٢٥ and the stored ID is 25, and those are the same booking.
+    const qn = asciiDigits(q);
+    const hits = bookingRows().filter(x => asciiDigits(x.json['ID'] || '').trim() === qn);
     if (!hits.length) { reply(t('edit_not_found')); break; }
     if (hits.length > 1) {                          // IDs are not enforced unique
       reply(t('edit_pick_match'), {
