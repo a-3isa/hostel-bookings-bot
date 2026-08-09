@@ -152,6 +152,40 @@ check('payment method updated',
 check('untouched columns are not written',
   !s.sql.includes('guest_name') && !s.sql.includes('arrival'), s.sql);
 
+section('payments: every paid line gets a row of its own');
+newBooking();
+s = shadow({ builder: 'booking', filledRows: 6 });
+check('a payment is written alongside the booking',
+  s.sql.includes('insert into payments'), s.sql);
+check('keyed on the sheet line, so a retry converges',
+  s.sql.includes('on conflict (sheet_row) do update set booking_id = excluded.booking_id'),
+  s.sql);
+check('the amount and method are the ones just written',
+  /insert into payments[\s\S]*2000, 'كاش'/.test(s.sql), s.sql);
+check('a continuation line pays its parent booking',
+  s.sql.includes('coalesce(b.merged_into, b.id)'), s.sql);
+
+section('payments: nothing paid, nothing recorded');
+newBooking({ pay: 'pay_unpaid' });
+s = shadow({ builder: 'booking', filledRows: 10 });
+check('no payment row for غير مدفوع',
+  !s.sql.includes('insert into payments'), s.sql);
+check('and any earlier one for that line is removed',
+  s.sql.includes('delete from payments where sheet_row = 12'), s.sql);
+
+section('payments: an edit that only moves the amount keeps the method');
+reset();
+sheetRows = SHEET;
+run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
+sheetRows = null;
+run(cb('ef_paid')); run(msg('300')); run(cb('xpay_cash')); run(cb('xleft_no'));
+run(cb('xedone'));
+s = shadow();
+check('the edited total is the payment amount',
+  /insert into payments[\s\S]*1500,/.test(s.sql), s.sql);
+check('method falls back to the column, never to NULL',
+  s.sql.includes("1500, 'كاش'") || s.sql.includes('1500, b.payment_method'), s.sql);
+
 section('cancel: marks the row cancelled rather than deleting it');
 reset();
 sheetRows = SHEET;

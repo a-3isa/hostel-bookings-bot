@@ -1,10 +1,30 @@
 # Handoff — where the Supabase migration stands
 
-Written 2026-08-09. Read this first in a new session, then
+Written 2026-08-09, updated the same day after Phase 4a. Read this first in a new
+session, then
 [`2026-08-08-supabase-migration-scope.md`](2026-08-08-supabase-migration-scope.md)
 for the reasoning behind the plan.
 
-## State: phases 0–3 done and live
+## The key decision, settled
+
+The user chose **option 1 — the mirror owns row allocation** (Postgres
+authoritative, the mirror the sheet's only writer), and then asked the right
+question about it: *what does someone do when they need to add a row by hand?*
+
+So option 1 is taken **with option 2 alongside it**, which is what makes it
+survivable:
+
+- The two reasons anyone inserts a row today both get a real path. A second
+  payment in a different method becomes a `payments` row (built, see below). A
+  booking typed straight into the sheet gets **adopted** — the mirror imports
+  rows it does not recognise instead of overwriting them.
+- Adoption needs the mirror to tell its own rows from a human's, so the mirror
+  also writes `bookings.id` into a spare sheet column. One visible column, and a
+  hand-inserted row becomes recoverable rather than destructive.
+- Protected ranges then guard the **formula** columns only (K, N, P, R, S, T),
+  not the whole tab. People keep using the sheet.
+
+## State: phases 0–3 done and live, 4a done
 
 The bot is **active and unchanged in behaviour**. Supabase runs alongside it as a
 shadow copy, and a daily reconcile reports whether the two agree.
@@ -29,6 +49,51 @@ Connecting to Postgres: use **`SUPABASE_TRANSACTION_URL`** from `.env`
 host in `SUPABASE_DB_URL` publishes an **AAAA record only** and is unreachable
 from an IPv4 network. `supabase/backfill.py:connect_args()` handles this and also
 disables prepared statements, which transaction pooling cannot support.
+
+## Phase 4a — payments, built and live
+
+`payments` (booking_id, amount, method, receipt_file_id, paid_at, sheet_row) now
+exists, backfilled to 45 rows, and the dual-write keeps it current. One row per
+**sheet line**, keyed on `sheet_row`: the sheet holds a single cumulative paid
+cell per line, so that is the most this can honestly record while the sheet is
+authoritative. Individual payments get their own rows after the flip.
+
+`bookings.merged_into` points a continuation line at the booking it continues.
+The follower rows stay in `bookings` — deleting them would make the reconcile
+shout "missing in db" every morning about a row that is deliberately gone.
+
+Two new views:
+
+- **`bookings_model`** — one row per real booking, follower lines folded in and
+  their money summed, `sheet_rows` listing every line it occupies. This is what
+  the bot reads after the flip. `bookings`/`bookings_live` stay shaped like the
+  sheet, because that is what the reconcile compares against.
+- **`reconcile_payments`** — where `payments` and the sheet's paid cells
+  disagree. It earned its place within a minute of existing: it caught a live
+  payment written two minutes after the backfill.
+
+Both reconciles are at **0** against the live sheet.
+
+## Three snapshot bugs found by running it, all fixed
+
+The reconcile is only as good as the snapshot, and `backfill.py --reconcile`
+disagreed with the n8n daily node about the same sheet in three ways. Every one
+produced *false* differences, which is the failure mode that gets a report
+ignored:
+
+1. **Thousands separators.** A paid cell now reads `2,225.00`; passed to psycopg
+   as a numeric parameter that is a hard error. `qnum` had the comma handling but
+   only the SQL-building path went through it. Now `numeric()` does.
+2. **Open-ended nights stored as NULL.** The script stored the *modelled* value;
+   `sheet_snapshot` means "what the sheet shows", and `effective_nights`
+   reproduces that number. All seven open stays reported as differing.
+3. **`''` where the node writes NULL.** The reconcile compares with IS DISTINCT
+   FROM, so row 9 (a guest with no apartment, room or arrival) differed from a
+   database saying exactly the same thing.
+
+The n8n node was right on all three; only the script was wrong. It also died
+printing its own answer, because the console is cp1252 and every guest name is
+Arabic.
 
 ## Two findings that change Phase 4
 
@@ -82,9 +147,14 @@ mid-stay and the two nightly rates ended up inside a hand-typed formula.
 
 ## What is not done
 
-- **Phase 4, the flip.** Reads still come from Sheets, so the ~0.4–2 s
-  mid-conversation wait is still there. Do not start this until the reconcile has
-  been quiet for a while, and not before deciding the key question above.
+- **Phase 4b, the reads.** Reads still come from Sheets, so the ~0.4–2 s
+  mid-conversation wait is still there. Availability, lookup and the registry
+  move to `bookings_model` and the `rooms`/`apartments` tables.
+- **Phase 4c, the mirror and adoption.** Postgres becomes the writer; the mirror
+  writes A–J, L, M, O, Q plus the booking-id column, and adopts rows it does not
+  recognise. This is the go/no-go point.
+- **Phase 4d, protected ranges** on the formula columns. A click in Sheets, not
+  code.
 - **Phase 5**, deleting the workarounds (`filled + 2`, the two-read trick in the
   reports, the الإتاحة scrape, the undo pre-image).
 - **The report schedule fires at 08:00 in the n8n instance's timezone**, not

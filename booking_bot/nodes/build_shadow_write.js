@@ -107,6 +107,43 @@ if (flow === 'booking' || flow === 'edit' || flow === 'cancel') {
     `insert into bookings (sheet_row, ${names.join(', ')}, source) values ` +
     `(${row}, ${values.join(', ')}, 'bot') ` +
     `on conflict (sheet_row) do update set ${set.join(', ')}, updated_at = now();`;
+
+  // ── The payment, as its own row ────────────────────────────────────────────
+  //
+  // One `payments` row per SHEET LINE, keyed on sheet_row. The sheet has a
+  // single cumulative paid cell per line, so that is the most this can honestly
+  // record — mirroring it line for line keeps the two in step and stays
+  // idempotent on a retry. Individual payments get their own rows after the
+  // flip, when the sheet is no longer the one holding the number.
+  //
+  // Without this the table goes stale the moment it is created: it was
+  // backfilled at 09:50 and the first live payment at 09:52 was already missing
+  // from it, which `reconcile_payments` duly reported.
+  if (F['اجمالي ما تم دفعه'] !== undefined) {
+    const paidSql = sqlNum(F['اجمالي ما تم دفعه']);
+    if (paidSql === 'NULL' || Number(paidSql) === 0) {
+      // Paid cleared — an /undo, or a correction. The line no longer records a
+      // payment, so neither may the table.
+      sql += ` delete from payments where sheet_row = ${row};`;
+    } else {
+      // booking_id resolves through merged_into: a continuation line's payment
+      // belongs to the booking it continues, not to the line.
+      sql +=
+        ' insert into payments (booking_id, amount, method, receipt_file_id, paid_at, ' +
+        'sheet_row, source) select coalesce(b.merged_into, b.id), ' +
+        // An edit that changes only the amount leaves the method field absent.
+        // Falling back to the column rather than to NULL, because the row was
+        // just upserted above and so already holds the current method — writing
+        // NULL here would erase how the guest paid.
+        `${paidSql}, ${F['طريقة الدفع'] === undefined ? 'b.payment_method' : sqlStr(F['طريقة الدفع'])}, ` +
+        `${sqlStr(save.receiptFileId)}, now(), ` +
+        `${row}, 'bot' from bookings b where b.sheet_row = ${row} ` +
+        'on conflict (sheet_row) do update set booking_id = excluded.booking_id, ' +
+        'amount = excluded.amount, method = excluded.method, ' +
+        'receipt_file_id = coalesce(excluded.receipt_file_id, payments.receipt_file_id), ' +
+        'paid_at = excluded.paid_at;';
+    }
+  }
 } else if (flow === 'expense') {
   sql =
     'insert into expenses (sheet_row, expense_ref, item, amount, apartment_id, ' +

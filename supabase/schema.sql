@@ -150,6 +150,60 @@ create table if not exists booking_stays (
 create index if not exists booking_stays_booking_id_idx on booking_stays (booking_id);
 create index if not exists booking_stays_room_idx       on booking_stays (room_id, from_date);
 
+-- ── Payments ─────────────────────────────────────────────────────────────────
+--
+-- The sheet has ONE payment-method column (O طريقة الدفع) and one paid column
+-- (M اجمالي ما تم دفعه). So a guest who pays twice in two different methods
+-- cannot be recorded on one line, and the user's answer to that has been to
+-- **insert a second row** — confirmed in their own words, 2026-08-09: *"I
+-- inserted a row because محمد سعيد paid a new payment but it wasn't the same
+-- payment type as the one before."*
+--
+-- Live proof, two stays, four rows:
+--
+--   مروان  انبي 3 / 1     2026-08-02   rows 22, 23   600 كاش  + 1600 انستاباي
+--   محمد   ابو حديد 11/4  2026-08-02   rows 35, 36   600 انستاباي + 600 كاش
+--
+-- Note that BOTH columns get split, not just the method: row 22 carries a total
+-- of 600 and row 23 a total of 1600, and the stay really cost 2200. The booking
+-- is the sum of its rows.
+--
+-- This is the second one-to-many the sheet was hiding; `booking_stays` is the
+-- first. It is also the *cause* of the sheet_row instability that made the first
+-- live reconcile report 26 false differences — inserting a row renumbers every
+-- row beneath it. Giving payments somewhere real to live removes the reason
+-- anyone inserts a row by hand.
+
+create table if not exists payments (
+  id              bigint generated always as identity primary key,
+  booking_id      bigint not null references bookings(id) on delete cascade,
+  amount          numeric(12,2) not null,
+  method          text,
+  receipt_file_id text,
+  paid_at         timestamptz,
+  -- The sheet line this payment was recorded on, when it came from one. Unique
+  -- so the backfill and the mirror can both upsert on it instead of duplicating.
+  -- NULL for a payment that never had a line of its own.
+  sheet_row       int unique,
+  source          text not null default 'bot' check (source in ('bot', 'backfill', 'sheet')),
+  created_at      timestamptz not null default now()
+);
+
+create index if not exists payments_booking_id_idx on payments (booking_id);
+
+-- The extra sheet rows stay in `bookings`, one per sheet line, because the sheet
+-- is still authoritative and the reconcile compares row for row — deleting row
+-- 23 here would make the reconcile shout "missing in db" every morning about a
+-- row that is deliberately gone.
+--
+-- Instead the follower row points at the row it belongs to. `merged_into is
+-- null` means "this is a real booking"; anything else is a continuation line.
+-- At the flip the mirror writes those lines back out from `payments`, and this
+-- column becomes the record of which sheet line each one owns.
+alter table bookings add column if not exists merged_into bigint references bookings(id);
+
+create index if not exists bookings_merged_into_idx on bookings (merged_into);
+
 -- ── Expenses ─────────────────────────────────────────────────────────────────
 
 create table if not exists expenses (
@@ -325,6 +379,7 @@ alter table apartments    enable row level security;
 alter table rooms         enable row level security;
 alter table bookings      enable row level security;
 alter table booking_stays enable row level security;
+alter table payments      enable row level security;
 alter table expenses      enable row level security;
 alter table bot_sessions  enable row level security;
 alter table booking_audit enable row level security;
@@ -332,8 +387,8 @@ alter table sheet_snapshot enable row level security;
 
 -- Belt and braces: Supabase grants the API roles table privileges by default on
 -- creation, so take them back as well rather than relying on RLS alone.
-revoke all on apartments, rooms, bookings, booking_stays, expenses, bot_sessions,
-              booking_audit, sheet_snapshot
+revoke all on apartments, rooms, bookings, booking_stays, payments, expenses,
+              bot_sessions, booking_audit, sheet_snapshot
   from anon, authenticated;
 
 -- Compared against `bookings_live`, not `bookings`, and this is the whole trick.
@@ -374,3 +429,73 @@ where l.sheet_row is null
    -- Money is compared to the piastre; a rounding difference is a real one.
    or coalesce(s.total, 0) is distinct from coalesce(l.effective_total, 0)
    or coalesce(s.paid, 0)  is distinct from coalesce(l.paid, 0);
+
+-- ── The booking as it really is ──────────────────────────────────────────────
+--
+-- `bookings` and `bookings_live` are shaped like the SHEET: one row per sheet
+-- line, because that is what the reconcile has to compare against. This view is
+-- shaped like the WORLD: one row per booking, with the continuation lines folded
+-- back in and their money summed.
+--
+-- This is what the bot reads after the flip — availability, lookup and the
+-- reports — so that a guest who paid twice is one result and not two.
+-- `sheet_rows` carries every line the booking occupies, which is what the mirror
+-- needs to write it back out.
+
+drop view if exists bookings_model;
+create view bookings_model as
+select
+  b.id,
+  b.sheet_row,                              -- the primary line
+  agg.sheet_rows,
+  b.booking_ref, b.guest_ref, b.guest_name, b.booking_type, b.phone,
+  b.room_id, b.apartment_name, b.room_number,
+  b.arrival, b.nights, b.open_ended, b.nightly_rate, b.departure,
+  b.effective_nights,
+  agg.total,
+  agg.paid,
+  agg.total - agg.paid as remaining,
+  agg.methods,
+  agg.lines,
+  b.notes, b.cancelled_at, b.created_by, b.created_at, b.updated_at,
+  b.stay_segments,
+  -- What `payments` says, alongside what the sheet lines say. During the trust
+  -- period the two must agree; `reconcile_payments` below is what says so.
+  pay.payments_total,
+  pay.payments_n
+from bookings_live b
+join lateral (
+  select
+    -- The follower rows split BOTH money columns, so both are sums. On an
+    -- open-ended primary the effective figures are used, same as the reconcile.
+    coalesce(sum(coalesce(x.effective_total, 0)), 0) as total,
+    coalesce(sum(coalesce(x.paid, 0)), 0)           as paid,
+    string_agg(distinct nullif(x.payment_method, ''), ' + ') as methods,
+    count(*)                                         as lines,
+    array_agg(x.sheet_row order by x.sheet_row)      as sheet_rows
+  from bookings_live x
+  where coalesce(x.merged_into, x.id) = b.id
+) agg on true
+left join lateral (
+  select coalesce(sum(p.amount), 0) as payments_total,
+         count(*)                   as payments_n
+  from payments p
+  where p.booking_id = b.id
+) pay on true
+where b.merged_into is null;
+
+-- Does `payments` add up to what the sheet lines say was paid? A difference here
+-- means a payment was recorded in one place and not the other — the shadow-phase
+-- equivalent of a till that does not balance.
+drop view if exists reconcile_payments;
+create view reconcile_payments as
+select
+  m.id            as booking_id,
+  m.sheet_rows,
+  m.guest_name,
+  m.paid          as sheet_paid,
+  m.payments_total,
+  m.payments_n,
+  m.methods
+from bookings_model m
+where coalesce(m.paid, 0) is distinct from coalesce(m.payments_total, 0);
