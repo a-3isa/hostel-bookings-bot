@@ -119,12 +119,46 @@ if (flow === 'booking' || flow === 'edit' || flow === 'cancel') {
   // Without this the table goes stale the moment it is created: it was
   // backfilled at 09:50 and the first live payment at 09:52 was already missing
   // from it, which `reconcile_payments` duly reported.
-  if (F['اجمالي ما تم دفعه'] !== undefined) {
+  const act = save.payment;
+  if (act && Number(act.added)) {
+    // ── A payment as an EVENT ────────────────────────────────────────────────
+    //
+    // The sheet holds one method per row, so a guest paying twice in two
+    // methods keeps the running total but loses the first label — confirmed
+    // live on row 59, where 'كاش' became 'انستاباي' while the amount added up
+    // correctly. This records what was actually paid this time, and how, so the
+    // database keeps both and nobody has to insert a row to say it.
+    //
+    // Its own row, never an upsert on the line: two payments against one line
+    // must be two rows. `client_ref` carries the bot's save-lock timestamp, so
+    // a double tap converges rather than paying twice.
+    const methodSql = sqlStr(act.method);
+    sql +=
+      ' insert into payments (booking_id, amount, method, currency, receipt_file_id, ' +
+      'paid_at, client_ref, source) select coalesce(b.merged_into, b.id), ' +
+      `${sqlNum(act.added)}, ${methodSql}, ` +
+      `case when ${methodSql} like '%دولار%' then 'USD' ` +
+      `when ${methodSql} like '%يورو%' then 'EUR' else 'EGP' end, ` +
+      `${sqlStr(save.receiptFileId)}, now(), ${sqlStr(act.ref)}, 'bot' ` +
+      `from bookings b where b.sheet_row = ${row} ` +
+      'on conflict (client_ref) do nothing;';
+  } else if (F['اجمالي ما تم دفعه'] !== undefined) {
+    // No payment act on the payload: a correction typed into the paid column,
+    // an /undo, or a replay of an older session. Fall back to mirroring the
+    // line, which is what every row backfilled from the sheet looks like.
     const paidSql = sqlNum(F['اجمالي ما تم دفعه']);
     if (paidSql === 'NULL' || Number(paidSql) === 0) {
       // Paid cleared — an /undo, or a correction. The line no longer records a
-      // payment, so neither may the table.
-      sql += ` delete from payments where sheet_row = ${row};`;
+      // payment, so neither may the table: both the mirrored line row and any
+      // payment acts recorded against that line go.
+      //
+      // A first payment made at booking time is keyed `new:<guest>:<ms>`, not
+      // `<row>:<ms>`, because the row did not exist yet — so zeroing the paid
+      // cell of a brand new booking leaves that act behind. The daily
+      // reconcile_payments reports it, which is the right place for something
+      // this rare to surface rather than a guess made here.
+      sql += ` delete from payments where sheet_row = ${row}` +
+             ` or client_ref like '${row}:%';`;
     } else {
       // booking_id resolves through merged_into: a continuation line's payment
       // belongs to the booking it continues, not to the line.

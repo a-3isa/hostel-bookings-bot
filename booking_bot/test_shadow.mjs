@@ -152,15 +152,14 @@ check('payment method updated',
 check('untouched columns are not written',
   !s.sql.includes('guest_name') && !s.sql.includes('arrival'), s.sql);
 
-section('payments: every paid line gets a row of its own');
+section('payments: a payment is an event, not a cell');
 newBooking();
 s = shadow({ builder: 'booking', filledRows: 6 });
 check('a payment is written alongside the booking',
   s.sql.includes('insert into payments'), s.sql);
-check('keyed on the sheet line, so a retry converges',
-  s.sql.includes('on conflict (sheet_row) do update set booking_id = excluded.booking_id'),
-  s.sql);
-check('the amount and method are the ones just written',
+check('recorded as its own row, so a second method cannot replace the first',
+  s.sql.includes('on conflict (client_ref) do nothing'), s.sql);
+check('the amount and method are the ones just paid',
   /insert into payments[\s\S]*2000, 'كاش'/.test(s.sql), s.sql);
 check('a continuation line pays its parent booking',
   s.sql.includes('coalesce(b.merged_into, b.id)'), s.sql);
@@ -178,7 +177,7 @@ check('no payment row for غير مدفوع',
 check('and any earlier one for that line is removed',
   s.sql.includes('delete from payments where sheet_row = 12'), s.sql);
 
-section('payments: an edit that only moves the amount keeps the method');
+section('payments: adding to a booking records what was added, not the total');
 reset();
 sheetRows = SHEET;
 run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
@@ -186,10 +185,16 @@ sheetRows = null;
 run(cb('ef_paid')); run(msg('300')); run(cb('xpay_cash')); run(cb('xleft_no'));
 run(cb('xedone'));
 s = shadow();
-check('the edited total is the payment amount',
-  /insert into payments[\s\S]*1500,/.test(s.sql), s.sql);
-check('method falls back to the column, never to NULL',
-  s.sql.includes("1500, 'كاش'") || s.sql.includes('1500, b.payment_method'), s.sql);
+// Sara Omar had 1200 paid; adding 300 makes the SHEET say 1500. The payment
+// itself is 300 — recording 1500 would count her first payment twice.
+check('the sheet column still gets the running total',
+  s.sql.includes('coalesce(1500, 0)'), s.sql);
+check('the payment row is the 300 just handed over',
+  /insert into payments[\s\S]*300, 'كاش'/.test(s.sql), s.sql);
+check('and it does not re-record the total',
+  !/insert into payments[\s\S]*1500,/.test(s.sql), s.sql);
+check('idempotent on the save lock, so a double tap pays once',
+  /client_ref[\s\S]*'2:\d+'/.test(s.sql), s.sql);
 
 section('cancel: marks the row cancelled rather than deleting it');
 reset();
