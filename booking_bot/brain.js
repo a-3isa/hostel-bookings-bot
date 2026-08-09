@@ -1021,6 +1021,20 @@ function commitEdit(dd) {
     // back. Persisted by "Clear Session" once the write has actually landed.
     undo: undoRecord(dd),
     fields: dd.editNew,              // only the columns that actually changed
+    // What was paid THIS TIME, and how — not the running total the sheet gets.
+    // The sheet has one paid cell and one method cell per row, so a guest who
+    // pays twice in two methods loses the first one there; recording the act
+    // separately is what lets the database keep both without anybody inserting
+    // a row. `ref` is the idempotency key, and reuses the save lock's timestamp
+    // so a double tap converges instead of paying twice.
+    payment: dd.paidAdded
+      ? {
+        added: dd.paidAdded,
+        method: dd.editNew['طريقة الدفع'] ||
+          (dd.editOrig ? dd.editOrig['طريقة الدفع'] : '') || '',
+        ref: `${dd.editRow}:${dd.savingAt}`,
+      }
+      : null,
     receiptFileId: dd.editReceipt || '',
     groupChatId: CFG.GROUP_CHAT_ID,
     groupText: dd.paidOnly
@@ -1487,6 +1501,13 @@ switch (state) {
         { range: 'O{r}', values: [[d.payment]] },       // P skipped on purpose
         { range: 'Q{r}', values: [[d.notes]] },
       ],
+      // The booking's first payment, recorded as its own act so that a later
+      // one in a different method adds to it instead of replacing its label.
+      // No row number exists yet — the append decides it — so the idempotency
+      // key uses the guest and the moment instead.
+      payment: parseNum(d.paid)
+        ? { added: num(d.paid), method: d.payment, ref: `new:${d.private_id || d.name}:${Date.now()}` }
+        : null,
       receiptFileId: d.receipt || '',   // '' → group gets a plain text message
       groupChatId: CFG.GROUP_CHAT_ID,
       groupText: t('group_msg', summaryVars(d, dv)),
