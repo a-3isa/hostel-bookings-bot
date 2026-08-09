@@ -41,11 +41,17 @@ for (const j of rows) {
   if (!name) continue;                     // formula-only tail rows
   const row = Number(j.row_number);
   if (!row) continue;
+  // Column U — the booking's database id, written by the bot and by
+  // reindex.py. This is what lets the reconcile key on the BOOKING instead of
+  // the row it happens to occupy: inserting a row renumbers everything beneath
+  // it, and keying on sheet_row reported forty of those as differences once.
+  // Blank on a row nobody has stamped yet, and the reconcile falls back to
+  // sheet_row for those.
   values.push(
     `(${row}, ${s(name)}, ${s(j['اسم الشقة'])}, ${s(j['رقم الغرفة'])}, ` +
     `${s(j['تاريخ البداية'])}::date, ${n(j['عدد الليالي'])}, ` +
     `${n(j['اجمالي سعر الحجز'])}, ${n(j['اجمالي ما تم دفعه'])}, ` +
-    `${s(j['طريقة الدفع'])}, ${s(j['ملاحظات'])})`
+    `${s(j['طريقة الدفع'])}, ${s(j['ملاحظات'])}, ${n(j['معرف النظام'])})`
   );
 }
 
@@ -54,7 +60,7 @@ if (!values.length) return [];             // never blank the snapshot on a bad 
 const sql =
   'begin; delete from sheet_snapshot; ' +
   'insert into sheet_snapshot (sheet_row, guest_name, apartment_name, room_number, ' +
-  'arrival, nights, total, paid, payment_method, notes) values ' +
+  'arrival, nights, total, paid, payment_method, notes, booking_id) values ' +
   values.join(', ') + '; commit;';
 
 return [{ json: { rows: values.length, open_rows: Object.values(openByRow).filter(Boolean).length, sql } }];

@@ -354,6 +354,9 @@ join bookings b
 
 create table if not exists sheet_snapshot (
   sheet_row      int primary key,
+  -- Column U: the booking's database id as the SHEET has it. Blank on a row
+  -- nothing has stamped yet. See reconcile_bookings for why it matters.
+  booking_id     bigint,
   guest_name     text,
   apartment_name text,
   room_number    text,
@@ -407,34 +410,51 @@ revoke all on apartments, rooms, bookings, booking_stays, payments, expenses,
 -- reproduce exactly what the sheet's own formulas produce, so a difference here
 -- means something really is wrong.
 
+-- Matched on the BOOKING first and the row only as a fallback.
+--
+-- sheet_row is not an identity: inserting a row renumbers every row beneath it,
+-- and this view once reported forty differences that were all one insert.
+-- Column U carries the booking's id, so when it is present the two sides are
+-- matched on the booking itself and a shifted row is just a shifted row.
+-- Verified by moving every snapshot row down one: 0 differences, where the old
+-- keying gave 40.
+--
+-- Rows nobody has stamped yet — a fresh append, a hand-typed row reindex.py has
+-- not seen — still match on sheet_row, which is the old behaviour for exactly
+-- the rows that have no better answer.
 drop view if exists reconcile_bookings;
 create view reconcile_bookings as
+with paired as (
+  select s.*, coalesce(s.booking_id, l0.id) as match_id
+  from sheet_snapshot s
+  left join bookings_live l0 on s.booking_id is null and l0.sheet_row = s.sheet_row
+)
 select
-  coalesce(l.sheet_row, s.sheet_row) as sheet_row,
+  coalesce(l.sheet_row, p.sheet_row) as sheet_row,
   case
-    when l.sheet_row is null then 'missing in db'
-    when s.sheet_row is null then 'missing in sheet'
+    when l.id is null then 'missing in db'
+    when p.sheet_row is null then 'missing in sheet'
     else 'differs'
   end as problem,
-  s.guest_name as sheet_guest,     l.guest_name as db_guest,
-  s.apartment_name as sheet_apt,   l.apartment_name as db_apt,
-  s.room_number as sheet_room,     l.room_number as db_room,
-  s.arrival as sheet_arrival,      l.arrival as db_arrival,
-  s.nights as sheet_nights,        l.effective_nights as db_nights,
-  s.total as sheet_total,          l.effective_total as db_total,
-  s.paid as sheet_paid,            l.paid as db_paid
-from sheet_snapshot s
-full outer join bookings_live l on l.sheet_row = s.sheet_row
-where l.sheet_row is null
-   or s.sheet_row is null
-   or s.guest_name     is distinct from l.guest_name
-   or s.apartment_name is distinct from l.apartment_name
-   or s.room_number    is distinct from l.room_number
-   or s.arrival        is distinct from l.arrival
-   or s.nights         is distinct from l.effective_nights
+  p.guest_name as sheet_guest,     l.guest_name as db_guest,
+  p.apartment_name as sheet_apt,   l.apartment_name as db_apt,
+  p.room_number as sheet_room,     l.room_number as db_room,
+  p.arrival as sheet_arrival,      l.arrival as db_arrival,
+  p.nights as sheet_nights,        l.effective_nights as db_nights,
+  p.total as sheet_total,          l.effective_total as db_total,
+  p.paid as sheet_paid,            l.paid as db_paid
+from paired p
+full outer join bookings_live l on l.id = p.match_id
+where l.id is null
+   or p.sheet_row is null
+   or p.guest_name     is distinct from l.guest_name
+   or p.apartment_name is distinct from l.apartment_name
+   or p.room_number    is distinct from l.room_number
+   or p.arrival        is distinct from l.arrival
+   or p.nights         is distinct from l.effective_nights
    -- Money is compared to the piastre; a rounding difference is a real one.
-   or coalesce(s.total, 0) is distinct from coalesce(l.effective_total, 0)
-   or coalesce(s.paid, 0)  is distinct from coalesce(l.paid, 0);
+   or coalesce(p.total, 0) is distinct from coalesce(l.effective_total, 0)
+   or coalesce(p.paid, 0)  is distinct from coalesce(l.paid, 0);
 
 -- ── The booking as it really is ──────────────────────────────────────────────
 --
