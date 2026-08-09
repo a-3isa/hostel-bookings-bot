@@ -68,10 +68,16 @@ create table if not exists bookings (
 
   total          numeric(12,2),
   -- Verbatim text of a hand-entered formula in اجمالي سعر الحجز, kept for
-  -- provenance. Row 32 is `=940*2+650*8` — two rates across one stay, which no
-  -- single nightly_rate can express. Its evaluated total is correct and the stay
-  -- is closed, so nothing recomputes; this column is so the derivation is not
-  -- simply lost.
+  -- provenance.
+  --
+  -- Two shapes occur, and they mean different things:
+  --   `=500*I{row}`      a nightly rate. The sheet recomputes it as the stay
+  --                      runs, so `nightly_rate` is set and so does this.
+  --   `=940*2+650*8`     someone's arithmetic for a price agreed ONCE — the
+  --                      full amount of the booking, typed in one go (confirmed
+  --                      by the user, 2026-08-08). It does not recompute, even
+  --                      when the stay is open-ended. The differing rates are
+  --                      there because the guest changed rooms.
   total_formula  text,
   paid           numeric(12,2) not null default 0,
   payment_method text,

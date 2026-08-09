@@ -156,10 +156,10 @@ def rate_segments(total_formula):
     """
     Split `=940*2+650*8` into [(940, 2), (650, 8)] — rate and nights per segment.
 
-    A hand-typed total made of rate*nights terms is someone recording a stay that
-    changed partway through, usually because the guest moved room. The sheet has
-    nowhere to put that, so it ends up in the formula. Returns [] when the shape
-    is anything else.
+    A hand-typed total made of rate*nights terms is someone pricing a stay that
+    changed partway through, because the guest moved room. It is a price agreed
+    once, not a live calculation — the segments record how it was arrived at, and
+    never override the total. Returns [] when the shape is anything else.
     """
     body = str(total_formula or "").strip().lstrip("=")
     if not body:
@@ -273,7 +273,9 @@ def build_sql(reg, bookings, expenses):
             last = seq == len(b["segments"])
             # Only the final segment can still be running.
             open_seg = "true" if (last and b["is_open"]) else "false"
-            note = ("room unknown — the sheet keeps only the current room"
+            # The earlier room is not in the sheet and the user has confirmed it
+            # does not matter; the rate history is the part worth keeping.
+            note = ("earlier room not recorded, and not needed"
                     if not last else "current room, as recorded in the sheet")
             room_sql = ("NULL" if not last else
                         (f"(select r.id from rooms r join apartments a on a.id = r.apartment_id "

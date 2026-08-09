@@ -14,16 +14,21 @@ What it sets up:
   * Config gains REPORT_GROUP_CHAT_ID.
   * "Needs Bookings?" also fires on NOTES, the turn that draws the booking
     confirmation, so the availability check has rows to look at.
-  * "Needs Locations?" / "Read Locations" — الإتاحة!A5:B, read only on the turns
-    that draw an apartment keyboard.
+  * "Needs Locations?" / "Read Locations": the availability tab A3:B, read only
+    on the turns that draw an apartment keyboard.
   * "Clear Session" parks the undo pre-image instead of blanking `data`.
-  * A schedule branch: Report Schedule → Report Config → Read Report Formulas →
-    Read Report Values → Build Reports → Send Report.
+  * A schedule branch: Report Schedule -> Report Config -> Read Report Formulas
+    -> Read Report Values -> Build Reports -> Send Report.
 """
 
 import json
 import os
 import sys
+
+# Windows consoles default to a legacy codepage; this script prints Arabic and
+# arrows, and a UnicodeEncodeError here would abort a half-applied deploy.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import push_brain as pb   # same directory; reuses its JSON-RPC plumbing
 
@@ -225,6 +230,48 @@ def main():
     connect("Read Report Formulas", "Read Report Values")
     connect("Read Report Values", "Build Reports")
     connect("Build Reports", "Send Report")
+
+    # ── Phase 2: dual-write to Supabase ──────────────────────────────────────
+    #
+    # Hangs off "Clear Session", which runs only after the sheet write actually
+    # succeeded, and in parallel with the existing path — so the receptionist's
+    # ✅ does not wait on Postgres and cannot be turned into an error by it.
+    if "Build Shadow Write" not in have:
+        add_node("Build Shadow Write", "n8n-nodes-base.code", 2,
+                 {"jsCode": read_source("build_shadow_write.js")}, [3056, 448])
+        print("  + Build Shadow Write")
+    else:
+        ops.append({"type": "updateNodeParameters", "nodeName": "Build Shadow Write",
+                    "parameters": {"jsCode": read_source("build_shadow_write.js")}})
+        print("  ~ Build Shadow Write code")
+
+    pg = next((c for c in json.loads(pb.call_tool("list_credentials", {"limit": 100}))["data"]
+               if c["type"] == "postgres"), None)
+    if pg:
+        if "Shadow Write" not in have:
+            add_node("Shadow Write", "n8n-nodes-base.postgres", 2.6,
+                     {"operation": "executeQuery", "query": "={{ $json.sql }}",
+                      "options": {}},
+                     [3296, 448],
+                     cred=("postgres", pg["id"], pg["name"]),
+                     # The whole point of the trust period: Supabase being down,
+                     # asleep or wrong must never surface to a receptionist.
+                     settings={"onError": "continueRegularOutput", "retryOnFail": True,
+                               "maxTries": 2, "alwaysOutputData": True})
+            print(f"  + Shadow Write  (credential: {pg['name']})")
+        connect("Clear Session", "Build Shadow Write")
+        connect("Build Shadow Write", "Shadow Write")
+        ops.append({"type": "setNodeSettings", "nodeName": "Shadow Write",
+                    "settings": {"onError": "continueRegularOutput",
+                                 "retryOnFail": True, "maxTries": 2}})
+    else:
+        print("\n  ! No Postgres credential in n8n, so the shadow write is not wired up.")
+        print("    Create one (Credentials -> New -> Postgres) and re-run this script:")
+        print("      Host     aws-1-eu-west-1.pooler.supabase.com")
+        print("      Database postgres")
+        print("      User     postgres.<project-ref>")
+        print("      Password <the one in SUPABASE_DB_URL>")
+        print("      Port     6543          SSL: require\n")
 
     ops.extend(creds)          # credentials bind after their node exists
     if not ops:
