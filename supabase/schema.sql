@@ -470,6 +470,12 @@ select
   pay.payments_total,
   pay.payments_n,
   pay.currencies,
+  -- Every payment kept in the currency it was made in. This is the honest
+  -- answer to "what has this guest paid": {"EGP": 650, "USD": 40}, and
+  -- `paid_label` renders it as "650 EGP + 40 USD". Never a single number that
+  -- needed an exchange rate to exist.
+  pay.paid_by_currency,
+  pay.paid_label,
   -- When a booking mixes currencies, `total`, `paid` and `remaining` above are
   -- sums across them and mean nothing. Read this before believing them.
   coalesce(array_length(pay.currencies, 1), 1) > 1 as mixed_currency
@@ -487,11 +493,19 @@ join lateral (
   where coalesce(x.merged_into, x.id) = b.id
 ) agg on true
 left join lateral (
-  select coalesce(sum(p.amount), 0)     as payments_total,
-         count(*)                       as payments_n,
-         array_agg(distinct p.currency) as currencies
-  from payments p
-  where p.booking_id = b.id
+  select
+    coalesce(sum(c.amt), 0)                   as payments_total,
+    coalesce(sum(c.n), 0)                     as payments_n,
+    array_agg(c.currency order by c.currency) as currencies,
+    jsonb_object_agg(c.currency, c.amt)       as paid_by_currency,
+    string_agg(trim(to_char(c.amt, 'FM999999999.##')) || ' ' || c.currency,
+               ' + ' order by c.currency)     as paid_label
+  from (
+    select p.currency, sum(p.amount) as amt, count(*) as n
+    from payments p
+    where p.booking_id = b.id
+    group by p.currency
+  ) c
 ) pay on true
 where b.merged_into is null;
 
@@ -500,8 +514,8 @@ where b.merged_into is null;
 -- offers دولار and يورو as payment methods, so this will happen again.
 drop view if exists mixed_currency_bookings;
 create view mixed_currency_bookings as
-select m.id, m.sheet_rows, m.guest_name, m.arrival, m.methods, m.currencies,
-       m.total as meaningless_total
+select m.id, m.sheet_rows, m.guest_name, m.arrival, m.methods,
+       m.currencies, m.paid_by_currency, m.paid_label
 from bookings_model m
 where m.mixed_currency;
 
@@ -519,4 +533,8 @@ select
   m.payments_n,
   m.methods
 from bookings_model m
-where coalesce(m.paid, 0) is distinct from coalesce(m.payments_total, 0);
+-- A mixed-currency booking cannot be checked this way: the sheet's paid column
+-- is a sum across currencies and so is payments_total. Those are listed by
+-- mixed_currency_bookings instead, which is where a human looks at them.
+where not m.mixed_currency
+  and coalesce(m.paid, 0) is distinct from coalesce(m.payments_total, 0);
