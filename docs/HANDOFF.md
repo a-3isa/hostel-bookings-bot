@@ -125,16 +125,52 @@ tests still describe the live code. Two decisions inside that are load-bearing:
 Both nodes are `alwaysOutputData: true` and `onError: continueRegularOutput`: an
 empty result or a Supabase blip must not stop the branch before the Brain runs.
 
-**What has NOT been verified:** no live turn had hit either node when this was
-written — the queries were checked against the live database, and the wiring and
-credential were applied cleanly, but nothing has run end to end. First thing next
-session: check an execution that passes through `Read Bookings For Edit`, and
-confirm the apartment keyboard still draws.
+**Verified live:** execution 6273 ran the Postgres read in 422 ms, rows arriving
+with the sheet's headers and the Brain consuming them unchanged.
 
-**Repo/live parity gap:** `deploy_graph.py` still *describes* these two as
-`googleSheets` nodes. It will not revert them (it only adds nodes that are
-missing), but it is now lying. Next task: move both queries into
-`booking_bot/nodes/*.sql` and have the script deploy them as Postgres nodes.
+That same execution turned up a bug with nothing to do with the migration: an
+admin typed **٢٥**, the digits their keyboard actually produces, and the bot said
+no booking has that ID. Guest 25 exists. `parseNum` was `parseFloat` and the ID
+lookup was an exact string compare, so no amount or ID typed in Arabic-Indic
+digits had ever matched. `asciiDigits()` in `brain.js` now folds the Arabic-Indic
+and Persian ranges to ASCII in front of both.
+
+`deploy_graph.py` no longer describes these as `googleSheets` nodes, and the
+queries live in `booking_bot/nodes/*.sql`. It also used to re-pin *Read Locations*
+to the الإتاحة range one section further down, which would have turned it back
+into a Sheets read on the next deploy — that line is gone.
+
+## Phase 4c — started: the sheet has a stable key
+
+**Column U (`معرف النظام`) now carries each booking's database id**, written by
+`supabase/write_sheet_ids.py`. U was chosen because the tab is 27 columns wide and
+U–AA were verified empty first: nothing shifts, no formula moves, and the column
+can be cleared with no loss. The script refuses to overwrite a non-empty cell that
+disagrees with the database.
+
+This is the half of the ownership decision that makes option 1 safe. With an id on
+every row the mirror can tell its own rows from a human's, so a hand-inserted row
+can be **adopted** rather than overwritten.
+
+**Still to do for 4c:** the mirror itself (Postgres writes first, then the sheet's
+input columns A–J, L, M, O, Q plus U), and the adoption path for unrecognised
+rows. New rows appended by the bot get a blank U until `write_sheet_ids.py` runs
+again — the mirror is what closes that.
+
+## Money can be in more than one currency
+
+Found 2026-08-09 by folding امير سيف الدين's two lines together: row 44 is **40
+دولار**, row 57 is **650 كاش**, and the model reported `total 690, remaining 0`.
+690 is not an amount of anything.
+
+The sheet has no currency column — طريقة الدفع carries it — and دولار and يورو are
+both on the bot's payment keyboard, so this recurs. `payments.currency` is derived
+from the method, `bookings_model` exposes `currencies` and `mixed_currency`, and
+`mixed_currency_bookings` lists the affected bookings. One today.
+
+**No exchange rate anywhere, deliberately.** Converting needs a rate, a date and
+someone's authority; inventing one to make a column add up produces a number
+nobody can audit. Any report that totals money must consult `mixed_currency`.
 
 ## Two findings that change Phase 4
 
