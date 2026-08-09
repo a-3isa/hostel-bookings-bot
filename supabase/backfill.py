@@ -100,6 +100,37 @@ def qnum(v):
     return str(int(f)) if f.is_integer() else str(f)
 
 
+def numeric(v):
+    """A sheet cell as a number, or None.
+
+    The sheet formats larger amounts with thousands separators, so a paid cell
+    can arrive as the string "2,225.00". Passed straight to psycopg as a
+    parameter for a numeric column that is a hard error, which is how the
+    snapshot load first failed — `qnum` had the comma handling but only the
+    SQL-building path went through it.
+    """
+    if v is None or v == "":
+        return None
+    try:
+        return float(str(v).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def text_or_none(v):
+    """An empty cell is absent, not the empty string.
+
+    The reconcile compares with IS DISTINCT FROM, under which '' and NULL differ.
+    The n8n snapshot node emits NULL for a blank cell, so this path has to as
+    well or the two producers disagree about the same sheet — which is how row 9
+    (a guest with no apartment, no room and no arrival) showed up as a
+    difference against a database that says exactly the same thing.
+    """
+    if v is None or v == "":
+        return None
+    return v
+
+
 def cell(row, idx):
     row = list(row) + [""] * 24
     return str(row[idx]).strip()
@@ -148,6 +179,14 @@ def load_bookings(sh):
             "room": cell(row, B["room"]),
             "arrival": cell(row, B["arrival"]) if ISO.match(cell(row, B["arrival"])) else "",
             "nights": "" if is_open else nights_raw,
+            # What the cell DISPLAYS, open-ended or not. `nights` above is the
+            # modelled value and is deliberately blank on an open stay; this is
+            # the evaluated one, and it is what the snapshot has to record —
+            # `sheet_snapshot` means "what the sheet currently shows", and
+            # `bookings_live.effective_nights` reproduces exactly that number
+            # from the database side. Storing NULL here instead reported all
+            # seven open stays as differing every run.
+            "nights_shown": nights_raw,
             "is_open": is_open,
             "total": cell(row, B["total"]),
             "paid": cell(row, B["paid"]),
@@ -361,6 +400,15 @@ def report(reg, bookings, expenses):
 
 
 def main():
+    # Every guest name, apartment and note in this data is Arabic, and a Windows
+    # console defaults to cp1252, which cannot encode any of it. Without this the
+    # reconcile does its work and then dies printing the answer.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--out")
@@ -401,9 +449,11 @@ def main():
                             "insert into sheet_snapshot (sheet_row, guest_name, apartment_name,"
                             " room_number, arrival, nights, total, paid, payment_method, notes)"
                             " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                            (b["sheet_row"], b["guest_name"], b["apartment"], b["room"],
-                             b["arrival"] or None, b["nights"] or None, b["total"] or None,
-                             b["paid"] or None, b["payment"], b["notes"]))
+                            (b["sheet_row"], text_or_none(b["guest_name"]),
+                             text_or_none(b["apartment"]), text_or_none(b["room"]),
+                             b["arrival"] or None, numeric(b["nights_shown"]),
+                             numeric(b["total"]), numeric(b["paid"]),
+                             text_or_none(b["payment"]), text_or_none(b["notes"])))
                     cur.execute("select * from reconcile_bookings order by sheet_row;")
                     rows = cur.fetchall()
                 print(f"\nreconcile: {len(rows)} discrepancies")
