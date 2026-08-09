@@ -183,10 +183,35 @@ with itself half way through.
 **Run `reindex.py` before trusting a reconcile that reports many differences.** A
 wall of them almost certainly means rows moved, not that anything is wrong.
 
+### The bot stamps its own id now
+
+*Read Booking Id* → *Write Booking Id* hang off the shadow branch: the branch
+reads back the id it just wrote and puts it in column U. First write that runs
+Postgres → sheet, and the seed of the mirror.
+
+The flow test is inside the SQL rather than costing an IF node — the expression
+renders to `and true` or `and false`, and `and false` returns no rows, which
+stops the branch before the Sheets write. Not a trick for its own sake:
+**expenses are on a different tab and their `sheet_row` numbering overlaps the
+bookings tab's**, so a booking id written onto the expenses sheet would silently
+corrupt someone else's row 5. Both nodes continue on error; the ✅ went out long
+before this runs, and a blank U is what `reindex.py` repairs.
+
+**Not yet exercised** — the bot has been idle since 11:33. First booking or edit
+after this should leave an id in U; if it does not, check those two nodes.
+
+### The reconcile no longer keys on the row
+
+`sheet_snapshot.booking_id` carries column U, and `reconcile_bookings` matches on
+the booking, falling back to `sheet_row` only for rows nobody has stamped yet.
+Verified by moving every snapshot row down one — **0 differences, where the old
+keying gave 40**. Both report reads widened A:T → A:U to carry the column, and
+`backfill.py` reads A:U for the same reason.
+
+This retires the finding that has been at the top of this document since Phase 3.
+
 **Still to do for 4c:** the mirror itself — Postgres written first, then the
-sheet's input columns A–J, L, M, O, Q plus U. That is the go/no-go, and it is
-what makes U self-maintaining; today a row the bot appends has a blank U until
-`reindex.py` runs.
+sheet's input columns A–J, L, M, O, Q. That is the go/no-go.
 
 ## Money can be in more than one currency
 
@@ -208,7 +233,7 @@ nobody can audit. Any report that totals money must consult `mixed_currency`.
 Both came out of running the reconcile against live data, which is exactly what
 the trust period is for.
 
-### 1. `sheet_row` is not a stable key
+### 1. `sheet_row` is not a stable key — SOLVED, kept for the reasoning
 
 The first live reconcile reported 26 differences. Nothing was broken: the user
 had **inserted a row**, which renumbered every row beneath it, so the shadow copy
