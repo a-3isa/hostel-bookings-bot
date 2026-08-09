@@ -165,8 +165,11 @@ def load_registry(sh):
 def load_bookings(sh):
     """Rows keyed by their true sheet row, skipping blanks and formula-only rows."""
     ws = sh.worksheet(BOOKINGS_TAB)
-    values = ws.get("A2:T990")
-    formulas = ws.get("A2:T990", value_render_option="FORMULA")
+    # A:U, not A:T — column U carries the booking id, and the snapshot has to
+    # record it or this script and the n8n node disagree about the same sheet
+    # again (that cost three false-difference bugs on 2026-08-09).
+    values = ws.get("A2:U990")
+    formulas = ws.get("A2:U990", value_render_option="FORMULA")
     out = []
     for i, row in enumerate(values, start=2):
         name = cell(row, B["guest_name"])
@@ -195,6 +198,9 @@ def load_bookings(sh):
             # from the database side. Storing NULL here instead reported all
             # seven open stays as differing every run.
             "nights_shown": nights_raw,
+            # Column U (index 20), the booking's database id. Blank on a row
+            # nothing has stamped yet.
+            "booking_id": cell(row, 20),
             "is_open": is_open,
             "total": cell(row, B["total"]),
             "paid": cell(row, B["paid"]),
@@ -455,13 +461,14 @@ def main():
                     for b in bookings:
                         cur.execute(
                             "insert into sheet_snapshot (sheet_row, guest_name, apartment_name,"
-                            " room_number, arrival, nights, total, paid, payment_method, notes)"
-                            " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                            " room_number, arrival, nights, total, paid, payment_method, notes,"
+                            " booking_id) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                             (b["sheet_row"], text_or_none(b["guest_name"]),
                              text_or_none(b["apartment"]), text_or_none(b["room"]),
                              b["arrival"] or None, numeric(b["nights_shown"]),
                              numeric(b["total"]), numeric(b["paid"]),
-                             text_or_none(b["payment"]), text_or_none(b["notes"])))
+                             text_or_none(b["payment"]), text_or_none(b["notes"]),
+                             numeric(b["booking_id"])))
                     cur.execute("select * from reconcile_bookings order by sheet_row;")
                     rows = cur.fetchall()
                 print(f"\nreconcile: {len(rows)} discrepancies")

@@ -224,16 +224,28 @@ def main():
         print("  + Report Config")
     if "Read Report Formulas" not in have:
         add_node("Read Report Formulas", "n8n-nodes-base.googleSheets", 4.7,
-                 sheets_read(BOOKINGS_TAB, "A:T", formula=True),
+                 sheets_read(BOOKINGS_TAB, "A:U", formula=True),
                  [-720, 800], cred=SHEETS_CRED)
         print("  + Read Report Formulas")
     if "Read Report Values" not in have:
         # executeOnce: the formulas read hands it N items, and without this the
         # Sheets node would re-read the whole tab once per row.
         add_node("Read Report Values", "n8n-nodes-base.googleSheets", 4.7,
-                 sheets_read(BOOKINGS_TAB, "A:T"),
+                 sheets_read(BOOKINGS_TAB, "A:U"),
                  [-480, 800], cred=SHEETS_CRED, settings={"executeOnce": True})
         print("  + Read Report Values (executeOnce)")
+    # Both report reads widened A:T -> A:U so the snapshot carries column U, the
+    # booking id. That is what lets the daily reconcile key on the BOOKING
+    # rather than on the row it happens to sit on: an inserted row renumbers
+    # every row beneath it, and keying on sheet_row turned that into a wall of
+    # differences that were not real. Nothing else about the reports changes —
+    # they address columns by header name, so an extra one is inert.
+    for node, formula in (("Read Report Formulas", True), ("Read Report Values", False)):
+        if node in have:
+            ops.append({"type": "updateNodeParameters", "nodeName": node,
+                        "parameters": sheets_read(BOOKINGS_TAB, "A:U", formula=formula)})
+            print(f"  ~ {node} reads A:U")
+
     if "Build Reports" not in have:
         add_node("Build Reports", "n8n-nodes-base.code", 2,
                  {"jsCode": read_source("build_reports.js")}, [-240, 800])
