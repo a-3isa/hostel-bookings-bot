@@ -184,6 +184,12 @@ const S = {
     'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'],
   cal_days: ['Sa', 'Su', 'Mo', 'Tu', 'We', 'Th', 'Fr'],
   ask_total: '💰 اجمالي سعر الحجز:',
+  // An open-ended stay has no total to ask for. Asking for one produces a
+  // number somebody made up, and the sheet then grew hand-typed `=500*I10`
+  // formulas to express what was meant — six of them, before this existed.
+  ask_rate: '💰 سعر الليلة (الحجز مفتوح، الاجمالي يُحسب تلقائياً):',
+  rate_per_night: '{rate} / ليلة',
+  running_total: 'يُحسب تلقائياً',
   ask_payment: '💳 طريقة الدفع:',
   ask_paid: '💵 اجمالي ما تم دفعه:',
   ask_receipt: '📎 أرسل صورة إيصال التحويل أو اضغط تخطي:',
@@ -771,10 +777,26 @@ if (!isAdmin && !isCashier) {
 // ─── Derived / summary (port of _derived + _summary_kwargs) ───────────────────
 
 function derived(dd) {
-  const remaining = dd.total - dd.paid;
   const nightsDisp = dd.infinity ? t('infinity_label') : String(dd.nights);
   const departure = dd.infinity ? t('infinity_label') : isoAddDays(dd.arrival_date, dd.nights);
-  return { remaining: num(remaining), nights_disp: nightsDisp, departure };
+  // An open-ended stay has no total yet — it is a rate, and the bill is however
+  // many nights it turns out to be. Showing a scalar here would be inventing a
+  // checkout date nobody has agreed to, so the summary shows the rate and says
+  // the total is still running.
+  if (dd.infinity) {
+    return {
+      remaining: t('running_total'),
+      nights_disp: nightsDisp,
+      departure,
+      total_disp: t('rate_per_night', { rate: num(dd.nightly_rate) }),
+    };
+  }
+  return {
+    remaining: num(dd.total - dd.paid),
+    nights_disp: nightsDisp,
+    departure,
+    total_disp: num(dd.total),
+  };
 }
 
 // Every message built from these vars is sent with parse_mode: 'Markdown', so
@@ -789,7 +811,7 @@ function summaryVars(dd, dv) {
     private_id: mdEscape(dd.private_id), name: mdEscape(dd.name), btype: dd.btype,
     phone: mdEscape(dd.phone), apartment: dd.apartment, room: dd.room,
     nights: dv.nights_disp, arrival: dd.arrival_date, departure: dv.departure,
-    total: num(dd.total), paid: num(dd.paid), remaining: dv.remaining,
+    total: dv.total_disp, paid: num(dd.paid), remaining: dv.remaining,
     payment: dd.payment, notes: mdEscape(dd.notes || t('empty')),
     receipt: dd.receipt ? t('receipt_attached') : t('empty'),
     actor,
@@ -1455,9 +1477,23 @@ switch (state) {
     m = /^cal_day_(\d+)_(\d+)_(\d+)$/.exec(cbData);
     if (m) {
       d.arrival_date = `${m[1]}-${m[2]}-${m[3]}`;
-      reply(t('ask_total'));
-      setState('TOTAL', d);
+      // An open stay is priced per night; a fixed one is priced in full.
+      if (d.infinity) { reply(t('ask_rate')); setState('RATE', d); }
+      else { reply(t('ask_total')); setState('TOTAL', d); }
     }
+    break;
+  }
+
+  case 'RATE': {
+    if (cq) break;
+    const v = parseNum(text);
+    if (v === null || v <= 0) { reply(t('num_error')); break; }
+    d.nightly_rate = v;
+    // No total: the sheet computes it from the rate and the night count, both
+    // of which keep moving while the guest is still in the room.
+    d.total = null;
+    reply(t('ask_payment'), keyGrid(PAYMENTS, 'pay_'));
+    setState('PAYMENT', d);
     break;
   }
 
@@ -1531,6 +1567,13 @@ switch (state) {
     // "{r}" is substituted with the real row number by "Build Booking Row".
     const nightsCell = d.infinity ? '=TODAY()-J{r}' : d.nights;
 
+    // اجمالي سعر الحجز on an open stay is the rate times however many nights it
+    // has run, expressed as the formula rather than as a number that goes stale
+    // overnight. This is what people were already typing by hand — `=500*I10`
+    // appeared on five rows — now written deliberately, with the rate also
+    // stored properly in the database.
+    const totalCell = d.infinity ? `=${num(d.nightly_rate)}*I{r}` : num(d.total);
+
     // Legacy positional form, still consumed by the HTTP write path. Derived from
     // `fields` below so the two cannot drift apart.
     const aToJ = [
@@ -1560,14 +1603,14 @@ switch (state) {
         'رقم الغرفة': Number(d.room),
         'عدد الليالي': nightsCell,
         'تاريخ البداية': d.arrival_date,
-        'اجمالي سعر الحجز': num(d.total),
+        'اجمالي سعر الحجز': totalCell,
         'اجمالي ما تم دفعه': num(d.paid),
         'طريقة الدفع': d.payment,
         'ملاحظات': d.notes,
       },
       ranges: [
         { range: 'A{r}:J{r}', values: [aToJ] },
-        { range: 'L{r}:M{r}', values: [[num(d.total), num(d.paid)]] },
+        { range: 'L{r}:M{r}', values: [[totalCell, num(d.paid)]] },
         { range: 'O{r}', values: [[d.payment]] },       // P skipped on purpose
         { range: 'Q{r}', values: [[d.notes]] },
       ],

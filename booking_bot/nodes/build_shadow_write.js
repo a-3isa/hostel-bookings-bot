@@ -83,7 +83,20 @@ if (flow === 'booking' || flow === 'edit' || flow === 'cancel') {
     cols.push(`open_ended = ${isOpen ? 'true' : 'false'}`);
     set.push('open_ended = excluded.open_ended');
   }
-  put('total', F['اجمالي سعر الحجز'], sqlNum(F['اجمالي سعر الحجز']));
+  // On an open stay the sheet cell is `=<rate>*I{row}`, so sqlNum would make it
+  // NULL. The rate itself is what the database stores — `nightly_rate` — and
+  // `bookings_live.effective_total` recomputes the running bill from it, which
+  // is exactly what the sheet's formula shows.
+  const totalRaw = F['اجمالي سعر الحجز'];
+  const rateMatch = typeof totalRaw === 'string' && /^=([0-9.]+)\*I/.exec(totalRaw.trim());
+  if (rateMatch) {
+    cols.push(`nightly_rate = ${rateMatch[1]}`);
+    set.push('nightly_rate = excluded.nightly_rate');
+    cols.push('total = NULL');
+    set.push('total = excluded.total');
+  } else {
+    put('total', totalRaw, sqlNum(totalRaw));
+  }
   put('paid', F['اجمالي ما تم دفعه'], `coalesce(${sqlNum(F['اجمالي ما تم دفعه'])}, 0)`);
   put('payment_method', F['طريقة الدفع'], sqlStr(F['طريقة الدفع']));
   put('notes', F['ملاحظات'], sqlStr(F['ملاحظات']));

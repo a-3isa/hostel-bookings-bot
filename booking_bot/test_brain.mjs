@@ -361,8 +361,13 @@ check('غير مدفوع skips the paid step', r.reply.text === '📝 ملاحظ
 r = run(cb('notes_skip'));
 check('∞ shown as مفتوح in summary', r.reply.text.includes('🌙 عدد الليالي: ∞ مفتوح'));
 check('∞ departure shown as مفتوح', r.reply.text.includes('📅 المغادرة: ∞ مفتوح'));
-check('unpaid → remaining = total', r.reply.text.includes('🧾 المتبقي: 1000'));
-
+// An open stay is priced per night, so the 1000 above was the RATE. There is no
+// total to show yet and no remaining to compute — both depend on a checkout
+// nobody has agreed to.
+check('the rate is shown instead of a made-up total',
+  r.reply.text.includes('1000 / ليلة'), r.reply.text);
+check('and the balance says it is still running',
+  r.reply.text.includes('🧾 المتبقي: يُحسب تلقائياً'), r.reply.text);
 r = run(cb('save'));
 check('btype auto = بوكينج', r.save.ranges[0].values[0][3] === 'بوكينج');
 check('booking id forced to text', r.save.ranges[0].values[0][0] === "'BK-99");
@@ -371,6 +376,35 @@ const body2 = buildWrite(41);
 check('the {r} placeholder is resolved to the real row',
   body2['عدد الليالي'] === '=TODAY()-J43', body2['عدد الليالي']);
 check('paid 0 written', body2['اجمالي ما تم دفعه'] === 0, body2['اجمالي ما تم دفعه']);
+// The rate reaches the sheet as a formula, so اجمالي سعر الحجز keeps up with
+// the night count instead of freezing at whatever it was on the day of entry.
+// This is the thing five rows were expressing by hand as `=500*I10`.
+check('the open stay is priced as a live formula',
+  body2['اجمالي سعر الحجز'] === '=1000*I43', body2['اجمالي سعر الحجز']);
+
+section('booking: an open stay asks for a rate, a fixed one asks for a total');
+resetSession();
+run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+run(msg('4242')); run(msg('نزيل مفتوح')); run(cb('bt_external')); run(msg('0100'));
+run(cb('ar_0_1'));
+run(cb('nights_inf'));
+r = run(cb('cal_day_2026_01_02'));
+check('open stay is asked for the nightly rate',
+  r.reply.text.includes('سعر الليلة'), r.reply.text);
+check('and it says the total works itself out',
+  r.reply.text.includes('يُحسب تلقائياً'), r.reply.text);
+r = run(msg('0'));
+check('a rate of zero is refused', r.reply.text.includes('❌'), r.reply.text);
+
+resetSession();
+run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+run(msg('4243')); run(msg('نزيل محدد')); run(cb('bt_external')); run(msg('0100'));
+run(cb('ar_0_1'));
+run(cb('nights_3'));
+r = run(cb('cal_day_2026_01_02'));
+check('a fixed stay is still asked for the whole price',
+  r.reply.text === '💰 اجمالي سعر الحجز:', r.reply.text);
+resetSession();
 
 // ─── 5. Cancel + expense flow ─────────────────────────────────────────────────
 
