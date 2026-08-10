@@ -613,10 +613,21 @@ check('only changed columns are written',
 check('المتبقي is never written', !('المتبقي' in r.save.fields));
 check('paid amount was ADDED to the existing 1200, not replaced',
   r.save.fields['اجمالي ما تم دفعه'] === 2100, r.save.fields['اجمالي ما تم دفعه']);
-check('group message is a diff, not the whole booking',
-  r.save.groupText.includes('✏️ *تعديل حجز*') &&
-  r.save.groupText.includes('اجمالي ما تم دفعه: 1200 ← 2100') &&
-  r.save.groupText.includes('طريقة الدفع: كاش ← انستاباي'),
+// An admin adding a payment gets the payment message, not a column diff:
+// "1200 ← 2100" describes a cell moving, and the group is watching for money.
+check('the group is told a payment arrived, and how much',
+  r.save.groupText.includes('💵 *دفعة جديدة*') &&
+  r.save.groupText.includes('➕ المبلغ المضاف: 900') &&
+  r.save.groupText.includes('💵 اجمالي ما تم دفعه: 2100') &&
+  r.save.groupText.includes('💳 الدفع: انستاباي'),
+  r.save.groupText);
+check('anything else changed in the same session still gets reported',
+  r.save.groupText.includes('✏️ تعديلات أخرى:') &&
+  r.save.groupText.includes('ملاحظات:'),
+  r.save.groupText);
+check('and the payment columns are not repeated underneath as a diff',
+  !r.save.groupText.includes('اجمالي ما تم دفعه: 1200 ← 2100') &&
+  !r.save.groupText.includes('طريقة الدفع: كاش ← انستاباي'),
   r.save.groupText);
 check('edit receipt is carried through', r.save.receiptFileId === 'EDITFILE55');
 check('edit says who made it', r.save.groupText.includes('👤 بواسطة: Ahmed Isa'),
@@ -637,8 +648,9 @@ r = run(cb('xleft_no'));
 r = run(cb('xedone'));
 check('the single addition is saved (1200+300)',
   r.save.fields['اجمالي ما تم دفعه'] === 1500, r.save.fields['اجمالي ما تم دفعه']);
-check('diff shows the ORIGINAL sheet value as the before',
-  r.save.groupText.includes('اجمالي ما تم دفعه: 1200 ← 1500'), r.save.groupText);
+check('the payment message reports the addition and the new total',
+  r.save.groupText.includes('➕ المبلغ المضاف: 300') &&
+  r.save.groupText.includes('💵 اجمالي ما تم دفعه: 1500'), r.save.groupText);
 
 section('edit: refunds and corrections via negative amounts');
 resetSession();
@@ -657,7 +669,11 @@ run(cb('xleft_no'));
 r = run(cb('xedone'));
 check('refund subtracts (1200-200)', r.save.fields['اجمالي ما تم دفعه'] === 1000,
   r.save.fields['اجمالي ما تم دفعه']);
-check('diff shows the reduction', r.save.groupText.includes('اجمالي ما تم دفعه: 1200 ← 1000'),
+// A refund is a negative payment, and reads as one: the group sees -200 go out
+// and the new total, rather than having to subtract two numbers themselves.
+check('a refund reads as a negative payment',
+  r.save.groupText.includes('➕ المبلغ المضاف: -200') &&
+  r.save.groupText.includes('💵 اجمالي ما تم دفعه: 1000'),
   r.save.groupText);
 
 // Refunding the whole balance is legitimate; only going past zero is not.
@@ -1173,6 +1189,17 @@ check('it names the guest already in the room', r.reply.text.includes('نزيل 
 check('the save button changes to an explicit override',
   r.reply.reply_markup.inline_keyboard[0][0].text === '⚠️ احفظ رغم التعارض',
   r.reply.reply_markup.inline_keyboard[0][0].text);
+// New booking is 2026-09-10 for 3 nights (→ 09-13); the sitting guest runs
+// 09-08 → 09-12. The contested stretch is 09-10 → 09-12, two nights, and that
+// is the number the receptionist is actually deciding on.
+check('it says which nights are contested, not just the other stay',
+  r.reply.text.includes('🔻 التداخل: 2026-09-10 ← 2026-09-12'), r.reply.text);
+check('and how many nights that is', r.reply.text.includes('(2 ليلة)'), r.reply.text);
+check('the other stay is still shown in full',
+  r.reply.text.includes('🛏️ 2026-09-08 ← 2026-09-12'), r.reply.text);
+check('the sitting guest is identified by ID, so they can be looked up',
+  r.reply.text.includes('ID 900'), r.reply.text);
+check('the header counts the clashes', r.reply.text.includes('(1)'), r.reply.text);
 r = run(cb('save'));
 check('it warns but does not block', r.hasSave === true);
 

@@ -238,7 +238,11 @@ const S = {
   edit_pick_match: '🔎 أكثر من حجز بنفس الرقم — اختر الحجز:',
   edit_menu: '✏️ اختر ما تريد تعديله:',
   btn_edit_total: '💰 اجمالي سعر الحجز',
-  btn_edit_paid: '💵 اجمالي ما تم دفعه',
+  // The button says what the step DOES. It never set a total — it always asked
+  // for an amount to add and summed it with what was already paid — and calling
+  // it "اجمالي ما تم دفعه" invited people to type the new total, which would be
+  // counted on top of the old one.
+  btn_edit_paid: '💵 إضافة دفعة',
   btn_edit_payment: '💳 طريقة الدفع',
   btn_edit_nights: '🌙 عدد الليالي',
   btn_edit_arrival: '📅 تاريخ البداية',
@@ -294,6 +298,10 @@ const S = {
     '💳 الدفع: {payment}\n' +
     '📎 الإيصال: {receipt}\n' +
     '👤 بواسطة: {actor}',
+  // An admin can add a payment and change other things in the same session.
+  // The payment leads, because that is the part the group is watching for, and
+  // whatever else moved is listed underneath rather than lost.
+  payment_other_changes: '✏️ تعديلات أخرى:\n{changes}',
   // ── Undo ──
   undo_none: 'لا يوجد تعديل يمكن التراجع عنه.',
   undo_expired: '⌛ انتهت مهلة التراجع (10 دقائق). استخدم تعديل حجز.',
@@ -309,8 +317,16 @@ const S = {
     '{changes}\n\n' +
     '👤 بواسطة: {actor}',
   conflict_warning:
-    '⚠️ *تعارض في الحجز* — {room} محجوزة في نفس الفترة:\n{list}',
-  conflict_line: '• {name}: {arrival} ← {departure}',
+    '⚠️ *تعارض في الحجز* — {room} محجوزة في نفس الفترة ({count}):\n{list}',
+  // Two lines per clash on purpose. The first says who is in the room and for
+  // how long; the second says exactly which nights are contested, which is the
+  // number the receptionist is actually deciding on.
+  conflict_line:
+    '• {name}{id_part}\n' +
+    '   🛏️ {arrival} ← {departure}\n' +
+    '   🔻 التداخل: {overlap_from} ← {overlap_to}{nights_part}',
+  conflict_id_part: ' — ID {private_id}',
+  conflict_nights_part: ' ({nights} ليلة)',
   btn_confirm_anyway: '⚠️ احفظ رغم التعارض',
   btn_confirm: '✅ حفظ',
   btn_cancel: '❌ إلغاء',
@@ -647,6 +663,11 @@ function locationRegistry() {
  * Half-open ranges — a departure and an arrival on the same day do not overlap,
  * because that is a normal same-day turnover.
  */
+/** A cell the sheet stores text-forced with a leading apostrophe, as read. */
+function plainId(v) {
+  return v === undefined || v === null ? '' : String(v).replace(/^'/, '').trim();
+}
+
 function findConflicts(apartment, room, arrival, nights, isOpen, skipRow) {
   const startA = arrival;
   const endA = isOpen ? null : isoAddDays(arrival, nights);
@@ -667,13 +688,30 @@ function findConflicts(apartment, room, arrival, nights, isOpen, skipRow) {
     const startsBeforeOtherEnds = endB === null || startA < endB;
     const otherStartsBeforeThisEnds = endA === null || startB < endA;
     if (startsBeforeOtherEnds && otherStartsBeforeThisEnds) {
+      // The overlapping stretch itself, not just the other stay's dates. A
+      // receptionist deciding whether to put someone in an occupied room needs
+      // to know it is one night, not eleven — and the two stays' own dates make
+      // them work that out in their head while a guest waits.
+      const overlapFrom = startB > startA ? startB : startA;
+      let overlapTo = null;                       // null = both run open-ended
+      if (endA !== null && endB !== null) overlapTo = endA < endB ? endA : endB;
+      else if (endA !== null) overlapTo = endA;
+      else if (endB !== null) overlapTo = endB;
       hits.push({
         name: j['اسم المقيم'] || t('empty'),
+        privateId: plainId(j['ID']),
+        phone: plainId(j['رقم الهاتف']),
         arrival: startB,
         departure: endB === null ? t('infinity_label') : endB,
+        overlapFrom,
+        overlapTo: overlapTo === null ? t('infinity_label') : overlapTo,
+        overlapNights: overlapTo === null ? null : daysBetween(overlapFrom, overlapTo),
       });
     }
   }
+  // Soonest first: the stay about to end is the one most likely to make the
+  // clash acceptable.
+  hits.sort((a, b) => (a.arrival < b.arrival ? -1 : a.arrival > b.arrival ? 1 : 0));
   return hits;
 }
 
@@ -791,9 +829,16 @@ function showConfirm() {
   if (d.conflict) {
     body += '\n\n' + t('conflict_warning', {
       room: `${mdEscape(d.apartment)} — ${mdEscape(String(d.room))}`,
+      count: clashes.length,
       list: clashes
         .map(c => t('conflict_line', {
-          name: mdEscape(c.name), arrival: c.arrival, departure: c.departure,
+          name: mdEscape(c.name),
+          id_part: c.privateId ? t('conflict_id_part', { private_id: mdEscape(c.privateId) }) : '',
+          arrival: c.arrival,
+          departure: c.departure,
+          overlap_from: c.overlapFrom,
+          overlap_to: c.overlapTo,
+          nights_part: c.overlapNights ? t('conflict_nights_part', { nights: c.overlapNights }) : '',
         }))
         .join('\n'),
     });
@@ -966,6 +1011,24 @@ function changeLines(dd) {
   return out_.join('\n');
 }
 
+/**
+ * The changed columns that are not the payment itself.
+ *
+ * The paid and method columns are already spelled out by the payment message,
+ * so repeating them underneath as "0 ← 40" would say the same thing twice in
+ * two different vocabularies.
+ */
+function otherChangeLines(dd) {
+  const skip = ['اجمالي ما تم دفعه', 'طريقة الدفع'];
+  const out_ = [];
+  for (const col of Object.keys(dd.editNew || {})) {
+    if (skip.indexOf(col) !== -1) continue;
+    out_.push(`${col}: ${showValue(dd.editOrig && dd.editOrig[col])} ← ${showValue(dd.editNew[col])}`);
+  }
+  if (dd.departure) out_.push(t('edit_departure_line', { departure: dd.departure }));
+  return out_.join('\n');
+}
+
 const UNDO_WINDOW_MS = 10 * 60 * 1000;
 
 /** 'المدفوع: 2100 ← 1200' — the reverse of the diff that produced this record. */
@@ -1037,7 +1100,11 @@ function commitEdit(dd) {
       : null,
     receiptFileId: dd.editReceipt || '',
     groupChatId: CFG.GROUP_CHAT_ID,
-    groupText: dd.paidOnly
+    // A payment leads the message whoever recorded it. The step is called
+    // "إضافة دفعة" now, so the group should read as one — "0 ← 40" describes a
+    // cell changing, not money arriving, and the group is watching for money.
+    // Anything else the admin changed in the same session follows underneath.
+    groupText: (dd.paidOnly || dd.paidAdded)
       ? t('paid_group_msg', {
         name: mdEscape(dd.editName || t('empty')),
         private_id: mdEscape(dd.editPrivateId || t('empty')),
@@ -1047,13 +1114,16 @@ function commitEdit(dd) {
         payment: dd.editNew['طريقة الدفع'] || t('empty'),
         receipt: dd.editReceipt ? t('receipt_attached') : t('empty'),
         actor,
-      })
+      }) + (otherChangeLines(dd)
+        ? '\n\n' + t('payment_other_changes', { changes: otherChangeLines(dd) })
+        : '')
       : t('edit_group_msg', {
         name: mdEscape(dd.editName), private_id: mdEscape(dd.editPrivateId),
         changes: changeLines(dd), actor,
       }),
-    savedText: dd.paidOnly ? t('paid_saved') : t('edit_saved'),
-    savedNoGroupText: dd.paidOnly ? t('paid_saved_no_group') : t('edit_saved_no_group'),
+    savedText: (dd.paidOnly || dd.paidAdded) ? t('paid_saved') : t('edit_saved'),
+    savedNoGroupText: (dd.paidOnly || dd.paidAdded)
+      ? t('paid_saved_no_group') : t('edit_saved_no_group'),
     errorText: t('error'),
   };
 }
