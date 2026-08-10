@@ -418,6 +418,70 @@ def main():
         connect("Read Discrepancies", "Build Reconcile Message")
         connect("Build Reconcile Message", "Send Report")
 
+        # ── Phase 4c: publish DB-born bookings into the sheet ─────────────────
+        #
+        # A booking created in the web UI has no sheet row, so it is invisible to
+        # the spreadsheet, to the nine tabs of formulas that read it, and to the
+        # daily report. This appends those rows once a day, right after the
+        # reconcile, so nobody has to remember to run the mirror by hand.
+        #
+        # Only the APPEND half of mirror.py runs here on purpose. Updating
+        # existing rows needs the hand-edit guard (mirror_payload) and the
+        # formula-cell protection, and those stay in the script until they have
+        # been watched for a while — appending a row that does not exist yet can
+        # not overwrite anybody's work.
+        #
+        # `mirrored_at is null` is what stops it appending the same booking every
+        # morning: the row number is not known here (an append does not report
+        # where it landed), so the stamp is the marker, and `reindex.py` learns
+        # the real sheet_row from column U on its next pass.
+        if "Read Unmirrored Bookings" not in have:
+            add_node("Read Unmirrored Bookings", "n8n-nodes-base.postgres", 2.6,
+                     {"operation": "executeQuery", "options": {},
+                      "query": read_source("read_unmirrored.sql")},
+                     [720, 1200], cred=("postgres", pg["id"], pg["name"]))
+            print("  + Read Unmirrored Bookings")
+        else:
+            ops.append({"type": "updateNodeParameters",
+                        "nodeName": "Read Unmirrored Bookings",
+                        "parameters": {"operation": "executeQuery", "options": {},
+                                       "query": read_source("read_unmirrored.sql")}})
+            print("  ~ Read Unmirrored Bookings query")
+
+        if "Append Mirror Row" not in have:
+            add_node("Append Mirror Row", "n8n-nodes-base.googleSheets", 4.7,
+                     {"operation": "append",
+                      "documentId": {"__rl": True, "mode": "id", "value": SHEET_ID},
+                      "sheetName": {"__rl": True, "mode": "name", "value": BOOKINGS_TAB},
+                      "columns": {"mappingMode": "autoMapInputData",
+                                  "attemptToConvertTypes": False,
+                                  "convertFieldsToString": True},
+                      "options": {}},
+                     [960, 1200], cred=SHEETS_CRED)
+            print("  + Append Mirror Row")
+
+        if "Mark Mirrored" not in have:
+            add_node("Mark Mirrored", "n8n-nodes-base.postgres", 2.6,
+                     {"operation": "executeQuery", "options": {},
+                      "query": "update bookings set mirrored_at = now()"
+                               " where id = {{ $json.booking_id }};"},
+                     [1200, 1200], cred=("postgres", pg["id"], pg["name"]))
+            print("  + Mark Mirrored")
+        else:
+            ops.append({"type": "updateNodeParameters", "nodeName": "Mark Mirrored",
+                        "parameters": {"operation": "executeQuery", "options": {},
+                                       "query": "update bookings set mirrored_at = now()"
+                                                " where id = {{ $json.booking_id }};"}})
+
+        connect("Build Reconcile Message", "Read Unmirrored Bookings")
+        connect("Read Unmirrored Bookings", "Append Mirror Row")
+        connect("Append Mirror Row", "Mark Mirrored")
+        # Nothing here may break the reconcile that runs before it, and an empty
+        # result is the normal case — most mornings there is nothing to publish.
+        for node in ("Read Unmirrored Bookings", "Append Mirror Row", "Mark Mirrored"):
+            ops.append({"type": "setNodeSettings", "nodeName": node,
+                        "settings": {"onError": "continueRegularOutput"}})
+
     ops.extend(creds)          # credentials bind after their node exists
     if not ops:
         print("nothing to do")
