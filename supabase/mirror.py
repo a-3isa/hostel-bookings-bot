@@ -65,12 +65,15 @@ select
   b.id, b.sheet_row, b.booking_ref, b.guest_ref, b.guest_name, b.booking_type,
   b.phone, b.apartment_name, b.room_number, b.arrival, b.nights, b.open_ended,
   b.total, b.paid, b.payment_method, b.notes, b.mirror_payload,
-  -- Every method this booking was actually paid in. THE payoff: the sheet has
-  -- one method cell, so a guest who paid كاش then انستاباي used to need a second
-  -- row. Written from here it reads "كاش + انستاباي" on one line.
-  (select string_agg(distinct p.method, ' + ' order by p.method)
-     from payments p where p.booking_id = coalesce(b.merged_into, b.id)
-      and p.method is not null and p.method <> '') as paid_methods,
+  -- Deliberately NOT the booking's combined methods.
+  --
+  -- The mirror briefly wrote "انستاباي + فودافون كاش" into one cell, on the
+  -- reasoning that the sheet's single method column was the reason people
+  -- inserted rows. It is not the whole reason: the Dashboard tab and other
+  -- sheets read طريقة الدفع per row and count on one payment per line, so a
+  -- combined string is not a tidier version of the same fact — it is a value
+  -- those formulas cannot read. One line, one method.
+  b.payment_method as paid_methods,
   (select count(distinct p.currency) > 1
      from payments p where p.booking_id = coalesce(b.merged_into, b.id))
     as mixed_currency,
@@ -117,10 +120,8 @@ def desired(row, sheet_row):
         "arrival": "" if row["arrival"] is None else row["arrival"].isoformat(),
         "total": money(row["total"]),
         "paid": money(row["paid"]),
-        # The aggregate only on a single-line booking; otherwise this line's own
-        # method. Falls back to the column when no payments are recorded yet.
-        "payment_method": s(row["payment_method"] if row["multi_line"]
-                            else (row["paid_methods"] or row["payment_method"])),
+        # This line's own method, always. See paid_methods in the query.
+        "payment_method": s(row["payment_method"]),
         "notes": s(row["notes"]),
         "booking_id": str(row["id"]),
     }
