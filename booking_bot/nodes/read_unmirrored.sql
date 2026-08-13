@@ -17,6 +17,16 @@
 -- the same reason: nothing here knows the row number yet, and ROW() does.
 select
   b.id                                             as booking_id,
+  -- The row to write, computed here rather than appended.
+  --
+  -- Google's append writes a FULL-WIDTH row, blanking every column the mapping
+  -- does not mention — which would wipe the per-row formulas in N نسبة البرنامج,
+  -- P المتبقي, R تاريخ الإدخال and S صافي الدخل on the row it lands on. (K
+  -- survives an append because it is an array formula; the others are not.)
+  -- Updating a known row touches only the mapped columns, which is why the
+  -- bot's own booking writes have never damaged them.
+  (select coalesce(max(x.sheet_row), 1) from bookings x)
+    + row_number() over (order by b.id)            as row_number,
   coalesce(nullif(b.booking_ref, ''), '')          as "بوكنج ID",
   case when b.guest_ref is null or b.guest_ref = '' then ''
        else '''' || b.guest_ref end                as "ID",

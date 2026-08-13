@@ -448,22 +448,36 @@ def main():
                                        "query": read_source("read_unmirrored.sql")}})
             print("  ~ Read Unmirrored Bookings query")
 
+        # update, NOT append. Google's append writes a full-width row and blanks
+        # every column the mapping does not mention, which would destroy the
+        # per-row formulas in N, P, R and S on whichever row it landed on. K
+        # survives an append because it is an array formula; those four are not.
+        # The row number is computed in the query instead.
+        mirror_write = {
+            "operation": "update",
+            "documentId": {"__rl": True, "mode": "id", "value": SHEET_ID},
+            "sheetName": {"__rl": True, "mode": "name", "value": BOOKINGS_TAB},
+            "columns": {"mappingMode": "autoMapInputData",
+                        "matchingColumns": ["row_number"],
+                        "attemptToConvertTypes": False,
+                        "convertFieldsToString": True},
+            "options": {},
+        }
         if "Append Mirror Row" not in have:
             add_node("Append Mirror Row", "n8n-nodes-base.googleSheets", 4.7,
-                     {"operation": "append",
-                      "documentId": {"__rl": True, "mode": "id", "value": SHEET_ID},
-                      "sheetName": {"__rl": True, "mode": "name", "value": BOOKINGS_TAB},
-                      "columns": {"mappingMode": "autoMapInputData",
-                                  "attemptToConvertTypes": False,
-                                  "convertFieldsToString": True},
-                      "options": {}},
-                     [960, 1200], cred=SHEETS_CRED)
+                     mirror_write, [960, 1200], cred=SHEETS_CRED)
             print("  + Append Mirror Row")
+        else:
+            ops.append({"type": "updateNodeParameters",
+                        "nodeName": "Append Mirror Row",
+                        "parameters": mirror_write})
+            print("  ~ Append Mirror Row writes one row, never appends")
 
         if "Mark Mirrored" not in have:
             add_node("Mark Mirrored", "n8n-nodes-base.postgres", 2.6,
                      {"operation": "executeQuery", "options": {},
-                      "query": "update bookings set mirrored_at = now()"
+                      "query": "update bookings set mirrored_at = now(),"
+                               " sheet_row = {{ $json.row_number }}"
                                " where id = {{ $json.booking_id }};"},
                      [1200, 1200], cred=("postgres", pg["id"], pg["name"]))
             print("  + Mark Mirrored")

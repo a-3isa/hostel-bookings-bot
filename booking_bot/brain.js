@@ -1096,6 +1096,21 @@ function undoRecord(dd) {
 function commitEdit(dd) {
   const paidCol = 'اجمالي ما تم دفعه';
   if (saveLocked(dd)) return;            // a second tap on the same save
+
+  // The amount and the method are set in two separate turns — EDIT_PAID then
+  // EDIT_PAYMENT — and a session that loses the first one writes the method on
+  // its own. Reported live on 2026-08-12: "changed amount paid and type, only
+  // the type was saved". The method cannot be recorded without the money it
+  // describes, so if the amount went missing, put it back from what the guest
+  // has actually paid.
+  if (dd.paidAdded && dd.editNew && dd.editNew[paidCol] === undefined) {
+    const orig = parseNum(dd.editOrig ? dd.editOrig[paidCol] : 0) || 0;
+    dd.editNew[paidCol] = num(orig + Number(dd.paidAdded));
+  }
+  // And the reverse: a method with no payment behind it is just a relabel, so
+  // it must not carry a payment act into the database.
+  if (!dd.editNew || dd.editNew[paidCol] === undefined) dd.paidAdded = 0;
+
   dd.savingAt = Date.now();
   out.sessionData = JSON.stringify(dd);  // the lock must outlive this turn
   out.hasSave = true;
@@ -1898,7 +1913,21 @@ switch (state) {
     out.save = {
       flow: 'cancel',
       row: d.editRow,
-      fields: { 'ملاحظات': prevNote ? `${prevNote} ${t('del_note')}` : t('del_note') },
+      // A cancelled booking is worth nothing and occupies no nights, and the
+      // sheet has to say so: عدد الليالي and اجمالي سعر الحجز both go to zero.
+      // Otherwise the row keeps counting towards occupancy and revenue in every
+      // tab that sums those columns, and an open-ended cancellation keeps
+      // billing a guest who left — its nights cell is a live =TODAY()-J that
+      // never stops climbing.
+      //
+      // اجمالي ما تم دفعه is deliberately NOT zeroed. If the guest paid and the
+      // booking was then cancelled, that money still changed hands; erasing it
+      // here would hide a refund that may or may not have happened.
+      fields: {
+        'ملاحظات': prevNote ? `${prevNote} ${t('del_note')}` : t('del_note'),
+        'عدد الليالي': 0,
+        'اجمالي سعر الحجز': 0,
+      },
       formatRow: true,                  // black fill / white text, via HTTP
       receiptFileId: '',
       groupChatId: CFG.GROUP_CHAT_ID,
