@@ -78,8 +78,17 @@ def main():
     for row, was, now in clashes[:10]:
         print(f"    row {row}: sheet has {was!r}, db says {now}")
 
+    if clashes and "--force" not in sys.argv:
+        sys.exit("refusing to overwrite a column somebody else is using"
+                 " — pass --force if the DATABASE mapping is the right one")
     if clashes:
-        sys.exit("refusing to overwrite a column somebody else is using")
+        # After a row insert the stamps are one row out of step with the data,
+        # and reindex.py trusts U — so it re-points the database to match stale
+        # stamps and the two fight. The way out is to declare a winner. The
+        # sheet's CONTENT is authoritative, the database has been synced to it
+        # row by row, and U is bookkeeping the bot owns: so U is what gets
+        # corrected, deliberately and only when asked.
+        print(f"--force: overwriting {len(clashes)} stale stamp(s)")
     if not apply:
         print("\ndry run — pass --apply to write")
         return

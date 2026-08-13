@@ -11,4 +11,26 @@
 
 const save = $('Brain').first().json.save;
 
-return [{ json: { row_number: save.row, ...save.fields } }];
+// The sheet's own calculated columns. Nothing this bot writes may ever name
+// one: writing a value — even '' — replaces the formula with a dead number, and
+// the Dashboard and every per-property tab read them.
+//
+// This is a hard filter rather than a convention. The Brain is careful today,
+// but "careful" is what every one of these columns had before it was found
+// empty, and a guard costs one line where an audit costs an afternoon.
+const FORMULA_COLS = [
+  'تاريخ المغادرة',   // K = J + I
+  'نسبة البرنامج',    // N
+  'المتبقي',          // P = L - M
+  'تاريخ الإدخال',    // R
+  'صافي الدخل',       // S = L - N
+  'آخر تعديل',        // T
+];
+
+const fields = {};
+for (const k of Object.keys(save.fields || {})) {
+  if (FORMULA_COLS.indexOf(k) !== -1) continue;
+  fields[k] = save.fields[k];
+}
+
+return [{ json: { row_number: save.row, ...fields } }];
