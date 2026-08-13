@@ -1,0 +1,10 @@
+node_modules/
+.next/
+out/
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+
+# Local env files. On Vercel these live in project settings, never in the repo.
+.env
+.env*.local
