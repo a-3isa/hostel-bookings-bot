@@ -122,6 +122,22 @@ def main():
         # Two phases, because sheet_row is unique: parking the moved rows on
         # negative numbers first means a swap (29->30, 30->29) cannot collide
         # with itself half way through.
+        # Park every booking that currently sits on a row somebody is moving
+        # INTO, not just the movers. A booking outside the move set holding a
+        # target row makes the second phase collide — seen live on 2026-08-12,
+        # where a duplicate created from a blank inserted row occupied row 18
+        # and the re-point died on bookings_sheet_row_key.
+        targets = {now for _bid, _was, now in repoint}
+        movers = {bid for bid, _was, _now in repoint}
+        cur.execute("select id from bookings where sheet_row = any(%s) and id <> all(%s);",
+                    (list(targets), list(movers) or [0]))
+        squatters = [r[0] for r in cur.fetchall()]
+        for bid in squatters:
+            cur.execute("update bookings set sheet_row = %s where id = %s;", (-bid, bid))
+        if squatters:
+            print(f"  parked {len(squatters)} row(s) that were sitting on a target row:"
+                  f" {squatters[:10]}")
+
         for bid, _was, _now in repoint:
             cur.execute("update bookings set sheet_row = %s where id = %s;", (-bid, bid))
         for bid, _was, now in repoint:
