@@ -61,6 +61,33 @@ export default async function Overview() {
            from expenses
           where spent_at >= date_trunc('month', current_date) - interval '7 months'
           group by 1 order by 1`),
+      // The Dashboard tab's «رصيد طرق الدفع» block, same six columns, computed
+      // from Postgres instead of sheet formulas. A FULL JOIN because a method
+      // can appear on an expense and on no booking at all, and the sheet still
+      // lists it — the balance is what matters, not where it came from.
+      q(`with taken as (
+           select coalesce(nullif(trim(payment_method), ''), 'غير محدد') as method,
+                  count(*)::int as bookings,
+                  coalesce(sum(effective_remaining), 0) as owing,
+                  coalesce(sum(paid), 0) as paid
+             from bookings_live
+            where cancelled_at is null
+            group by 1
+         ),
+         spent as (
+           select coalesce(nullif(trim(payment_method), ''), 'غير محدد') as method,
+                  coalesce(sum(amount), 0) as expenses
+             from expenses
+            group by 1
+         )
+         select coalesce(t.method, s.method) as method,
+                coalesce(t.bookings, 0) as bookings,
+                coalesce(t.owing, 0) as owing,
+                coalesce(t.paid, 0) as paid,
+                coalesce(s.expenses, 0) as expenses,
+                coalesce(t.paid, 0) - coalesce(s.expenses, 0) as net
+           from taken t full join spent s on s.method = t.method
+          order by net desc`),
       q(`select
            (select count(*)::int from booking_overlaps) as overlaps,
            (select count(*)::int from reconcile_bookings) as sheet_diffs,
@@ -83,7 +110,18 @@ export default async function Overview() {
     );
   }
 
-  const [[k], [reg], arrivals, departures, upcoming, byApartment, monthsIn, monthsOut, [alerts]] = data;
+  const [
+    [k], [reg], arrivals, departures, upcoming, byApartment, monthsIn, monthsOut,
+    byMethod, [alerts],
+  ] = data;
+
+  const methodTotals = byMethod.reduce((sum, r) => ({
+    bookings: sum.bookings + Number(r.bookings),
+    owing: sum.owing + Number(r.owing),
+    paid: sum.paid + Number(r.paid),
+    expenses: sum.expenses + Number(r.expenses),
+    net: sum.net + Number(r.net),
+  }), { bookings: 0, owing: 0, paid: 0, expenses: 0, net: 0 });
 
   const occupancy = reg.rooms > 0 ? (Number(k.rooms_busy) / reg.rooms) * 100 : 0;
   const months = [...new Set([...monthsIn, ...monthsOut].map((r) => r.label))].sort();
@@ -210,6 +248,52 @@ export default async function Overview() {
             />
           ))}
         </div>
+      </div>
+
+      <div className="panel flush">
+        <h2>رصيد طرق الدفع <span className="count">المصاريف مطروحة من نفس طريقة الدفع</span></h2>
+        <div className="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>طريقة الدفع</th>
+                <th className="num">عدد الحجوزات</th>
+                <th className="num">إجمالي المتبقي</th>
+                <th className="num">إجمالي المدفوع</th>
+                <th className="num">المصاريف</th>
+                <th className="num">الصافي</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byMethod.map((r) => (
+                <tr key={r.method}>
+                  <td>{r.method}</td>
+                  <td className="num">{r.bookings}</td>
+                  <td className="num">
+                    {Number(r.owing) > 0
+                      ? <span className="tag owing">{num(r.owing)}</span>
+                      : <span className="faint">0</span>}
+                  </td>
+                  <td className="num">{num(r.paid)}</td>
+                  <td className="num">{Number(r.expenses) > 0 ? num(r.expenses) : <span className="faint">—</span>}</td>
+                  <td className="num"><strong>{num(r.net)}</strong></td>
+                </tr>
+              ))}
+              <tr>
+                <td><strong>الإجمالي</strong></td>
+                <td className="num"><strong>{methodTotals.bookings}</strong></td>
+                <td className="num"><strong>{num(methodTotals.owing)}</strong></td>
+                <td className="num"><strong>{num(methodTotals.paid)}</strong></td>
+                <td className="num"><strong>{num(methodTotals.expenses)}</strong></td>
+                <td className="num"><strong>{num(methodTotals.net)}</strong></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="muted" style={{ padding: '0 16px 14px' }}>
+          محسوبة من قاعدة البيانات، لا منقولة من تبويب Dashboard — فقد تختلف الأرقام
+          قليلًا لأن معادلات الشيت تعدّ سطوره هو، بينما هنا تُعدّ الحجوزات غير الملغاة.
+        </p>
       </div>
 
       <div className="panel">
