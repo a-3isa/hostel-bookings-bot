@@ -14,6 +14,7 @@ Notes:
   * n8n refuses the update while the workflow is open in a browser tab.
 """
 
+import base64
 import json
 import os
 import sys
@@ -32,14 +33,51 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _id = 0
 
 
-def load_server():
+def token_issued_at(auth):
+    """`iat` out of a bearer's JWT payload, or 0 if it does not read as one."""
+    try:
+        payload = auth.split()[-1].split(".")[1]
+        payload += "=" * (-len(payload) % 4)          # JWTs drop the padding
+        return int(json.loads(base64.urlsafe_b64decode(payload)).get("iat", 0))
+    except Exception:
+        return 0
+
+
+def load_servers():
+    """Every n8n MCP credential in ~/.claude.json, newest token first.
+
+    The server is configured for Claude Code rather than for this script, so it
+    is read from there instead of being duplicated into .env. It has been
+    registered at the top level and under several projects, under both `n8n` and
+    `n8n-mcp`, and the stale entries are never cleaned up — reading one fixed
+    name found a revoked token and answered 401 for two days while a working one
+    sat in the same file under a different name.
+
+    Newest first is a guess, not an answer: a token can authenticate perfectly
+    and still belong to an n8n account that cannot see this workflow, which is
+    exactly what the newest one does. `select_server` is what settles it.
+    """
     with open(os.path.expanduser(r"~\.claude.json"), encoding="utf-8") as fh:
         cfg = json.load(fh)
-    srv = cfg["mcpServers"]["n8n-mcp"]
-    return srv["url"], srv["headers"]["Authorization"]
+
+    scopes = [cfg.get("mcpServers") or {}]
+    scopes += [p.get("mcpServers") or {} for p in (cfg.get("projects") or {}).values()]
+
+    found = []
+    for servers in scopes:
+        for name, srv in servers.items():
+            if "n8n" not in name.lower() or not isinstance(srv, dict):
+                continue
+            auth = (srv.get("headers") or {}).get("Authorization")
+            if srv.get("url") and auth:
+                found.append((token_issued_at(auth), srv["url"], auth))
+    if not found:
+        raise SystemExit("no n8n MCP server with a bearer token in ~/.claude.json")
+    return sorted(found, key=lambda f: f[0], reverse=True)
 
 
-URL, AUTH = load_server()
+CANDIDATES = load_servers()
+URL, AUTH = CANDIDATES[0][1], CANDIDATES[0][2]
 
 
 def rpc(method, params=None):
@@ -66,6 +104,48 @@ def rpc(method, params=None):
     return out.get("result", {})
 
 
+def select_server():
+    """Pick the credential that can actually reach THIS workflow.
+
+    Authenticating is not the same as having access. On 2026-08-14 the newest
+    token in the file authenticated fine, registered all 34 tools, and belonged
+    to an n8n account with no workflows in it at all — `get_workflow_details`
+    came back "Workflow not found or you don't have permission", which reads
+    like a missing workflow and is really a wrong account.
+
+    So each credential is tried against the workflow itself, newest first, and
+    the first that can see it wins. If none can, the failure names every one
+    that was tried rather than reporting whichever error came last.
+    """
+    global URL, AUTH
+    tried = []
+    for iat, url, auth in CANDIDATES:
+        URL, AUTH = url, auth
+        try:
+            rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                               "clientInfo": {"name": "push_brain", "version": "1"}})
+            res = rpc("tools/call", {"name": "get_workflow_details",
+                                     "arguments": {"workflowId": WORKFLOW_ID}})
+            if not res.get("isError"):
+                return
+            why = "no access to this workflow"
+        except urllib.error.HTTPError as exc:
+            why = f"HTTP {exc.code}"
+        except SystemExit as exc:
+            why = str(exc)
+        # ASCII only: this goes to stderr, which a Windows console prints in a
+        # legacy codepage, and a mangled character in the one message that
+        # explains the failure is a poor way to explain anything.
+        tried.append(f"  token issued {iat}, ending {auth[-8:]}: {why}")
+
+    raise SystemExit(
+        f"no n8n credential in ~/.claude.json can reach workflow {WORKFLOW_ID}:\n"
+        + "\n".join(tried)
+        + "\n\nMint an MCP access token in the n8n account that OWNS this "
+          "workflow, and put it in ~/.claude.json under an mcpServers entry "
+          "whose name contains 'n8n'.")
+
+
 def call_tool(name, args):
     res = rpc("tools/call", {"name": name, "arguments": args})
     text = "".join(c.get("text", "") for c in res.get("content", []))
@@ -75,11 +155,7 @@ def call_tool(name, args):
 
 
 def main():
-    rpc("initialize", {
-        "protocolVersion": "2024-11-05",
-        "capabilities": {},
-        "clientInfo": {"name": "push_brain", "version": "1.0"},
-    })
+    select_server()
 
     with open(BRAIN_PATH, encoding="utf-8") as fh:
         brain = fh.read()
