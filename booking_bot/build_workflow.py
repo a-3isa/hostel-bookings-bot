@@ -96,12 +96,19 @@ TELEGRAM_CRED = ("telegramApi", "REPLACE_ME", "Telegram account")
 SHEETS_CRED = ("googleSheetsOAuth2Api", "REPLACE_ME", "Google Sheets account")
 POSTGRES_CRED = ("postgres", "REPLACE_ME", "Supabase Postgres")
 
-# The key column of each tab: hand-typed, carrying no fill-down formula, so its
-# length is the true last data row. C اسم المقيم for bookings, B البند for
-# expenses. Reading a formula column instead would count the sheet's own filled
-# tail and append far below the data.
-BOOKING_KEY_RANGE = "C2:C2000"
-EXPENSE_KEY_RANGE = "B2:B2000"
+# What the row builders read to decide where the next row goes. Every column in
+# these ranges is hand-typed; the ranges stop short of the fill-down formula
+# columns (K, N, P, R, S, T on the bookings tab) because those evaluate to '' on
+# an empty row, and a row that answers '' would read as occupied.
+#
+# They were single key columns — C اسم المقيم and B البند — and the builders
+# COUNTED the rows that came back. On 2026-08-14 that put an expense on top of a
+# row typed by hand: the row had no البند, so the count could not see it, and the
+# next expense was written straight over it. A row is occupied if ANY of its
+# typed columns holds something, and the builders now take the last such row
+# rather than counting.
+BOOKING_KEY_RANGE = "A2:J2000"
+EXPENSE_KEY_RANGE = "A2:H2000"
 
 # States whose turn needs a lookup before the Brain runs. Kept identical to
 # deploy_graph.py, which rewrites the same two gates — see BOOKING_STATES and
