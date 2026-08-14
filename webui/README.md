@@ -87,14 +87,18 @@ and secure, 12 hours. Changing the password invalidates every session.
 ## Deployed
 
 Vercel project `bookings-webui`, production at
-<https://bookings-webui.vercel.app>. The first deploy went out from the MCP
-tool, which cannot set environment variables — so it currently serves the setup
-screen and nothing else until both variables above exist in
-Settings → Environment Variables, followed by a redeploy.
+<https://bookings-webui.vercel.app>, **built from this repository** — `master`,
+root directory `webui`. Pushing to `master` deploys it; the earlier route, where
+the MCP tool uploaded the file tree inline, stopped working once the app grew
+past what one response could carry.
+
+The environment variables live in Settings → Environment Variables and are not
+part of the repository, so a new project starts with none of them and serves the
+setup screen until all four are filled in.
 
 `vercel.json` pins functions to `dub1` (Dublin) because Supabase is in
-eu-west-1; the first deploy landed in `iad1` and pays an Atlantic crossing on
-every query. The pin takes effect on the next deploy from these files.
+eu-west-1. The inline deploys landed in `iad1` and paid an Atlantic crossing on
+every query; the pin takes effect from the first git-built deploy.
 
 ## Local
 
