@@ -377,9 +377,16 @@ def build():
         "options": {},
     }, (1360, 300))
 
+    # Save Session goes FIRST, before anything that talks to Telegram. n8n runs a
+    # fan-out in the order the connections were declared and stops the whole
+    # execution on the first error, so with the session written last a failing
+    # Telegram call loses the state for that turn — and the state is the only
+    # thing the next message has to go on. Observed exactly that on 2026-08-14:
+    # an empty BOT_TOKEN 404'd *Send Reply*, the CHOICE state was never written,
+    # and the following tap arrived with no session at all.
+    g.connect("Brain", "Save Session")
     g.connect("Brain", "Has Callback?")
     g.connect("Brain", "Has Reply?")
-    g.connect("Brain", "Save Session")
     g.connect("Has Callback?", "Answer Callback", index=0)
     g.connect("Has Reply?", "Send Reply", index=0)
 
