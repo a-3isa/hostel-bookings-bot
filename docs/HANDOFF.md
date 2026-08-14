@@ -1,5 +1,65 @@
 # Handoff — where the Supabase migration stands
 
+## START HERE (2026-08-12)
+
+**Everything below the line still applies. These are the immediate steps.**
+
+### 1. Nothing has been deployed since n8n went down
+
+n8n is **back up**, but the MCP bearer token in `~/.claude.json` (`n8n-mcp`) is
+**stale** — the endpoint answers `401`, and the MCP tools do not register at
+startup for the same reason. Refresh the token and restart Claude Code, then:
+
+```
+python booking_bot/deploy_graph.py --publish   # formula guard + mirror node fix
+python booking_bot/push_brain.py   --publish   # half-saved payment + cancel zeroing
+```
+
+Four committed fixes are waiting on that, and one of them is urgent:
+
+- **The deployed scheduled mirror still uses Sheets `append`**, which writes a
+  full-width row and blanks every unmapped column — it would wipe N, P, R and S
+  on whatever row it lands on. The fix (a targeted row update) is committed and
+  unpublished. **Do not let a UI-created booking sit unpublished** once n8n is
+  reachable: deploy first, then let the schedule run.
+- The formula-column guard (K, N, P, R, S, T filtered in both row builders).
+- The half-saved payment fix — a payment whose amount went missing is rebuilt
+  rather than writing the method alone.
+- Cancel now zeroes عدد الليالي and اجمالي سعر الحجز.
+
+### 2. State is clean as of 2026-08-12
+
+`reconcile: 0`, `reindex`: no drift, no orphans, nothing to adopt. Column U was
+force-rewritten from the database mapping after a row insert left one stamp
+stale (row 19 claimed 355, the database said 665).
+
+Supabase MCP is **also gone** from the server list. `psycopg` through
+`backfill.connect_args()` works and needs nothing.
+
+### 3. Routine, in order, whenever the sheet has been edited by hand
+
+```
+python supabase/reindex.py --apply          # rows moved / new rows adopted
+python supabase/backfill.py --apply --reconcile
+python supabase/heal_formulas.py --apply    # restores N, P, S if any went blank
+```
+
+### 4. Next piece of work
+
+The **U-suffix scheme**, which is the one the user is waiting on: one booking in
+the database with many payments, and one sheet LINE per payment. Their words:
+*"اجمالي سعر الحجز will equal the amount paid in each step"*, and *"I don't want
+the booking with diff payment to have a second booking row in the database"*.
+Needs `413`, `413-2`, `413-3` in column U, taught to `reindex.py` (a suffixed
+row is a payment line, never a booking) and to `backfill.py` (skip them when
+syncing sheet→db, or it recreates the follower rows). Then collapse the three
+existing follower rows (مروان, محمد, امير) into payments.
+
+Ahead of that on severity: **payments still match on `sheet_row`**, so a row
+inserted between a bot write and the next reindex puts money on the wrong guest.
+It has happened once. Column U exists to fix it; the bot does not use it yet.
+
+
 Written 2026-08-09, updated the same day after Phase 4a. Read this first in a new
 session, then
 [`2026-08-08-supabase-migration-scope.md`](2026-08-08-supabase-migration-scope.md)
