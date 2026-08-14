@@ -272,19 +272,26 @@ def main():
     connect("Read Locations", "Brain")
 
     # ── Undo: park the pre-image instead of blanking `data` ───────────────────
-    clear = next(n for n in wf["nodes"] if n["name"] == "Clear Session")
-    cols = json.loads(json.dumps(clear["parameters"]["columns"]))
+    #
+    # Only for a Clear Session still built on n8n's Data Table. The session moved
+    # to Postgres on 2026-08-14 and `build_workflow.py` writes the pre-image into
+    # the SQL itself, so there is nothing to patch there — and reaching for
+    # `parameters["columns"]` on the Postgres node would just raise.
+    #
     # lastAppend is derived from the flow, not from "there is no undo record".
     # An undo is itself an edit with no record of its own, and the two must not
     # look alike: a second /undo should say "nothing to undo", not send the user
     # off to إلغاء الحجز.
-    cols["value"]["data"] = (
-        "={{ JSON.stringify({ lastWrite: $('Brain').first().json.save.undo || null,"
-        " lastAppend: ['booking','expense'].includes($('Brain').first().json.save.flow) }) }}"
-    )
-    ops.append({"type": "updateNodeParameters", "nodeName": "Clear Session",
-                "parameters": {"columns": cols}})
-    print("  ~ Clear Session parks the undo record")
+    clear = next(n for n in wf["nodes"] if n["name"] == "Clear Session")
+    if "columns" in clear["parameters"]:
+        cols = json.loads(json.dumps(clear["parameters"]["columns"]))
+        cols["value"]["data"] = (
+            "={{ JSON.stringify({ lastWrite: $('Brain').first().json.save.undo || null,"
+            " lastAppend: ['booking','expense'].includes($('Brain').first().json.save.flow) }) }}"
+        )
+        ops.append({"type": "updateNodeParameters", "nodeName": "Clear Session",
+                    "parameters": {"columns": cols}})
+        print("  ~ Clear Session parks the undo record")
 
     # ── Scheduled reports ─────────────────────────────────────────────────────
     if "Report Schedule" not in have:

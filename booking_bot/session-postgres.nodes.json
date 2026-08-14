@@ -1,0 +1,57 @@
+{
+  "nodes": [
+    {
+      "id": "load-session",
+      "name": "Load Session",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -60,
+        300
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select state, data::text as data,\n       (extract(epoch from updated_at) * 1000)::bigint as updated_at\n  from bot_sessions\n where chat_id = $1;",
+        "options": {
+          "queryReplacement": "={{ String($('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query.message.chat.id) }}"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "save-session",
+      "name": "Save Session",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1160,
+        480
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\nvalues ($1, $2, $3::jsonb, now())\non conflict (chat_id) do update\n   set state = excluded.state,\n       data = excluded.data,\n       updated_at = now();",
+        "options": {
+          "queryReplacement": "={{ [$json.chatId, $json.sessionState, $json.sessionData] }}"
+        }
+      }
+    },
+    {
+      "id": "clear-session",
+      "name": "Clear Session",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2760,
+        660
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\nvalues ($1, '', $2::jsonb, now())\non conflict (chat_id) do update\n   set state = '',\n       data = excluded.data,\n       updated_at = now();",
+        "options": {
+          "queryReplacement": "={{ [$('Brain').first().json.chatId, JSON.stringify({ lastWrite: $('Brain').first().json.save.undo || null, lastAppend: ['booking','expense'].includes($('Brain').first().json.save.flow) })] }}"
+        }
+      }
+    }
+  ],
+  "connections": {}
+}

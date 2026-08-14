@@ -273,27 +273,41 @@ def build():
 
     # ── The session ──────────────────────────────────────────────────────────
     #
-    # One row per chat in the `bookings_bot_sessions` data table.
+    # One row per chat in `bot_sessions`, a Postgres table — NOT n8n's Data
+    # Table feature, which this used until 2026-08-14. The data table looked up
+    # cleanly and wrote nothing: `Save Session` reported success on every turn
+    # and the table stayed empty, so every button tap arrived with no state and
+    # fell through to "No Action Needed" — the exact bug the session store was
+    # introduced to kill, wearing a different coat.
+    #
+    # Postgres is where everything else durable in this bot already lives, the
+    # credential is the one the two lookups already use, and `on conflict` is a
+    # guarantee rather than a node option. `schema.sql` owns the table:
+    #
+    #     chat_id text primary key, state text, data jsonb, updated_at timestamptz
+    #
     # `alwaysOutputData` is what lets a chat with no row through as an empty
     # item — the Brain's readSession() treats that as "no session", and without
     # it a first-time user would simply stop here.
     #
-    # `String(...)` is load-bearing. Telegram's chat id arrives as a NUMBER, and
-    # `brain.js` stores it as a string (`const chatId = String(msg.chat.id)`),
-    # which is what Save Session and Clear Session write. A data table column has
-    # one type, so without the cast the lookup and the write disagree about it
-    # and every returning chat looks like a new one.
-    g.node("Load Session", "n8n-nodes-base.dataTable", 1, {
-        "operation": "get",
-        "dataTableId": {"__rl": True, "mode": "name", "value": SESSION_TABLE},
-        "filters": {"conditions": [
-            {"keyName": "chat_id", "condition": "eq",
-             "keyValue": "={{ String($('Telegram Trigger').first().json.message"
-                         "?.chat?.id ?? $('Telegram Trigger').first().json"
-                         ".callback_query.message.chat.id) }}"}
-        ]},
-        "options": {},
-    }, (-60, 300), alwaysOutputData=True)
+    # The Brain wants `updated_at` as epoch milliseconds, because that is what it
+    # compares against SESSION_TTL_MS. node-postgres hands a bigint back as a
+    # string and `readSession` does `Number(row.updated_at)`, so that is fine.
+    #
+    # `$1` rather than an interpolated id: the value comes from a Telegram
+    # payload, and a query built by string concatenation out of user-controlled
+    # input is one apostrophe away from being someone else's query.
+    g.node("Load Session", "n8n-nodes-base.postgres", 2.6, {
+        "operation": "executeQuery",
+        "query": "select state, data::text as data,\n"
+                 "       (extract(epoch from updated_at) * 1000)::bigint as updated_at\n"
+                 "  from bot_sessions\n"
+                 " where chat_id = $1;",
+        "options": {"queryReplacement":
+                    "={{ String($('Telegram Trigger').first().json.message"
+                    "?.chat?.id ?? $('Telegram Trigger').first().json"
+                    ".callback_query.message.chat.id) }}"},
+    }, (-60, 300), cred=POSTGRES_CRED, alwaysOutputData=True)
 
     # ── The two gated lookups ────────────────────────────────────────────────
     #
@@ -395,21 +409,27 @@ def build():
     # Always, on every turn. The Brain defaults sessionState/sessionData to what
     # it loaded, so a turn that changes nothing rewrites the same values rather
     # than needing a branch to skip it.
-    g.node("Save Session", "n8n-nodes-base.dataTable", 1, {
-        "operation": "upsert",
-        "dataTableId": {"__rl": True, "mode": "name", "value": SESSION_TABLE},
-        "filters": {"conditions": [
-            {"keyName": "chat_id", "condition": "eq",
-             "keyValue": "={{ $json.chatId }}"}
-        ]},
-        "columns": {"mappingMode": "defineBelow", "value": {
-            "chat_id": "={{ $json.chatId }}",
-            "state": "={{ $json.sessionState }}",
-            "data": "={{ $json.sessionData }}",
-            "updated_at": "={{ Date.now() }}",
-        }},
-        "options": {},
-    }, (1160, 480))
+    #
+    # `sessionData` is always a JSON string — brain.js emits '{}' rather than ''
+    # for an empty session — so the `::jsonb` cast never sees anything it cannot
+    # parse. `updated_at` is `now()` rather than a value from the turn: the row's
+    # age is a fact about the database, and letting the client assert it is how
+    # clock skew becomes an expired session.
+    g.node("Save Session", "n8n-nodes-base.postgres", 2.6, {
+        "operation": "executeQuery",
+        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\n"
+                 "values ($1, $2, $3::jsonb, now())\n"
+                 "on conflict (chat_id) do update\n"
+                 "   set state = excluded.state,\n"
+                 "       data = excluded.data,\n"
+                 "       updated_at = now();",
+        # An ARRAY expression, not a comma-separated string. `sessionData` is
+        # JSON and full of commas, and the string form is split on them — the
+        # session would arrive as three mangled parameters, or as a syntax
+        # error, depending on where the commas fell.
+        "options": {"queryReplacement":
+                    "={{ [$json.chatId, $json.sessionState, $json.sessionData] }}"},
+    }, (1160, 480), cred=POSTGRES_CRED)
 
     # ── The write path ───────────────────────────────────────────────────────
     g.node("Has Save?", "n8n-nodes-base.if", 2.3,
@@ -565,21 +585,23 @@ def build():
     #
     # deploy_graph.py rewrites this node to park an undo pre-image rather than
     # blanking `data`, and hangs the shadow write off it.
-    g.node("Clear Session", "n8n-nodes-base.dataTable", 1, {
-        "operation": "upsert",
-        "dataTableId": {"__rl": True, "mode": "name", "value": SESSION_TABLE},
-        "filters": {"conditions": [
-            {"keyName": "chat_id", "condition": "eq",
-             "keyValue": "={{ $('Brain').first().json.chatId }}"}
-        ]},
-        "columns": {"mappingMode": "defineBelow", "value": {
-            "chat_id": "={{ $('Brain').first().json.chatId }}",
-            "state": "",
-            "data": "{}",
-            "updated_at": "={{ Date.now() }}",
-        }},
-        "options": {},
-    }, (2760, 660))
+    # The state is cleared and `data` keeps the undo pre-image, which is what
+    # /undo reads within its ten minutes. Blanking it here is what made an undo
+    # impossible for the first two months this bot existed.
+    g.node("Clear Session", "n8n-nodes-base.postgres", 2.6, {
+        "operation": "executeQuery",
+        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\n"
+                 "values ($1, '', $2::jsonb, now())\n"
+                 "on conflict (chat_id) do update\n"
+                 "   set state = '',\n"
+                 "       data = excluded.data,\n"
+                 "       updated_at = now();",
+        "options": {"queryReplacement":
+                    "={{ [$('Brain').first().json.chatId,"
+                    " JSON.stringify({ lastWrite: $('Brain').first().json.save.undo"
+                    " || null, lastAppend: ['booking','expense']"
+                    ".includes($('Brain').first().json.save.flow) })] }}"},
+    }, (2760, 660), cred=POSTGRES_CRED)
     g.connect("Send Saved", "Clear Session")
     g.connect("Send Saved No Group", "Clear Session")
 

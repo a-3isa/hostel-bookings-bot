@@ -111,31 +111,26 @@
     {
       "id": "load-session",
       "name": "Load Session",
-      "type": "n8n-nodes-base.dataTable",
-      "typeVersion": 1,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
       "position": [
         -60,
         300
       ],
       "parameters": {
-        "operation": "get",
-        "dataTableId": {
-          "__rl": true,
-          "mode": "name",
-          "value": "bookings_bot_sessions"
-        },
-        "filters": {
-          "conditions": [
-            {
-              "keyName": "chat_id",
-              "condition": "eq",
-              "keyValue": "={{ String($('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query.message.chat.id) }}"
-            }
-          ]
-        },
-        "options": {}
+        "operation": "executeQuery",
+        "query": "select state, data::text as data,\n       (extract(epoch from updated_at) * 1000)::bigint as updated_at\n  from bot_sessions\n where chat_id = $1;",
+        "options": {
+          "queryReplacement": "={{ String($('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query.message.chat.id) }}"
+        }
       },
-      "alwaysOutputData": true
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Supabase Postgres"
+        }
+      }
     },
     {
       "id": "needs-bookings",
@@ -415,38 +410,24 @@
     {
       "id": "save-session",
       "name": "Save Session",
-      "type": "n8n-nodes-base.dataTable",
-      "typeVersion": 1,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
       "position": [
         1160,
         480
       ],
       "parameters": {
-        "operation": "upsert",
-        "dataTableId": {
-          "__rl": true,
-          "mode": "name",
-          "value": "bookings_bot_sessions"
-        },
-        "filters": {
-          "conditions": [
-            {
-              "keyName": "chat_id",
-              "condition": "eq",
-              "keyValue": "={{ $json.chatId }}"
-            }
-          ]
-        },
-        "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "chat_id": "={{ $json.chatId }}",
-            "state": "={{ $json.sessionState }}",
-            "data": "={{ $json.sessionData }}",
-            "updated_at": "={{ Date.now() }}"
-          }
-        },
-        "options": {}
+        "operation": "executeQuery",
+        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\nvalues ($1, $2, $3::jsonb, now())\non conflict (chat_id) do update\n   set state = excluded.state,\n       data = excluded.data,\n       updated_at = now();",
+        "options": {
+          "queryReplacement": "={{ [$json.chatId, $json.sessionState, $json.sessionData] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Supabase Postgres"
+        }
       }
     },
     {
@@ -1015,38 +996,24 @@
     {
       "id": "clear-session",
       "name": "Clear Session",
-      "type": "n8n-nodes-base.dataTable",
-      "typeVersion": 1,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
       "position": [
         2760,
         660
       ],
       "parameters": {
-        "operation": "upsert",
-        "dataTableId": {
-          "__rl": true,
-          "mode": "name",
-          "value": "bookings_bot_sessions"
-        },
-        "filters": {
-          "conditions": [
-            {
-              "keyName": "chat_id",
-              "condition": "eq",
-              "keyValue": "={{ $('Brain').first().json.chatId }}"
-            }
-          ]
-        },
-        "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "chat_id": "={{ $('Brain').first().json.chatId }}",
-            "state": "",
-            "data": "{}",
-            "updated_at": "={{ Date.now() }}"
-          }
-        },
-        "options": {}
+        "operation": "executeQuery",
+        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\nvalues ($1, '', $2::jsonb, now())\non conflict (chat_id) do update\n   set state = '',\n       data = excluded.data,\n       updated_at = now();",
+        "options": {
+          "queryReplacement": "={{ [$('Brain').first().json.chatId, JSON.stringify({ lastWrite: $('Brain').first().json.save.undo || null, lastAppend: ['booking','expense'].includes($('Brain').first().json.save.flow) })] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Supabase Postgres"
+        }
       }
     },
     {
