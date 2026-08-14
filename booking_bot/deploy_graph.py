@@ -86,8 +86,9 @@ def read_source(name):
 
 
 def main():
-    pb.rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
-                          "clientInfo": {"name": "deploy_graph", "version": "1.0"}})
+    # Picks the credential that can reach this workflow, not merely one that
+    # authenticates — see push_brain.select_server.
+    pb.select_server()
     wf = json.loads(pb.call_tool("get_workflow_details",
                                  {"workflowId": pb.WORKFLOW_ID}))["workflow"]
     have = {n["name"] for n in wf["nodes"]}
