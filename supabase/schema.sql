@@ -244,19 +244,81 @@ create unique index if not exists payments_client_ref_key on payments (client_re
 -- as an event, where the money lives here and nowhere else. NULLs are distinct
 -- to Postgres, so any number of them can share a booking under this index.
 alter table payments add column if not exists line_seq int;
-create unique index if not exists payments_booking_line_key
-  on payments (booking_id, line_seq);
 
 -- What the mirror last wrote onto this payment's sheet line, in the same shape
 -- as `bookings.mirror_payload` and for the same reason: if the row still shows
 -- this, nobody has touched it and writing is safe. It lives on the payment
 -- rather than the booking because one payload per booking can only describe one
 -- row, and a booking paid in two methods occupies two.
+--
+-- Superseded by `booking_lines.mirror_payload` below: a line can hold more than
+-- one payment now, so the payload belongs to the line. Kept for the three rows
+-- migrated out of it.
 alter table payments add column if not exists mirror_payload jsonb;
 
 alter table bookings add column if not exists merged_into bigint references bookings(id);
 
 create index if not exists bookings_merged_into_idx on bookings (merged_into);
+
+-- ── Sheet lines ──────────────────────────────────────────────────────────────
+--
+-- A line is a METHOD, not a payment. The user's rule, in their words: a second
+-- payment of a type already on the booking is *added to* that type's line, and
+-- only a type not yet seen opens a new row — checked against every line, so a
+-- third payment in cash joins the cash line however many rows exist by then.
+--
+-- That is what this table is for. `payments` could not express it: it had
+-- `unique (booking_id, line_seq)` and `unique (sheet_row)`, so two cash payments
+-- sharing one line and one row were rejected by the database itself. Summing
+-- them into a single payment row was the alternative and the user rejected it —
+-- each payment keeps its own date, its own receipt and its own row here.
+--
+-- Line 1 is NOT in this table. It is the booking's own row, and `bookings`
+-- already holds its row number and its payload; duplicating that here would
+-- create two places to keep in step. So `line_seq > 1` is enforced.
+--
+-- The method and currency are stored rather than derived from the line's
+-- payments because they are the line's IDENTITY — what a new payment is matched
+-- against. A line whose payments were all deleted still says which method it is.
+create table if not exists booking_lines (
+  id              bigint generated always as identity primary key,
+  booking_id      bigint not null references bookings(id) on delete cascade,
+  line_seq        int not null check (line_seq > 1),
+  method          text,
+  -- Method AND currency must match for a payment to join a line. 1000 كاش جنيه
+  -- and 50 كاش يورو are not 1050 of anything, and there are no exchange rates
+  -- in this system by explicit decision.
+  currency        text not null default 'EGP',
+  sheet_row       int unique,
+  mirror_payload  jsonb,
+  mirrored_at     timestamptz,
+  created_at      timestamptz not null default now(),
+  unique (booking_id, line_seq)
+);
+
+create index if not exists booking_lines_booking_idx on booking_lines (booking_id);
+
+-- The three lines that already existed, moved out of `payments`.
+insert into booking_lines (booking_id, line_seq, method, currency, sheet_row,
+                           mirror_payload)
+select p.booking_id, p.line_seq, p.method, p.currency, p.sheet_row,
+       p.mirror_payload
+  from payments p
+ where p.line_seq > 1 and p.sheet_row is not null
+on conflict (booking_id, line_seq) do nothing;
+
+-- One owner per row number. A line's row now lives on the line; leaving a copy
+-- on the payment would give reindex.py two places to renumber and one chance to
+-- forget. Line-1 payments keep theirs — that row is the booking's.
+update payments p set sheet_row = null
+  from booking_lines l
+ where p.booking_id = l.booking_id and p.line_seq = l.line_seq
+   and p.sheet_row is not null;
+
+-- A payment no longer owns a line on its own, so this index no longer holds:
+-- two cash payments on one line share a `line_seq` deliberately.
+drop index if exists payments_booking_line_key;
+create index if not exists payments_booking_line_idx on payments (booking_id, line_seq);
 
 -- ── Expenses ─────────────────────────────────────────────────────────────────
 
@@ -444,6 +506,7 @@ alter table rooms         enable row level security;
 alter table bookings      enable row level security;
 alter table booking_stays enable row level security;
 alter table payments      enable row level security;
+alter table booking_lines enable row level security;
 alter table expenses      enable row level security;
 alter table bot_sessions  enable row level security;
 alter table booking_audit enable row level security;
@@ -451,8 +514,8 @@ alter table sheet_snapshot enable row level security;
 
 -- Belt and braces: Supabase grants the API roles table privileges by default on
 -- creation, so take them back as well rather than relying on RLS alone.
-revoke all on apartments, rooms, bookings, booking_stays, payments, expenses,
-              bot_sessions, booking_audit, sheet_snapshot
+revoke all on apartments, rooms, bookings, booking_stays, payments, booking_lines,
+              expenses, bot_sessions, booking_audit, sheet_snapshot
   from anon, authenticated;
 
 -- Compared against `bookings_live`, not `bookings`, and this is the whole trick.
@@ -596,9 +659,9 @@ join lateral (
     -- each payment that owns a row. This is what the mirror writes back out.
     select b.sheet_row as sheet_row, nullif(b.payment_method, '') as method
     union all
-    select p.sheet_row, nullif(p.method, '')
-      from payments p
-     where p.booking_id = b.id and p.line_seq > 1 and p.sheet_row is not null
+    select l.sheet_row, nullif(l.method, '')
+      from booking_lines l
+     where l.booking_id = b.id and l.sheet_row is not null
   ) l
 ) agg on true
 left join lateral (
