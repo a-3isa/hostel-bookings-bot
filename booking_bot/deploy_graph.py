@@ -167,6 +167,15 @@ def main():
                      cred=("postgres", pg["id"], pg["name"]))
             print(f"  + {name}  (credential: {pg['name']})")
         else:
+            # Updating parameters cannot change a node's TYPE. A node still left
+            # as googleSheets from before Phase 4b would take an executeQuery
+            # `query` parameter it has no idea what to do with, and the result
+            # runs but reads nothing. Say so rather than reporting success.
+            live = next((n for n in wf["nodes"] if n["name"] == name), {})
+            if not live.get("type", "").endswith("postgres"):
+                print(f"  ! {name} is a {live.get('type', '?')} node, not postgres —"
+                      " delete it and re-run, or rebuild from build_workflow.py")
+                return
             ops.append({"type": "updateNodeParameters", "nodeName": name,
                         "parameters": params})
             print(f"  ~ {name} query")

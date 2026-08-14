@@ -1,6 +1,58 @@
 # Handoff — where the Supabase migration stands
 
-## START HERE (2026-08-14)
+## START HERE (2026-08-14) — the n8n rebuild
+
+**The old n8n instance was destroyed and the workflow with it.** There was no
+export anywhere and the repo could not rebuild it: `build_workflow.py` and
+`bookings-bot.workflow.json` were named in the README but never committed, and
+`deploy_graph.py` only creates the twenty nodes of its own branch.
+
+**That is fixed. The graph is generated from source now** —
+[`build_workflow.py`](../booking_bot/build_workflow.py), 33 nodes, committed
+along with its output. Locally everything is green: `validate_workflow.py`,
+`test_workflow.py` (10), `test_sheet_ids.py` (17), and brain/reports/shadow/
+reconcile.
+
+### What is left: import and publish
+
+Blocked only on the network — see below. The sequence:
+
+```
+python booking_bot/build_workflow.py --creds     # 15 nodes need a credential
+# import bookings-bot.workflow.json  (create_workflow_from_code)
+# bind credentials: telegramApi, googleSheetsOAuth2Api, postgres
+# create data table `bookings_bot_sessions`:
+#     chat_id (string), state (string), data (string), updated_at (number)
+# fill Config.BOT_TOKEN            — empty on purpose, this repo is committed
+# fill Config.BOOKINGS_SHEET_GID   — optional, only blackens a cancelled row
+python booking_bot/deploy_graph.py --publish     # its own 20 nodes on top
+python booking_bot/push_brain.py   --publish     # brain.js + the Config lists
+```
+
+`deploy_graph.py` needs `WORKFLOW_ID` in `push_brain.py` repointed at the new
+workflow's id once it exists.
+
+**Not yet verified against a running n8n:** the node *parameters*. The topology,
+the node names and every JS body are pinned by `brain.js` and the test suites,
+but the exact shapes for the Data Table nodes, the Switch, the Telegram
+`sendPhoto`/callback answer and the Sheets-credentialed HTTP node were written
+from the docs rather than read off a live instance. Expect one correction pass
+on the first import; `validate_workflow.py` checks structure and contract, not
+n8n field names.
+
+**Also needed before a single message flows:** the new n8n must be on public
+HTTPS with a certificate Telegram accepts, or the Telegram Trigger cannot
+register its webhook.
+
+### The network is still intercepted
+
+`superfoxxy.dpdns.org` serves a certificate issued by a **FortiGate appliance**
+(`O=Fortinet, CN=F2K61FTK22900232`), not by a public CA — a middlebox is
+terminating the TLS. Every n8n call carries the bearer token, so nothing was
+sent through it. Resolve by installing that CA if the appliance is the user's,
+or by using a network path without it.
+
+---
 
 **Everything below the line still applies. These are the immediate steps.**
 
