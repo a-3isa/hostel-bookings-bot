@@ -94,6 +94,7 @@ SESSION_TABLE = "bookings_bot_sessions"
 # and visible outcome rather than a silent binding to something that is not there.
 TELEGRAM_CRED = ("telegramApi", "REPLACE_ME", "Telegram account")
 SHEETS_CRED = ("googleSheetsOAuth2Api", "REPLACE_ME", "Google Sheets account")
+POSTGRES_CRED = ("postgres", "REPLACE_ME", "Supabase Postgres")
 
 # The key column of each tab: hand-typed, carrying no fill-down formula, so its
 # length is the true last data row. C اسم المقيم for bookings, B البند for
@@ -294,19 +295,34 @@ def build():
     # references both inside a try/catch precisely because they are unexecuted
     # on every other turn — see bookingRows() and the registry loader.
     #
-    # deploy_graph.py rewrites both gates and replaces the two reads with
-    # Postgres nodes; they are declared here so the base graph is connected and
-    # importable on its own.
+    # Both reads are Postgres, not Sheets. They were Sheets originally and the
+    # swap at Phase 4b is what removed a 0.4–2 s mid-conversation wait; the SQL
+    # aliases the sheet's own Arabic headers, so brain.js consumes the rows
+    # unchanged. Emitting the superseded Sheets version here would be worse than
+    # merely out of date: deploy_graph.py updates these two nodes in place when
+    # they already exist, so it would write Postgres parameters onto a Sheets
+    # node and leave something that cannot run.
+    #
+    # alwaysOutputData is load-bearing on both. A query returning no rows would
+    # otherwise stop the branch before the Brain ever ran, and the bot would
+    # answer nothing at all — the same lesson as Read Discrepancies.
+    lookup_settings = dict(alwaysOutputData=True, onError="continueRegularOutput",
+                           retryOnFail=True, maxTries=2)
+
     g.node("Needs Bookings?", "n8n-nodes-base.if", 2.3,
-           {"conditions": state_conditions(BOOKING_STATES), "options": {}},
-           (160, 300))
-    g.node("Read Bookings For Edit", "n8n-nodes-base.googleSheets", 4.7,
-           sheets_read(BOOKINGS_TAB, "A1:U2000"), (360, 180), cred=SHEETS_CRED)
+           {"conditions": state_conditions(BOOKING_STATES),
+            "looseTypeValidation": True, "options": {}}, (160, 300))
+    g.node("Read Bookings For Edit", "n8n-nodes-base.postgres", 2.6,
+           {"operation": "executeQuery",
+            "query": read_source("read_bookings_for_edit.sql"), "options": {}},
+           (360, 180), cred=POSTGRES_CRED, **lookup_settings)
     g.node("Needs Locations?", "n8n-nodes-base.if", 2.3,
-           {"conditions": state_conditions(LOCATION_STATES), "options": {}},
-           (560, 300))
-    g.node("Read Locations", "n8n-nodes-base.googleSheets", 4.7,
-           sheets_read("الإتاحة", "A3:B300"), (760, 180), cred=SHEETS_CRED)
+           {"conditions": state_conditions(LOCATION_STATES),
+            "looseTypeValidation": True, "options": {}}, (560, 300))
+    g.node("Read Locations", "n8n-nodes-base.postgres", 2.6,
+           {"operation": "executeQuery",
+            "query": read_source("read_locations.sql"), "options": {}},
+           (760, 180), cred=POSTGRES_CRED, **lookup_settings)
 
     g.connect("Telegram Trigger", "Config")
     g.connect("Config", "Load Session")

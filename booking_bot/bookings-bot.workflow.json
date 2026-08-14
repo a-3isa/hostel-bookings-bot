@@ -185,42 +185,32 @@
           ],
           "combinator": "or"
         },
+        "looseTypeValidation": true,
         "options": {}
       }
     },
     {
       "id": "read-bookings-for-edit",
       "name": "Read Bookings For Edit",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.7,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
       "position": [
         360,
         180
       ],
       "parameters": {
-        "documentId": {
-          "__rl": true,
-          "mode": "id",
-          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
-        },
-        "sheetName": {
-          "__rl": true,
-          "mode": "name",
-          "value": "إدخال الحجوزات"
-        },
-        "options": {
-          "dataLocationOnSheet": {
-            "values": {
-              "rangeDefinition": "specifyRangeA1",
-              "range": "A1:U2000"
-            }
-          }
-        }
+        "operation": "executeQuery",
+        "query": "-- Phase 4b: the lookup and the availability check read Postgres, not Sheets.\n-- Column aliases reproduce the sheet's headers exactly, so brain.js consumes\n-- this the way it consumed the Sheets node and needs no change.\n--\n-- bookings_live, NOT bookings_model, and the reason matters. The model folds a\n-- guest's continuation lines into one booking, which is right for a report and\n-- wrong here: this feeds the EDIT path, which writes back to a sheet row by\n-- number. Offer مروان as one 2200 row and the next payment lands on line 22\n-- while line 23 still holds its 1600 — the sheet would double-count. So this\n-- stays line-for-line with the sheet, exactly as the Sheets node was: all 55\n-- lines, cancelled ones included, because findConflicts() skips those by their\n-- ملغي note and the edit flow can still reach them.\n--\n-- '=OPEN' is deliberate. An open-ended stay arrived from the FORMULA read as\n-- '=TODAY()-J5', and both findConflicts() and showValue() key off that leading\n-- '='. Keeping the sentinel keeps that contract; Phase 5 replaces it with the\n-- open_ended boolean and deletes the sniffing.\nselect\n  b.sheet_row                                          as row_number,\n  coalesce(b.booking_ref, '')                          as \"بوكنج ID\",\n  coalesce(b.guest_ref, '')                            as \"ID\",\n  coalesce(b.guest_name, '')                           as \"اسم المقيم\",\n  coalesce(b.booking_type, '')                         as \"نوع الحجز\",\n  coalesce(b.phone, '')                                as \"رقم الهاتف\",\n  coalesce(b.apartment_name, '')                       as \"اسم الشقة\",\n  coalesce(b.room_number, '')                          as \"رقم الغرفة\",\n  case when b.open_ended then '=OPEN'\n       else coalesce(b.effective_nights::text, '') end as \"عدد الليالي\",\n  coalesce(to_char(b.arrival, 'YYYY-MM-DD'), '')       as \"تاريخ البداية\",\n  coalesce(to_char(b.departure, 'YYYY-MM-DD'), '')     as \"تاريخ المغادرة\",\n  coalesce(trim(to_char(b.effective_total, 'FM999999999.##')), '')     as \"اجمالي سعر الحجز\",\n  coalesce(trim(to_char(b.paid, 'FM999999999.##')), '')                as \"اجمالي ما تم دفعه\",\n  coalesce(b.payment_method, '')                       as \"طريقة الدفع\",\n  coalesce(trim(to_char(b.effective_remaining, 'FM999999999.##')), '') as \"المتبقي\",\n  coalesce(b.notes, '')                                as \"ملاحظات\"\nfrom bookings_live b\norder by b.sheet_row;\n",
+        "options": {}
       },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
       "credentials": {
-        "googleSheetsOAuth2Api": {
+        "postgres": {
           "id": "REPLACE_ME",
-          "name": "Google Sheets account"
+          "name": "Supabase Postgres"
         }
       }
     },
@@ -272,42 +262,32 @@
           ],
           "combinator": "or"
         },
+        "looseTypeValidation": true,
         "options": {}
       }
     },
     {
       "id": "read-locations",
       "name": "Read Locations",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.7,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
       "position": [
         760,
         180
       ],
       "parameters": {
-        "documentId": {
-          "__rl": true,
-          "mode": "id",
-          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
-        },
-        "sheetName": {
-          "__rl": true,
-          "mode": "name",
-          "value": "الإتاحة"
-        },
-        "options": {
-          "dataLocationOnSheet": {
-            "values": {
-              "rangeDefinition": "specifyRangeA1",
-              "range": "A3:B300"
-            }
-          }
-        }
+        "operation": "executeQuery",
+        "query": "-- The apartment/room registry, seeded from the الإتاحة tab and verified equal\n-- to it on 2026-08-09: 6 apartments, 26 rooms on both sides.\n--\n-- Aliases match the tab's own header row, so locationRegistry() reads this\n-- exactly as it read the Sheets node. Rooms sort numerically rather than by\n-- text, or room 10 would sit before room 2 on the keyboard.\nselect\n  a.name   as \"الشقة\",\n  r.number as \"الغرفة\"\nfrom rooms r\njoin apartments a on a.id = r.apartment_id\nwhere r.active and a.active\norder by a.id, length(r.number), r.number;\n",
+        "options": {}
       },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
       "credentials": {
-        "googleSheetsOAuth2Api": {
+        "postgres": {
           "id": "REPLACE_ME",
-          "name": "Google Sheets account"
+          "name": "Supabase Postgres"
         }
       }
     },
