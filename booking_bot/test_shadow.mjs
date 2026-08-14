@@ -17,11 +17,13 @@ const brainSrc = readFileSync(join(HERE, 'brain.js'), 'utf8');
 const shadowSrc = readFileSync(join(HERE, 'nodes', 'build_shadow_write.js'), 'utf8');
 const buildBookingSrc = readFileSync(join(HERE, 'nodes', 'build_booking_row.js'), 'utf8');
 const buildExpenseSrc = readFileSync(join(HERE, 'nodes', 'build_expense_row.js'), 'utf8');
+const buildLineSrc = readFileSync(join(HERE, 'nodes', 'build_line_rows.js'), 'utf8');
 
 const brainFn = new Function('$', brainSrc);
 const shadowFn = new Function('$', shadowSrc);
 const buildBookingFn = new Function('$', '$input', buildBookingSrc);
 const buildExpenseFn = new Function('$', '$input', buildExpenseSrc);
+const buildLineFn = new Function('$', buildLineSrc);
 
 const CONFIG = {
   BOT_TOKEN: 'x', BOOKINGS_SHEET_ID: 's', BOOKINGS_TAB: 'إدخال الحجوزات',
@@ -34,6 +36,10 @@ const CHAT = { id: 999 };
 const msg = (text, from = USER) => ({ message: { chat: CHAT, from, text } });
 const cb = (data, from = USER) => ({
   callback_query: { id: 'c', data, from, message: { chat: CHAT } },
+});
+// A transfer receipt: Telegram sends sizes, and the bot keeps the largest file_id.
+const photo = (fileId, from = USER) => ({
+  message: { chat: CHAT, from, photo: [{ file_id: `${fileId}_small` }, { file_id: fileId }] },
 });
 
 let sessionRow = {}, lastBrain = null, sheetRows = null;
@@ -68,7 +74,11 @@ function shadow({ builder = null, filledRows = 6 } = {}) {
   const items = Array.from({ length: filledRows }, (_, i) => ({ json: { k: i } }));
   if (builder === 'booking') built = buildBookingFn($b, { all: () => items })[0].json;
   if (builder === 'expense') built = buildExpenseFn($b, { all: () => items })[0].json;
-  const builtNode = builder === 'expense' ? 'Build Expense Row' : 'Build Booking Row';
+  // The payment_line branch: its builder emits the line first and the booking's
+  // own row second, and the shadow write reads the LINE's row number off it.
+  if (builder === 'line') built = buildLineFn($b)[0].json;
+  const builtNode = { expense: 'Build Expense Row', line: 'Build Line Rows' }[builder]
+    || 'Build Booking Row';
   const $ = (name) => {
     if (name === 'Brain') return { first: () => ({ json: lastBrain }) };
     if (name === builtNode) {
@@ -91,7 +101,8 @@ function section(n) { console.log(`\n${n}`); }
 const SHEET = [
   { 'ID': '77777', 'اسم المقيم': 'Sara Omar', 'اسم الشقة': 'انبي 2', 'رقم الغرفة': 3,
     'تاريخ البداية': '2026-08-04', 'اجمالي سعر الحجز': 1200, 'اجمالي ما تم دفعه': 1200,
-    'طريقة الدفع': 'كاش', 'ملاحظات': '' },
+    'طريقة الدفع': 'كاش', 'ملاحظات': '',
+    booking_id: 12, lines: [], block_end: 2, total_is_formula: false },
 ];
 
 function newBooking({ nights = 'nights_3', pay = 'pay_cash' } = {}) {
@@ -195,6 +206,60 @@ check('and it does not re-record the total',
   !/insert into payments[\s\S]*1500,/.test(s.sql), s.sql);
 check('idempotent on the save lock, so a double tap pays once',
   /client_ref[\s\S]*'2:\d+'/.test(s.sql), s.sql);
+
+section('payment lines: a method the booking does not carry gets its own row');
+reset();
+sheetRows = SHEET;
+run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));   // كاش, row 2
+sheetRows = null;
+run(cb('ef_paid')); run(msg('900')); run(cb('xpay_instapay'));
+run(photo('RCPT')); run(cb('xleft_no'));
+run(cb('xedone'));
+s = shadow({ builder: 'line' });
+check('the line is recorded as a line, not as a booking',
+  s.sql.includes('insert into booking_lines'), s.sql);
+check('numbered, so column U and the database agree',
+  /insert into booking_lines[\s\S]*, 2, 'انستاباي'/.test(s.sql), s.sql);
+check('and it knows which row it took', s.sql.includes(', 3 from bookings b'), s.sql);
+check('a second payment in that method finds the line already there',
+  s.sql.includes('on conflict (booking_id, line_seq) do update'), s.sql);
+check('the payment is tagged with its line',
+  /insert into payments[\s\S]*line_seq[\s\S]*900, 'انستاباي'/.test(s.sql), s.sql);
+check('the payment is still its own row, keyed on the save lock',
+  s.sql.includes('on conflict (client_ref) do nothing'), s.sql);
+check('انستاباي is pounds', s.sql.includes("else 'EGP' end"), s.sql);
+// Inserting a row renumbers every row beneath it. Telling the database in the
+// same statement is what stops the next payment landing on whoever moved into
+// that number — the failure that put money on the wrong guest once already.
+check('every table that remembers a row number is shifted',
+  s.sql.includes('update bookings set sheet_row = -(sheet_row + 1) where sheet_row >= 3') &&
+  s.sql.includes('update payments set sheet_row = -(sheet_row + 1) where sheet_row >= 3') &&
+  s.sql.includes('update booking_lines set sheet_row = -(sheet_row + 1) where sheet_row >= 3'),
+  s.sql);
+check('through negatives, because sheet_row is unique',
+  s.sql.includes('set sheet_row = -sheet_row where sheet_row < 0'), s.sql);
+check('the booking keeps the total the sheet now shows',
+  s.sql.includes('update bookings set total = 300'), s.sql);
+
+section('payment lines: joining a line that already exists moves no rows');
+reset();
+sheetRows = [Object.assign({}, SHEET[0], {
+  lines: [{ seq: 2, row: 3, method: 'انستاباي', amount: 1600 }], block_end: 3,
+})];
+run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
+sheetRows = null;
+run(cb('ef_paid')); run(msg('500')); run(cb('xpay_instapay'));
+run(photo('RCPT2')); run(cb('xleft_no'));
+run(cb('xedone'));
+s = shadow({ builder: 'line' });
+check('nothing is shifted', !s.sql.includes('-(sheet_row + 1)'), s.sql);
+check('the line is upserted, not duplicated',
+  s.sql.includes('on conflict (booking_id, line_seq) do update'), s.sql);
+check('the payment records only what was handed over now',
+  /insert into payments[\s\S]*500, 'انستاباي'/.test(s.sql) &&
+  !/insert into payments[\s\S]*2100,/.test(s.sql), s.sql);
+check('the booking total is left alone', !s.sql.includes('update bookings set total'),
+  s.sql);
 
 section('cancel: marks the row cancelled rather than deleting it');
 reset();

@@ -444,10 +444,12 @@ def build():
             "options": {}}, (1160, 660))
     g.connect("Brain", "Has Save?")
 
-    # Four flows, three writers. booking and expense append to different tabs —
+    # Five flows, four writers. booking and expense append to different tabs —
     # one Sheets node's column mapping is bound to one sheet's headers, so they
     # cannot share a node. edit and cancel both update a row the lookup already
-    # found, and differ only in what they say afterwards.
+    # found, and differ only in what they say afterwards. payment_line is a
+    # payment in a method the booking's own row does not carry: it writes a row
+    # of its own, and may have to insert it first.
     g.node("Route Save", "n8n-nodes-base.switch", 3.2, {
         "rules": {"values": [
             {"conditions": {
@@ -459,7 +461,7 @@ def build():
                                 "operator": {"type": "string", "operation": "equals"}}],
                 "combinator": "and"},
              "outputKey": flow}
-            for flow in ("booking", "expense", "edit", "cancel")
+            for flow in ("booking", "expense", "edit", "cancel", "payment_line")
         ]},
         "options": {"fallbackOutput": "none"},
     }, (1360, 660))
@@ -490,15 +492,61 @@ def build():
     g.node("Write Edit Row", "n8n-nodes-base.googleSheets", 4.7,
            sheets_update(BOOKINGS_TAB), (1960, 840), cred=SHEETS_CRED)
 
+    # ── A payment on its own line ────────────────────────────────────────────
+    #
+    # A method the booking's own row does not carry. Either a row already holds
+    # that method and its cells grow, or there is no such row and one is
+    # inserted directly under the booking's block — which is where a person
+    # would put it, and which moves every row below down by one.
+    #
+    # `inheritFromBefore` is what makes the inserted row a real row of this
+    # sheet: it carries down the formatting and the fill-down formulas of the
+    # row above, exactly as inserting by hand does. K, N, P, R, S and T are
+    # never written by anything here; they arrive already correct.
+    g.node("Needs Row Insert?", "n8n-nodes-base.if", 2.3,
+           {"conditions": flag_condition("={{ $json.save.insert }}", "wants-insert"),
+            "options": {}}, (1560, 1020))
+    g.node("Insert Payment Line", "n8n-nodes-base.httpRequest", 4.2, {
+        "method": "POST",
+        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}:batchUpdate",
+        # Same binding note as Format Cancelled Row: the Sheets credential on an
+        # HTTP node cannot be set over the API, only in the editor or by import.
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": True,
+        "specifyBody": "json",
+        # startIndex is zero-based and the range is half-open, so inserting AT
+        # the new row's index puts one row there and pushes the rest down.
+        "jsonBody":
+            "={{ JSON.stringify({ requests: [{ insertDimension: {"
+            " range: { sheetId: Number($('Config').first().json.BOOKINGS_SHEET_GID),"
+            " dimension: 'ROWS',"
+            " startIndex: $('Brain').first().json.save.row - 1,"
+            " endIndex: $('Brain').first().json.save.row },"
+            " inheritFromBefore: true } }] }) }}",
+        "options": {},
+    }, (1760, 1020), cred=SHEETS_CRED)
+    g.node("Build Line Rows", "n8n-nodes-base.code", 2,
+           {"jsCode": read_source("build_line_rows.js")}, (1960, 1020))
+    g.node("Write Line Rows", "n8n-nodes-base.googleSheets", 4.7,
+           sheets_update(BOOKINGS_TAB), (2160, 1020), cred=SHEETS_CRED)
+
     g.connect("Route Save", "Read Booking Key", index=0)
     g.connect("Route Save", "Read Expense Key", index=1)
     g.connect("Route Save", "Build Edit Row", index=2)
     g.connect("Route Save", "Build Edit Row", index=3)
+    g.connect("Route Save", "Needs Row Insert?", index=4)
     g.connect("Read Booking Key", "Build Booking Row")
     g.connect("Build Booking Row", "Write Booking Row")
     g.connect("Read Expense Key", "Build Expense Row")
     g.connect("Build Expense Row", "Write Expense Row")
     g.connect("Build Edit Row", "Write Edit Row")
+    # A line that already exists needs no insert, so it goes straight to the
+    # builder — the false branch, not a second copy of the node.
+    g.connect("Needs Row Insert?", "Insert Payment Line", index=0)
+    g.connect("Needs Row Insert?", "Build Line Rows", index=1)
+    g.connect("Insert Payment Line", "Build Line Rows")
+    g.connect("Build Line Rows", "Write Line Rows")
 
     # ── After the write ──────────────────────────────────────────────────────
     #
@@ -570,7 +618,8 @@ def build():
                          "={{ $('Brain').first().json.chatId }}"),
            (2160, 960), cred=TELEGRAM_CRED)
 
-    for writer in ("Write Booking Row", "Write Expense Row", "Write Edit Row"):
+    for writer in ("Write Booking Row", "Write Expense Row", "Write Edit Row",
+                   "Write Line Rows"):
         g.connect(writer, "Has Group?")
         # Output 1 of a node with onError=continueErrorOutput is the failure.
         g.connect(writer, "Send Save Error", index=1)

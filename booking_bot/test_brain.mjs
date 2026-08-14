@@ -542,19 +542,26 @@ check('skipped receipt → empty file id', r.save.receiptFileId === '');
 
 // ─── Edit an already-saved booking ────────────────────────────────────────────
 
+// booking_id / lines / block_end / total_is_formula come from
+// read_bookings_for_edit.sql alongside the sheet's own columns. They are what a
+// payment uses to find its line: `lines` is every continuation row the booking
+// already occupies, `block_end` the last row it owns.
 const SHEET = [
   { 'بوكنج ID': '', 'ID': '55555', 'اسم المقيم': 'Ahmed Mohamed',
     'اسم الشقة': 'ذاكر حسين', 'رقم الغرفة': 1, 'تاريخ البداية': '2026-08-01',
     'اجمالي سعر الحجز': 5000, 'اجمالي ما تم دفعه': 2000,
-    'طريقة الدفع': 'كاش', 'ملاحظات': 'وصل متأخر' },
+    'طريقة الدفع': 'كاش', 'ملاحظات': 'وصل متأخر',
+    booking_id: 11, lines: [], block_end: 2, total_is_formula: false },
   { 'بوكنج ID': 'BK-77', 'ID': '77777', 'اسم المقيم': 'Sara Omar',
     'اسم الشقة': 'انبي 2', 'رقم الغرفة': 3, 'تاريخ البداية': '2026-08-04',
     'اجمالي سعر الحجز': 1200, 'اجمالي ما تم دفعه': 1200,
-    'طريقة الدفع': 'كاش', 'ملاحظات': '' },
+    'طريقة الدفع': 'كاش', 'ملاحظات': '',
+    booking_id: 12, lines: [], block_end: 3, total_is_formula: false },
   { 'بوكنج ID': '', 'ID': '55555', 'اسم المقيم': 'Khaled Nabil',
     'اسم الشقة': 'انبي 3', 'رقم الغرفة': 2, 'تاريخ البداية': '2026-08-09',
     'اجمالي سعر الحجز': 800, 'اجمالي ما تم دفعه': 0,
-    'طريقة الدفع': 'غير مدفوع', 'ملاحظات': '' },
+    'طريقة الدفع': 'غير مدفوع', 'ملاحظات': '',
+    booking_id: 13, lines: [], block_end: 4, total_is_formula: false },
 ];
 
 section('edit: finding the booking');
@@ -630,23 +637,44 @@ check('after the receipt the admin is asked whether the guest left',
 r = run(cb('xleft_no'));
 check('answering لا goes to the review, not the menu',
   r.reply.text.startsWith('📋 *مراجعة التعديل:*'), r.reply.text);
-check('review lists every change made this session',
-  r.reply.text.includes('اجمالي ما تم دفعه: 1200 ← 2100') &&
-  r.reply.text.includes('طريقة الدفع: كاش ← انستاباي') &&
+// The booking's own row says كاش. This payment is انستاباي, so it does NOT
+// belong on that row — until 2026-08-14 it overwrote the method there, and the
+// booking then claimed it had only ever been paid by انستاباي.
+check('review says the payment gets a line of its own',
+  r.reply.text.includes('➕ دفعة 900 بطريقة انستاباي — سطر منفصل') &&
   r.reply.text.includes('ملاحظات:'), r.reply.text);
 check('review is not a save on its own', r.hasSave === false);
 
 r = run(cb('xedone'));
 check('edit flagged as a save', r.hasSave === true);
-check('flow is edit', r.save.flow === 'edit');
-check('row comes from the lookup, not a computed append', r.save.row === 3);
-check('only changed columns are written',
-  JSON.stringify(Object.keys(r.save.fields).sort()) ===
-  JSON.stringify(['اجمالي ما تم دفعه', 'طريقة الدفع', 'ملاحظات'].sort()),
-  Object.keys(r.save.fields));
+check('flow is payment_line', r.save.flow === 'payment_line', r.save.flow);
+check('a method this booking has never used needs a row', r.save.insert === true);
+check('the row goes directly under the booking block',
+  r.save.insertAfter === 3 && r.save.row === 4, [r.save.insertAfter, r.save.row]);
+check('it is line 2', r.save.lineSeq === 2, r.save.lineSeq);
+check('the line carries the amount paid THIS time, as both total and paid',
+  r.save.fields['اجمالي سعر الحجز'] === 900 &&
+  r.save.fields['اجمالي ما تم دفعه'] === 900, r.save.fields);
+check('and its own method', r.save.fields['طريقة الدفع'] === 'انستاباي');
+check('the guest is repeated so the row reads as theirs',
+  r.save.fields['اسم المقيم'] === 'Sara Omar' &&
+  r.save.fields['اسم الشقة'] === 'انبي 2', r.save.fields);
+check('column U says which line this is', r.save.fields['معرف النظام'] === '12-2',
+  r.save.fields['معرف النظام']);
 check('المتبقي is never written', !('المتبقي' in r.save.fields));
-check('paid amount was ADDED to the existing 1200, not replaced',
-  r.save.fields['اجمالي ما تم دفعه'] === 2100, r.save.fields['اجمالي ما تم دفعه']);
+check('the booking row keeps its own method', !('طريقة الدفع' in r.save.bookingFields));
+check('the booking row keeps its own paid cell',
+  !('اجمالي ما تم دفعه' in r.save.bookingFields), r.save.bookingFields);
+check('the booking total drops by what the line took (1200-900)',
+  r.save.bookingFields['اجمالي سعر الحجز'] === 300,
+  r.save.bookingFields['اجمالي سعر الحجز']);
+check('other edits still land on the booking row',
+  r.save.bookingFields['ملاحظات'] === 'دفع الباقي', r.save.bookingFields);
+check('the database is told every row below moved down', r.save.shiftFrom === 4);
+check('a row that did not exist is not offered to /undo', r.save.undo === null);
+check('the payment act carries the line it belongs to',
+  r.save.payment.lineSeq === 2 && r.save.payment.added === 900 &&
+  r.save.payment.method === 'انستاباي', r.save.payment);
 // An admin adding a payment gets the payment message, not a column diff:
 // "1200 ← 2100" describes a cell moving, and the group is watching for money.
 check('the group is told a payment arrived, and how much',
@@ -655,14 +683,8 @@ check('the group is told a payment arrived, and how much',
   r.save.groupText.includes('💵 اجمالي ما تم دفعه: 2100') &&
   r.save.groupText.includes('💳 الدفع: انستاباي'),
   r.save.groupText);
-check('anything else changed in the same session still gets reported',
-  r.save.groupText.includes('✏️ تعديلات أخرى:') &&
-  r.save.groupText.includes('ملاحظات:'),
-  r.save.groupText);
-check('and the payment columns are not repeated underneath as a diff',
-  !r.save.groupText.includes('اجمالي ما تم دفعه: 1200 ← 2100') &&
-  !r.save.groupText.includes('طريقة الدفع: كاش ← انستاباي'),
-  r.save.groupText);
+check('and that it went onto a separate line',
+  r.save.groupText.includes('📄 سطر منفصل بطريقة الدفع: انستاباي'), r.save.groupText);
 check('edit receipt is carried through', r.save.receiptFileId === 'EDITFILE55');
 check('edit says who made it', r.save.groupText.includes('👤 بواسطة: Ahmed Isa'),
   r.save.groupText);
@@ -685,6 +707,84 @@ check('the single addition is saved (1200+300)',
 check('the payment message reports the addition and the new total',
   r.save.groupText.includes('➕ المبلغ المضاف: 300') &&
   r.save.groupText.includes('💵 اجمالي ما تم دفعه: 1500'), r.save.groupText);
+
+// The user's rule, in their words: "if the new payment type is the same as the
+// old one then the payment amount is added to each other, but if the new
+// payment has a different type then add a new row … if a third payment arrived
+// then see if its type already there or not in the 1st or 2nd payment".
+section('payment lines: same method grows a row, a new method opens one');
+
+// A booking that already occupies two rows: its own (كاش) and a انستاباي line.
+const SPLIT = [{
+  'بوكنج ID': '', 'ID': '31313', 'اسم المقيم': 'مروان', 'اسم الشقة': 'انبي 3',
+  'رقم الغرفة': 2, 'تاريخ البداية': '2026-08-02', 'اجمالي سعر الحجز': 600,
+  'اجمالي ما تم دفعه': 600, 'طريقة الدفع': 'كاش', 'ملاحظات': '',
+  booking_id: 21,
+  lines: [{ seq: 2, row: 25, method: 'انستاباي', amount: 1600 }],
+  block_end: 25, total_is_formula: false,
+}];
+
+function payOn(rows, callbackData, amount, { user = USER } = {}) {
+  resetSession();
+  sheetRows = rows;
+  run(msg('/start', user)); run(cb('choice_edit', user)); run(msg('31313', user));
+  sheetRows = null;
+  run(cb('ef_paid', user)); run(msg(String(amount), user));
+  return run(cb(callbackData, user));
+}
+
+payOn(SPLIT, 'xpay_cash', 400);            // same as the booking's own row
+r = run(cb('xleft_no')); r = run(cb('xedone'));
+check('same method as the booking row is an ordinary edit', r.save.flow === 'edit',
+  r.save.flow);
+check('and its paid cell simply grows (600+400)',
+  r.save.fields['اجمالي ما تم دفعه'] === 1000, r.save.fields['اجمالي ما تم دفعه']);
+
+payOn(SPLIT, 'xpay_instapay', 500);        // the method of the EXISTING line
+r = run(photo('RCPT1')); r = run(cb('xleft_no')); r = run(cb('xedone'));
+check('a method already on a line joins that line', r.save.flow === 'payment_line');
+check('nothing is inserted for it', r.save.insert === false);
+check('it targets that line\'s row, not the booking\'s', r.save.row === 25, r.save.row);
+check('the line total grows (1600+500)',
+  r.save.fields['اجمالي ما تم دفعه'] === 2100 &&
+  r.save.fields['اجمالي سعر الحجز'] === 2100, r.save.fields);
+check('the guest identity is not rewritten on a row that already has it',
+  !('اسم المقيم' in r.save.fields), Object.keys(r.save.fields));
+check('the booking total is untouched — no row was taken from it',
+  r.save.bookingFields === null, r.save.bookingFields);
+check('growing an existing line IS undoable', r.save.undo !== null);
+check('the undo pre-image is the line before this payment',
+  r.save.undo.before['اجمالي ما تم دفعه'] === 1600, r.save.undo.before);
+check('nothing moved, so nothing is shifted', r.save.shiftFrom === null);
+
+payOn(SPLIT, 'xpay_vcash', 300);        // a third method, on neither row
+r = run(photo('RCPT2')); r = run(cb('xleft_no')); r = run(cb('xedone'));
+check('a third method opens line 3', r.save.lineSeq === 3, r.save.lineSeq);
+check('under the LAST row the booking owns, not under the booking',
+  r.save.insertAfter === 25 && r.save.row === 26, [r.save.insertAfter, r.save.row]);
+check('column U numbers it 21-3', r.save.fields['معرف النظام'] === '21-3',
+  r.save.fields['معرف النظام']);
+
+// A booking whose total is `=650*I18` — the sheet computing a nightly rate.
+const FORMULA_TOTAL = [Object.assign({}, SPLIT[0], {
+  booking_id: 22, lines: [], block_end: 9, total_is_formula: true,
+})];
+payOn(FORMULA_TOTAL, 'xpay_instapay', 700);
+r = run(photo('RCPT3')); r = run(cb('xleft_no')); r = run(cb('xedone'));
+check('a nightly-rate total is left to the sheet', r.save.bookingFields === null,
+  r.save.bookingFields);
+check('the line is still written', r.save.fields['اجمالي ما تم دفعه'] === 700);
+
+// A booking with no طريقة الدفع at all — the first payment fills that cell
+// rather than leaving it blank with a line underneath.
+const NO_METHOD = [Object.assign({}, SPLIT[0], {
+  booking_id: 23, 'طريقة الدفع': '', 'اجمالي ما تم دفعه': 0, lines: [], block_end: 9,
+})];
+payOn(NO_METHOD, 'xpay_cash', 250);
+r = run(cb('xleft_no')); r = run(cb('xedone'));
+check('an empty method cell is filled, not bypassed', r.save.flow === 'edit',
+  r.save.flow);
+check('the booking row takes the method', r.save.fields['طريقة الدفع'] === 'كاش');
 
 section('edit: refunds and corrections via negative amounts');
 resetSession();
@@ -787,13 +887,16 @@ r = run(msg('حولت بالفعل', EXPUSER));
 check('text instead of a photo is rejected', r.reply.text === '❌ لا بد من إرسال صورة الإيصال:', r.reply.text);
 r = run(photo('PAYFILE99', EXPUSER));
 check('photo saves immediately — no confirm step', r.hasSave === true);
-check('flow is edit (same writer as the admin edit)', r.save.flow === 'edit');
-check('row from the lookup', r.save.row === 3);
-check('only paid + payment method written',
-  JSON.stringify(Object.keys(r.save.fields).sort()) ===
-  JSON.stringify(['اجمالي ما تم دفعه', 'طريقة الدفع'].sort()), Object.keys(r.save.fields));
-check('payment ADDED to the existing 1200', r.save.fields['اجمالي ما تم دفعه'] === 2000,
-  r.save.fields['اجمالي ما تم دفعه']);
+// The cashier's payment follows the same rule as the admin's, deliberately: the
+// line a payment belongs on is a fact about the booking, not about who typed it.
+check('a new method gets its own line here too', r.save.flow === 'payment_line',
+  r.save.flow);
+check('the row is inserted under the booking block',
+  r.save.insert === true && r.save.row === 4, [r.save.insert, r.save.row]);
+check('the line holds what was paid this time',
+  r.save.fields['اجمالي ما تم دفعه'] === 800 &&
+  r.save.fields['اجمالي سعر الحجز'] === 800, r.save.fields);
+check('the booking row keeps كاش', !('طريقة الدفع' in (r.save.bookingFields || {})));
 check('receipt carried to the save', r.save.receiptFileId === 'PAYFILE99');
 check('group message is the payment notice, not the edit diff',
   r.save.groupText.includes('💵 *دفعة جديدة*') &&

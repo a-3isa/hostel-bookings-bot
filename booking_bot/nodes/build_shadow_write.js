@@ -21,7 +21,8 @@ const save = brain.save || {};
 
 /** The row the sheet write actually landed on. */
 function sheetRow() {
-  for (const node of ['Build Booking Row', 'Build Expense Row', 'Build Edit Row']) {
+  for (const node of ['Build Booking Row', 'Build Expense Row', 'Build Edit Row',
+                      'Build Line Rows']) {
     try {
       const n = $(node).first().json;
       if (n && n.row_number) return Number(n.row_number);
@@ -199,6 +200,66 @@ if (flow === 'booking' || flow === 'edit' || flow === 'cancel') {
         'paid_at = excluded.paid_at;';
     }
   }
+} else if (flow === 'payment_line') {
+  // ── A payment on a line of its own ─────────────────────────────────────────
+  //
+  // The sheet write has already happened by the time this runs, so the database
+  // is being told what the sheet now says, in the same order the sheet learned
+  // it:
+  //
+  //   1. every row from the insert point down moved one row further down. This
+  //      goes FIRST and through negative numbers, because sheet_row is UNIQUE
+  //      and not deferrable — a single +1 pass collides with a row it has not
+  //      reached yet. Skipped entirely when no row was inserted.
+  //   2. the line itself, in booking_lines: which method it carries and which
+  //      row it occupies. `on conflict` because a second payment in that method
+  //      finds the line already there.
+  //   3. the payment, as its own row, tagged with the line it belongs to. Never
+  //      an upsert on the line — two payments on one line are two rows, which
+  //      is the whole reason booking_lines exists.
+  //   4. the booking's own total, when the sheet's was reduced to make room for
+  //      the line. Left alone when the sheet computes it from a nightly rate.
+  const act = save.payment || {};
+  const seq = Number(save.lineSeq);
+  const method = sqlStr(act.method || save.fields['طريقة الدفع']);
+  sql = '';
+
+  if (save.shiftFrom) {
+    const from = Number(save.shiftFrom);
+    for (const table of ['bookings', 'payments', 'booking_lines']) {
+      sql += ` update ${table} set sheet_row = -(sheet_row + 1)` +
+             ` where sheet_row >= ${from};` +
+             ` update ${table} set sheet_row = -sheet_row where sheet_row < 0;`;
+    }
+  }
+
+  sql +=
+    ' insert into booking_lines (booking_id, line_seq, method, currency, sheet_row)' +
+    ` select b.id, ${seq}, ${method},` +
+    ` case when ${method} like '%دولار%' then 'USD'` +
+    ` when ${method} like '%يورو%' then 'EUR' else 'EGP' end, ${row}` +
+    ` from bookings b where b.sheet_row = ${Number(save.bookingRow)}` +
+    ' on conflict (booking_id, line_seq) do update set method = excluded.method,' +
+    ' currency = excluded.currency, sheet_row = excluded.sheet_row;';
+
+  if (Number(act.added)) {
+    sql +=
+      ' insert into payments (booking_id, amount, method, currency, line_seq,' +
+      ' receipt_file_id, paid_at, client_ref, source) select b.id,' +
+      ` ${sqlNum(act.added)}, ${method},` +
+      ` case when ${method} like '%دولار%' then 'USD'` +
+      ` when ${method} like '%يورو%' then 'EUR' else 'EGP' end, ${seq},` +
+      ` ${sqlStr(save.receiptFileId)}, now(), ${sqlStr(act.ref)}, 'bot'` +
+      ` from bookings b where b.sheet_row = ${Number(save.bookingRow)}` +
+      ' on conflict (client_ref) do nothing;';
+  }
+
+  const bf = save.bookingFields || {};
+  if (bf['اجمالي سعر الحجز'] !== undefined) {
+    sql += ` update bookings set total = ${sqlNum(bf['اجمالي سعر الحجز'])},` +
+           ` updated_at = now() where sheet_row = ${Number(save.bookingRow)};`;
+  }
+  sql = sql.trim();
 } else if (flow === 'expense') {
   sql =
     'insert into expenses (sheet_row, expense_ref, item, amount, apartment_id, ' +
