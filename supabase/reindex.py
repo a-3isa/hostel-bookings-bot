@@ -18,6 +18,9 @@ itself says which booking each row is, so an insert stops being ambiguous:
   * **orphan** — an id in U that no booking has. Reported, never acted on: it
     means someone copied a row, and which of the two is real is a question for a
     person.
+  * **payment line** — a suffixed id, `413-2`. The row belongs to booking 413
+    and holds one of its payments; it is never a booking, so it is never
+    adopted. Its row is re-pointed on the PAYMENT, not on any booking.
 
     python supabase/reindex.py            # report only
     python supabase/reindex.py --apply    # re-point, adopt, write U
@@ -28,20 +31,23 @@ import sys
 import psycopg
 
 from backfill import (BOOKINGS_TAB, connect_args, load_bookings, numeric,
-                      open_sheet, text_or_none)
+                      open_sheet, parse_sheet_id, text_or_none)
 
 ID_COL = "U"
 
 
 def sheet_ids(ws, last_row):
-    """sheet_row -> booking id, from column U. Blank and non-numeric are None."""
+    """sheet_row -> (booking id, line sequence), from column U.
+
+    An unstamped or unreadable cell is (None, None). `413` reads as sequence 1,
+    the booking's own line; `413-2` as sequence 2, a continuation line.
+    """
     got = ws.get(f"{ID_COL}2:{ID_COL}{last_row}")
     out = {}
     for i, row in enumerate(got, start=2):
-        raw = str((row or [""])[0]).strip()
-        out[i] = int(raw) if raw.isdigit() else None
+        out[i] = parse_sheet_id((row or [""])[0])
     for row in range(2, last_row + 1):
-        out.setdefault(row, None)
+        out.setdefault(row, (None, None))
     return out
 
 
@@ -86,20 +92,34 @@ def main():
         cur.execute("select id, sheet_row from bookings;")
         db_row = dict(cur.fetchall())
 
-        repoint, adoptable, orphans = [], [], []
+        repoint, adoptable, orphans, unrecorded = [], [], [], []
+        line_moves = []
         for row in sorted(rows):
-            bid = ids.get(row)
+            bid, seq = ids.get(row, (None, None))
             if bid is None:
                 adoptable.append(row)
             elif bid not in db_row:
                 orphans.append((row, bid))
+            elif seq > 1:
+                # A continuation line. Its row belongs to the payment recorded
+                # on it, and moves independently of the booking's own row — a
+                # booking with two lines would otherwise have both stamped with
+                # the same new row, which is what `sheet_row` alone could never
+                # express.
+                cur.execute("select id, sheet_row from payments"
+                            " where booking_id = %s and line_seq = %s;", (bid, seq))
+                got = cur.fetchone()
+                if got is None:
+                    unrecorded.append((row, bid, seq))
+                elif got[1] != row:
+                    line_moves.append((got[0], got[1], row))
             elif db_row[bid] != row:
                 repoint.append((bid, db_row[bid], row))
 
         # A booking whose row vanished from the sheet: not deleted here, because
         # "the row is gone" and "the row moved past the range we read" are the
         # same shape from this side.
-        seen_ids = {b for b in ids.values() if b is not None}
+        seen_ids = {b for b, _seq in ids.values() if b is not None}
         vanished = [(bid, r) for bid, r in db_row.items()
                     if r is not None and bid not in seen_ids]
 
@@ -113,6 +133,12 @@ def main():
         print(f"  orphan ids (no such booking):   {len(orphans)}")
         for row, bid in orphans[:10]:
             print(f"    row {row}: U says {bid}")
+        print(f"  payment lines to re-point:      {len(line_moves)}")
+        for pid, was, now in line_moves[:10]:
+            print(f"    payment {pid}: row {was} -> {now}")
+        print(f"  payment lines with no payment:  {len(unrecorded)}")
+        for row, bid, seq in unrecorded[:10]:
+            print(f"    row {row}: U says {bid}-{seq}, booking {bid} has no line {seq}")
         print(f"  in db, not found in the sheet:  {len(vanished)}")
 
         if not apply:
@@ -154,6 +180,15 @@ def main():
             cur.execute("update payments set sheet_row = %s where sheet_row = %s;",
                         (now, -was))
 
+        # Continuation lines, re-pointed from column U rather than dragged along
+        # by a booking. Parked on negative ids first for the same reason the
+        # bookings are: payments.sheet_row is unique, so two lines swapping rows
+        # collide half way through a one-phase update.
+        for pid, _was, _now in line_moves:
+            cur.execute("update payments set sheet_row = %s where id = %s;", (-pid, pid))
+        for pid, _was, now in line_moves:
+            cur.execute("update payments set sheet_row = %s where id = %s;", (now, pid))
+
         written = []
         for row in adoptable:
             new_id = adopt(cur, rows[row])
@@ -165,7 +200,8 @@ def main():
     if written:
         ws.batch_update(written, value_input_option="RAW")
         print(f"\nwrote {len(written)} id(s) into column {ID_COL}")
-    print(f"re-pointed {len(repoint)}, adopted {len(written)}")
+    print(f"re-pointed {len(repoint)} booking(s) and {len(line_moves)} payment line(s),"
+          f" adopted {len(written)}")
 
 
 if __name__ == "__main__":

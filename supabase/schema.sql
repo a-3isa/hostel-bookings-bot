@@ -224,6 +224,23 @@ alter table payments add column if not exists currency text not null default 'EG
 -- collide anyway.
 alter table payments add column if not exists client_ref text;
 create unique index if not exists payments_client_ref_key on payments (client_ref);
+-- Which sheet LINE of its booking this payment occupies. Column U carries the
+-- same number as a suffix — `413-2` is booking 413, line 2 — so the sheet itself
+-- says which payment each row is, and a row inserted above it renumbers nothing
+-- that matters. Line 1 is the booking's own row.
+--
+-- This is what retires `sheet_row` as the payment's identity. Matching on the
+-- row put money on the wrong guest once already: a row inserted by hand between
+-- a bot write and the next reindex shifted every row beneath it, and the next
+-- payment landed on the guest who had moved into that number.
+--
+-- NULL means the payment owns no line — which is every payment the bot records
+-- as an event, where the money lives here and nowhere else. NULLs are distinct
+-- to Postgres, so any number of them can share a booking under this index.
+alter table payments add column if not exists line_seq int;
+create unique index if not exists payments_booking_line_key
+  on payments (booking_id, line_seq);
+
 alter table bookings add column if not exists merged_into bigint references bookings(id);
 
 create index if not exists bookings_merged_into_idx on bookings (merged_into);
