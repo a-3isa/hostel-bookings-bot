@@ -107,6 +107,12 @@ create table if not exists bookings (
 alter table bookings add column if not exists open_ended    boolean not null default false;
 alter table bookings add column if not exists total_formula text;
 alter table bookings add column if not exists nightly_rate  numeric(12,2);
+
+-- A lump sum written off the nightly rate: the `-2200` in `=(650*I18)-2200`.
+-- Without it the database recomputed 650 × nights on that open stay and came
+-- out 2200 short of the sheet, growing by another night's drift every morning —
+-- one guaranteed false difference on every daily reconcile.
+alter table bookings add column if not exists total_adjustment numeric(12,2);
 alter table bookings add column if not exists receipt_file_id text;
 alter table expenses add column if not exists receipt_file_id text;
 alter table expenses add column if not exists apartment_id bigint references apartments(id);
@@ -337,11 +343,13 @@ select
   case
     when b.open_ended and b.nightly_rate is not null and b.arrival is not null
       then b.nightly_rate * greatest((current_date - b.arrival), 0)
+           + coalesce(b.total_adjustment, 0)
     else b.total
   end as effective_total,
   case
     when b.open_ended and b.nightly_rate is not null and b.arrival is not null
-      then b.nightly_rate * greatest((current_date - b.arrival), 0) - coalesce(b.paid, 0)
+      then b.nightly_rate * greatest((current_date - b.arrival), 0)
+           + coalesce(b.total_adjustment, 0) - coalesce(b.paid, 0)
     else coalesce(b.total, 0) - coalesce(b.paid, 0)
   end as effective_remaining,
   coalesce(seg.n, 1) as stay_segments,
@@ -574,15 +582,24 @@ select
 from bookings_live b
 join lateral (
   select
-    -- The follower rows split BOTH money columns, so both are sums. On an
-    -- open-ended primary the effective figures are used, same as the reconcile.
-    coalesce(sum(coalesce(x.effective_total, 0)), 0) as total,
-    coalesce(sum(coalesce(x.paid, 0)), 0)           as paid,
-    string_agg(distinct nullif(x.payment_method, ''), ' + ') as methods,
-    count(*)                                         as lines,
-    array_agg(x.sheet_row order by x.sheet_row)      as sheet_rows
-  from bookings_live x
-  where coalesce(x.merged_into, x.id) = b.id
+    -- The booking holds its own total now, summed at the collapse. Nothing is
+    -- added up across follower rows here any more, because there are none — a
+    -- second payment is a LINE, and its money is already part of the booking.
+    -- The effective figures are used on an open stay, same as the reconcile.
+    coalesce(b.effective_total, 0)                  as total,
+    coalesce(b.paid, 0)                             as paid,
+    string_agg(distinct l.method, ' + ')            as methods,
+    count(*)                                        as lines,
+    array_agg(l.sheet_row order by l.sheet_row)     as sheet_rows
+  from (
+    -- Every sheet LINE this booking occupies: its own row, and one more for
+    -- each payment that owns a row. This is what the mirror writes back out.
+    select b.sheet_row as sheet_row, nullif(b.payment_method, '') as method
+    union all
+    select p.sheet_row, nullif(p.method, '')
+      from payments p
+     where p.booking_id = b.id and p.line_seq > 1 and p.sheet_row is not null
+  ) l
 ) agg on true
 left join lateral (
   select

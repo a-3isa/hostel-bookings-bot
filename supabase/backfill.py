@@ -243,7 +243,11 @@ def load_bookings(sh):
             "notes": cell(row, B["notes"]),
             # A hand-typed =500*I{row} is a nightly rate; keep the intent, and
             # keep the raw text for the ones no single rate can express.
-            "nightly_rate": nightly_rate_of(cell(frow, B["total"])),
+            "nightly_rate": rate_and_adjustment(cell(frow, B["total"]))[0],
+            # A lump sum written off the nightly rate — `-2200` in
+            # `=(650*I18)-2200`. Kept apart from the rate so the database can
+            # reproduce the sheet's own arithmetic on an open stay.
+            "total_adjustment": rate_and_adjustment(cell(frow, B["total"]))[1],
             "total_formula": (cell(frow, B["total"])
                               if str(cell(frow, B["total"])).startswith("=") else ""),
             "segments": rate_segments(cell(frow, B["total"])),
@@ -274,10 +278,31 @@ def rate_segments(total_formula):
     return out if len(out) > 1 else []
 
 
+# `=500*I10`, and the same thing with a lump sum written off it:
+# `=(650*I18)-2200`, a guest billed 650 a night less a 2200 credit.
+RATE_FORMULA = re.compile(
+    r"^=\s*\(?\s*(\d+(?:\.\d+)?)\s*\*\s*I\d+\s*\)?\s*(?:([-+])\s*(\d+(?:\.\d+)?)\s*)?$")
+
+
+def rate_and_adjustment(total_formula):
+    """`=(650*I18)-2200` in اجمالي سعر الحجز, as ('650', '-2200').
+
+    The rate alone was not enough. Row 18 is billed 650 a night with 2200 taken
+    off, and reading only the rate left the database recomputing 650 × nights —
+    a figure 2200 short of what the sheet shows, growing by one night's drift
+    every day. The daily reconcile reported it every morning, and a report that
+    cries wolf daily is one nobody reads by the end of the week.
+    """
+    m = RATE_FORMULA.match(str(total_formula or "").strip())
+    if not m:
+        return "", ""
+    rate, sign, offset = m.groups()
+    return rate, ("" if offset is None else f"{'-' if sign == '-' else ''}{offset}")
+
+
 def nightly_rate_of(total_formula):
     """`=500*I10` in اجمالي سعر الحجز means 500 a night. Preserve the rate."""
-    m = re.match(r"^=\s*(\d+(?:\.\d+)?)\s*\*\s*I\d+\s*$", str(total_formula or "").strip())
-    return m.group(1) if m else ""
+    return rate_and_adjustment(total_formula)[0]
 
 
 def add_money(a, b):
@@ -351,13 +376,14 @@ def build_sql(reg, bookings, expenses):
         out.append(
             "insert into bookings (sheet_row, booking_ref, guest_ref, guest_name, "
             "booking_type, phone, room_id, apartment_name, room_number, arrival, nights, open_ended, "
-            "nightly_rate, total, total_formula, paid, payment_method, notes, cancelled_at, "
-            "source) values ("
+            "nightly_rate, total_adjustment, total, total_formula, paid, payment_method, notes, "
+            "cancelled_at, source) values ("
             f"{b['sheet_row']}, {q(b['booking_ref'])}, {q(b['guest_ref'])}, {q(b['guest_name'])}, "
             f"{q(b['booking_type'])}, {q(b['phone'])}, {room_sql}, {q(b['apartment'])}, "
             f"{q(b['room'])}, {q(b['arrival'])}::date, {qnum(b['nights'])}, "
             f"{'true' if b['is_open'] else 'false'}, "
-            f"{qnum(b['nightly_rate'])}, {qnum(b['total'])}, {q(b['total_formula'])}, "
+            f"{qnum(b['nightly_rate'])}, {qnum(b['total_adjustment'])}, "
+            f"{qnum(b['total'])}, {q(b['total_formula'])}, "
             f"coalesce({qnum(b['paid'])}, 0), "
             f"{q(b['payment'])}, {q(b['notes'])}, "
             f"{'now()' if b['cancelled'] else 'NULL'}, 'backfill')\n"
@@ -368,7 +394,8 @@ def build_sql(reg, bookings, expenses):
             "apartment_name = excluded.apartment_name, room_number = excluded.room_number, "
             "arrival = excluded.arrival, nights = excluded.nights, "
             "open_ended = excluded.open_ended, "
-            "nightly_rate = excluded.nightly_rate, total = excluded.total, "
+            "nightly_rate = excluded.nightly_rate, "
+            "total_adjustment = excluded.total_adjustment, total = excluded.total, "
             "total_formula = excluded.total_formula, "
             "paid = excluded.paid, payment_method = excluded.payment_method, "
             "notes = excluded.notes, cancelled_at = excluded.cancelled_at, "
