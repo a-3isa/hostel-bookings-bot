@@ -20,9 +20,39 @@ import os
 import sys
 import urllib.request
 
-WORKFLOW_ID = "2H97FsGnzwmzl7YE"
+# This script's own messages are ASCII, but --check prints workflow names and
+# those are Arabic. A Windows console defaults to a codepage that cannot encode
+# them, and the run would die printing its own answer.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 BRAIN_PATH = os.path.join(HERE, "brain.js")
+
+# The workflow these scripts push into. It is NOT a constant any more: the
+# instance holding `2H97FsGnzwmzl7YE` was destroyed on 2026-08-14, so the id is
+# whatever the rebuilt workflow gets when it is imported, and hard-coding a dead
+# one means every run fails in a way that looks like a permissions problem.
+#
+#   N8N_WORKFLOW_ID=...        for one run
+#   booking_bot/.workflow_id   written once after the import, git-ignored
+WORKFLOW_ID_PATH = os.path.join(HERE, ".workflow_id")
+
+
+def load_workflow_id():
+    env = os.environ.get("N8N_WORKFLOW_ID", "").strip()
+    if env:
+        return env
+    if os.path.exists(WORKFLOW_ID_PATH):
+        with open(WORKFLOW_ID_PATH, encoding="utf-8") as fh:
+            return fh.read().strip()
+    return ""
+
+
+WORKFLOW_ID = load_workflow_id()
 
 ADMIN_USERS = "7941350507,@AbdulrahmanMohamed5,1226903540,5793725130"
 CASHIER_USERS = "@Seifgamal24,@seiiffseiif"
@@ -68,11 +98,15 @@ def load_servers():
         for name, srv in servers.items():
             if "n8n" not in name.lower() or not isinstance(srv, dict):
                 continue
-            auth = (srv.get("headers") or {}).get("Authorization")
-            if srv.get("url") and auth:
+            # A bearer is optional. `claude mcp add` registers a server without
+            # one, and an n8n whose MCP endpoint does not demand a token is a
+            # perfectly usable server — requiring a header here skipped exactly
+            # the entry that was meant to replace the revoked ones.
+            auth = (srv.get("headers") or {}).get("Authorization", "")
+            if srv.get("url"):
                 found.append((token_issued_at(auth), srv["url"], auth))
     if not found:
-        raise SystemExit("no n8n MCP server with a bearer token in ~/.claude.json")
+        raise SystemExit("no n8n MCP server in ~/.claude.json")
     return sorted(found, key=lambda f: f[0], reverse=True)
 
 
@@ -86,12 +120,16 @@ def rpc(method, params=None):
     _id += 1
     body = json.dumps({"jsonrpc": "2.0", "id": _id, "method": method,
                        "params": params or {}}).encode("utf-8")
-    req = urllib.request.Request(URL, data=body, method="POST", headers={
+    headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "Authorization": AUTH,
         "User-Agent": UA,
-    })
+    }
+    # Sent only when there is one. An empty Authorization header is not the same
+    # as no header: some gateways reject it outright.
+    if AUTH:
+        headers["Authorization"] = AUTH
+    req = urllib.request.Request(URL, data=body, method="POST", headers=headers)
     with urllib.request.urlopen(req, timeout=120) as resp:
         raw = resp.read().decode("utf-8")
     for line in raw.splitlines():
@@ -116,34 +154,80 @@ def select_server():
     So each credential is tried against the workflow itself, newest first, and
     the first that can see it wins. If none can, the failure names every one
     that was tried rather than reporting whichever error came last.
+
+    Before the rebuilt workflow has been imported there is no id to probe with,
+    so the test falls back to "can this server list workflows at all" — which is
+    enough to create one, and creating one is the next thing that has to happen.
     """
     global URL, AUTH
     tried = []
+    want = f"workflow {WORKFLOW_ID}" if WORKFLOW_ID else "any workflow"
     for iat, url, auth in CANDIDATES:
         URL, AUTH = url, auth
         try:
             rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
                                "clientInfo": {"name": "push_brain", "version": "1"}})
-            res = rpc("tools/call", {"name": "get_workflow_details",
-                                     "arguments": {"workflowId": WORKFLOW_ID}})
+            if WORKFLOW_ID:
+                res = rpc("tools/call", {"name": "get_workflow_details",
+                                         "arguments": {"workflowId": WORKFLOW_ID}})
+                why = "no access to this workflow"
+            else:
+                res = rpc("tools/call", {"name": "search_workflows", "arguments": {}})
+                why = "cannot list workflows"
             if not res.get("isError"):
                 return
-            why = "no access to this workflow"
         except urllib.error.HTTPError as exc:
             why = f"HTTP {exc.code}"
+        except urllib.error.URLError as exc:
+            # A TLS failure is the one worth naming outright. On 2026-08-14 this
+            # host sat behind a FortiGate doing TLS inspection, and every request
+            # through it would have handed the appliance the bearer in clear.
+            why = f"connection failed: {exc.reason}"
         except SystemExit as exc:
             why = str(exc)
         # ASCII only: this goes to stderr, which a Windows console prints in a
         # legacy codepage, and a mangled character in the one message that
         # explains the failure is a poor way to explain anything.
-        tried.append(f"  token issued {iat}, ending {auth[-8:]}: {why}")
+        label = f"ending {auth[-8:]}" if auth else "no bearer"
+        tried.append(f"  {label}, issued {iat}: {why}")
 
     raise SystemExit(
-        f"no n8n credential in ~/.claude.json can reach workflow {WORKFLOW_ID}:\n"
+        f"no n8n server in ~/.claude.json can reach {want}:\n"
         + "\n".join(tried)
-        + "\n\nMint an MCP access token in the n8n account that OWNS this "
-          "workflow, and put it in ~/.claude.json under an mcpServers entry "
-          "whose name contains 'n8n'.")
+        + "\n\nEither the server needs an MCP access token from the n8n account "
+          "that owns it, or booking_bot/.workflow_id names a workflow that no "
+          "longer exists — clear it to probe for any workflow instead.")
+
+
+def require_workflow_id():
+    if WORKFLOW_ID:
+        return WORKFLOW_ID
+    raise SystemExit(
+        "no workflow id. The instance holding 2H97FsGnzwmzl7YE was destroyed, so\n"
+        "there is nothing to push into until the rebuilt graph has been imported:\n\n"
+        "    python booking_bot/build_workflow.py\n"
+        "    # import bookings-bot.workflow.json into n8n\n"
+        f"    echo <new-id> > {os.path.relpath(WORKFLOW_ID_PATH, os.path.dirname(HERE))}\n\n"
+        "or set N8N_WORKFLOW_ID for a single run.")
+
+
+def check():
+    """Report what this machine can reach, and push nothing.
+
+    The first question in any session is whether the endpoint is usable at all —
+    and answering it by running a deploy means finding out half way through.
+    """
+    print(f"workflow id: {WORKFLOW_ID or '(unset — nothing imported yet)'}")
+    print(f"candidates:  {len(CANDIDATES)}")
+    select_server()
+    print(f"reachable:   {URL}")
+    print(f"bearer:      {'yes, ending ' + AUTH[-8:] if AUTH else 'none'}")
+    got = call_tool("search_workflows", {})
+    data = json.loads(got).get("data", [])
+    print(f"workflows:   {len(data)}")
+    for wf in data[:10]:
+        print(f"  {wf.get('id')}  {wf.get('name')}"
+              f"  active={wf.get('active')}")
 
 
 def call_tool(name, args):
@@ -155,6 +239,11 @@ def call_tool(name, args):
 
 
 def main():
+    if "--check" in sys.argv:
+        check()
+        return
+
+    require_workflow_id()
     select_server()
 
     with open(BRAIN_PATH, encoding="utf-8") as fh:

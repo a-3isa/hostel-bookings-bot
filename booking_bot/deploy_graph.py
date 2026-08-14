@@ -88,6 +88,7 @@ def read_source(name):
 def main():
     # Picks the credential that can reach this workflow, not merely one that
     # authenticates — see push_brain.select_server.
+    pb.require_workflow_id()
     pb.select_server()
     wf = json.loads(pb.call_tool("get_workflow_details",
                                  {"workflowId": pb.WORKFLOW_ID}))["workflow"]
