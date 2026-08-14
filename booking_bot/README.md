@@ -6,24 +6,23 @@ including leaving **column P (المتبقي) empty** so the sheet's own formula
 
 ## What's here
 
+> **The graph lives in this repo now.** It did not before: the workflow was built
+> in the n8n editor and pushed by a generator that was never committed, so when
+> that instance was destroyed on 2026-08-14 the graph went with it and only the
+> twenty nodes `deploy_graph.py` creates could be rebuilt. `build_workflow.py`
+> is the replacement, and it emits the whole thing. Edit the generator, never the
+> editor, or this happens again.
+
 | File | Purpose |
 |---|---|
-> **⚠️ The generators below are out of date as of 2026-08-06.** `build_sdk.py` and
-> `build_workflow.py` still emit the original topology (HTTP Request nodes for every
-> Telegram call, static-data sessions). The live workflow has moved on: five Telegram
-> calls are now native Telegram nodes, and `brain.js` has been rewritten onto a Data
-> Table session store. Re-running them right now would regress the deployed graph.
-> Update the generators before using them again.
-
 | `brain.js` | The whole conversation state machine. Lives in the *Brain* Code node. |
-| `build_sheet_write.js` | Turns the save payload into a Sheets `values:batchUpdate` body. |
-| `clear_session.js` | Ends the conversation after a successful write. |
-| `test_brain.mjs` | 96 offline assertions driving both flows end to end. |
-| `build_sdk.py` | Renders the graph as n8n Workflow SDK code → `bookings-bot.sdk.js`. |
-| `bookings-bot.sdk.js` | **Generated.** What gets pushed through the n8n MCP server. |
-| `build_workflow.py` | Renders the same graph as importable workflow JSON. |
-| `bookings-bot.workflow.json` | **Generated.** For manual *Import from File* instead of MCP. |
+| `nodes/*.js`, `nodes/*.sql` | The bodies of every other Code and Postgres node. |
+| `build_workflow.py` | Renders the core graph as importable workflow JSON. |
+| `bookings-bot.workflow.json` | **Generated.** For *Import from File*. |
 | `validate_workflow.py` | Checks the JSON for dangling connections / orphan nodes. |
+| `deploy_graph.py` | Adds the reports / shadow / reconcile / mirror branch to a live workflow. |
+| `push_brain.py` | Pushes `brain.js` and the Config access lists into a live workflow. |
+| `test_brain.mjs` | 379 offline assertions driving every flow end to end. |
 
 Edit the `.js` files, then:
 
@@ -95,6 +94,27 @@ pins them.
 `handlers/admin.py` and `handlers/check_booking.py` are dead code — `bot.py` only
 registers `build_booking_handler()`, so nothing reaches them. The `Locations` /
 `Rooms` / `Config` helpers in `sheets.py` are unused by the live flow too.
+
+## Rebuilding into a fresh n8n
+
+```
+python booking_bot/build_workflow.py            # -> bookings-bot.workflow.json
+python booking_bot/validate_workflow.py         # structure, refs, the append ban
+python booking_bot/build_workflow.py --creds    # what the import will ask for
+```
+
+Import the JSON, then bind credentials, create the `bookings_bot_sessions` data
+table (`chat_id` string, `state` string, `data` string, `updated_at` number) and
+fill in `Config.BOT_TOKEN` — which the generator leaves empty on purpose, since
+this file is committed. Then `deploy_graph.py --publish`, then
+`push_brain.py --publish`.
+
+> **The node *parameters* have not been verified against a running n8n yet.** The
+> topology, the node names and every JS body are pinned by `brain.js` and the
+> test suites, but the exact parameter shapes for the Data Table nodes, the
+> Switch and the Telegram callback answer were written from the node docs rather
+> than read back off a live instance. Expect a correction pass on the first
+> import. `validate_workflow.py` checks structure, not field names.
 
 ## Setup from scratch (manual import path)
 
