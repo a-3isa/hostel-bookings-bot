@@ -280,6 +280,34 @@ def nightly_rate_of(total_formula):
     return m.group(1) if m else ""
 
 
+def add_money(a, b):
+    """Two money cells, summed, in the shape the rest of this file expects."""
+    total = (numeric(a) or 0) + (numeric(b) or 0)
+    return str(int(total)) if float(total).is_integer() else str(total)
+
+
+def fold_lines(bookings, lines):
+    """Each booking with the money from its continuation lines added in.
+
+    مروان's stay is 600 on one row and 1600 on the next, and the stay really
+    cost 2200. The database holds one booking, so it holds 2200 — and this is
+    where that sum is made, because an --apply that wrote only the first line's
+    total would silently undo the collapse every time it ran.
+
+    Returns copies. The snapshot is built from the unfolded rows, since
+    `reconcile_bookings` does its own folding and would count the money twice.
+    """
+    out = {b["sheet_row"]: dict(b) for b in bookings}
+    by_id = {b["id_of"]: b for b in out.values() if b["id_of"]}
+    for ln in lines:
+        base = by_id.get(ln["id_of"])
+        if base is None:
+            continue        # a line naming no booking; reindex reports it
+        base["total"] = add_money(base["total"], ln["total"])
+        base["paid"] = add_money(base["paid"], ln["paid"])
+    return [out[r] for r in sorted(out)]
+
+
 def load_expenses(sh):
     ws = sh.worksheet(EXPENSES_TAB)
     out = []
@@ -471,8 +499,8 @@ def main():
     # would be inserted as a booking of its own on the next --apply, and then
     # reported as an extra guest by every reconcile afterwards.
     rows = load_bookings(sh)
-    bookings = [b for b in rows if not b["is_payment_line"]]
     lines = [b for b in rows if b["is_payment_line"]]
+    bookings = fold_lines([b for b in rows if not b["is_payment_line"]], lines)
     expenses = load_expenses(sh)
 
     report(reg, bookings, expenses)
@@ -504,17 +532,22 @@ def main():
             if args.reconcile:
                 with conn.cursor() as cur:
                     cur.execute("truncate sheet_snapshot;")
-                    for b in bookings:
+                    # Every line, continuation lines included. They are not
+                    # bookings, but they hold part of a booking's money, and
+                    # `reconcile_bookings` folds them back in before comparing —
+                    # leave them out and every booking that was paid twice looks
+                    # short by the amount on its second line.
+                    for b in rows:
                         cur.execute(
                             "insert into sheet_snapshot (sheet_row, guest_name, apartment_name,"
                             " room_number, arrival, nights, total, paid, payment_method, notes,"
-                            " booking_id) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                            " booking_id, line_seq) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                             (b["sheet_row"], text_or_none(b["guest_name"]),
                              text_or_none(b["apartment"]), text_or_none(b["room"]),
                              b["arrival"] or None, numeric(b["nights_shown"]),
                              numeric(b["total"]), numeric(b["paid"]),
                              text_or_none(b["payment"]), text_or_none(b["notes"]),
-                             numeric(b["booking_id"])))
+                             b["id_of"], b["line_seq"]))
                     cur.execute("select * from reconcile_bookings order by sheet_row;")
                     rows = cur.fetchall()
                 print(f"\nreconcile: {len(rows)} discrepancies")

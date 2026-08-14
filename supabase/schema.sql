@@ -241,6 +241,13 @@ alter table payments add column if not exists line_seq int;
 create unique index if not exists payments_booking_line_key
   on payments (booking_id, line_seq);
 
+-- What the mirror last wrote onto this payment's sheet line, in the same shape
+-- as `bookings.mirror_payload` and for the same reason: if the row still shows
+-- this, nobody has touched it and writing is safe. It lives on the payment
+-- rather than the booking because one payload per booking can only describe one
+-- row, and a booking paid in two methods occupies two.
+alter table payments add column if not exists mirror_payload jsonb;
+
 alter table bookings add column if not exists merged_into bigint references bookings(id);
 
 create index if not exists bookings_merged_into_idx on bookings (merged_into);
@@ -392,6 +399,11 @@ create table if not exists sheet_snapshot (
   -- Column U: the booking's database id as the SHEET has it. Blank on a row
   -- nothing has stamped yet. See reconcile_bookings for why it matters.
   booking_id     bigint,
+  -- Which of that booking's lines this row is, from the same cell: `413` is
+  -- line 1 and `413-2` is line 2. A booking paid twice in two methods occupies
+  -- two rows, and the sheet's answer for it is the SUM of them — so the lines
+  -- are all captured, and folded together before anything is compared.
+  line_seq       int,
   guest_name     text,
   apartment_name text,
   room_number    text,
@@ -457,12 +469,37 @@ revoke all on apartments, rooms, bookings, booking_stays, payments, expenses,
 -- Rows nobody has stamped yet — a fresh append, a hand-typed row reindex.py has
 -- not seen — still match on sheet_row, which is the old behaviour for exactly
 -- the rows that have no better answer.
+-- A booking may occupy more than one LINE, and the sheet's answer for it is the
+-- sum of them: مروان's stay is 600 on one row and 1600 on the next, and the stay
+-- really cost 2200. So the snapshot rows are folded by booking before the
+-- comparison — money summed, identity taken from the first line. Without this
+-- fold a continuation line has to exist as a booking of its own, which is the
+-- one thing the U-suffix scheme is here to stop.
+--
+-- A row with no id and no matching booking folds into a group of one, keyed on
+-- its own row, so an unstamped row is still reported individually rather than
+-- being lumped in with every other unstamped row.
 drop view if exists reconcile_bookings;
 create view reconcile_bookings as
 with paired as (
   select s.*, coalesce(s.booking_id, l0.id) as match_id
   from sheet_snapshot s
   left join bookings_live l0 on s.booking_id is null and l0.sheet_row = s.sheet_row
+),
+grouped as (
+  select p.*,
+         coalesce(p.match_id::text, 'row:' || p.sheet_row) as grp,
+         coalesce(p.line_seq, 1) as seq
+  from paired p
+),
+folded as (
+  select distinct on (g.grp)
+    g.grp, g.match_id, g.sheet_row, g.guest_name, g.apartment_name,
+    g.room_number, g.arrival, g.nights,
+    sum(coalesce(g.total, 0)) over (partition by g.grp) as total,
+    sum(coalesce(g.paid, 0))  over (partition by g.grp) as paid
+  from grouped g
+  order by g.grp, g.seq, g.sheet_row
 )
 select
   coalesce(l.sheet_row, p.sheet_row) as sheet_row,
@@ -478,7 +515,7 @@ select
   p.nights as sheet_nights,        l.effective_nights as db_nights,
   p.total as sheet_total,          l.effective_total as db_total,
   p.paid as sheet_paid,            l.paid as db_paid
-from paired p
+from folded p
 full outer join bookings_live l on l.id = p.match_id
 where l.id is null
    or p.sheet_row is null
