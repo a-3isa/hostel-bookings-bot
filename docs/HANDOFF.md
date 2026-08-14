@@ -18,8 +18,10 @@ reconcile.
 Blocked only on the network — see below. The sequence:
 
 ```
+python booking_bot/push_brain.py --check         # what this machine can reach
 python booking_bot/build_workflow.py --creds     # 15 nodes need a credential
 # import bookings-bot.workflow.json  (create_workflow_from_code)
+echo <new-id> > booking_bot/.workflow_id         # git-ignored, per-instance
 # bind credentials: telegramApi, googleSheetsOAuth2Api, postgres
 # create data table `bookings_bot_sessions`:
 #     chat_id (string), state (string), data (string), updated_at (number)
@@ -29,8 +31,11 @@ python booking_bot/deploy_graph.py --publish     # its own 20 nodes on top
 python booking_bot/push_brain.py   --publish     # brain.js + the Config lists
 ```
 
-`deploy_graph.py` needs `WORKFLOW_ID` in `push_brain.py` repointed at the new
-workflow's id once it exists.
+`--check` is the first thing to run: it reports the endpoint, the credential and
+the workflows visible, and pushes nothing. Both scripts read the workflow id from
+`N8N_WORKFLOW_ID` or `booking_bot/.workflow_id` and refuse to run without one, so
+there is no hard-coded id pointing at the destroyed workflow any more. A server
+registered by `claude mcp add` with no bearer is used as-is.
 
 **Not yet verified against a running n8n:** the node *parameters*. The topology,
 the node names and every JS body are pinned by `brain.js` and the test suites,
