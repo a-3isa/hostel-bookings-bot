@@ -33,7 +33,7 @@ NODE_REF = re.compile(r"\$\(\s*'([^']+)'\s*\)")
 
 
 CFG_KEY = re.compile(r"\bCFG\.([A-Z][A-Z0-9_]*)")
-SAVE_FLOW = re.compile(r"flow:\s*'([a-z]+)'")
+SAVE_FLOW = re.compile(r"flow:\s*'([a-z_]+)'")
 
 
 def js_sources():

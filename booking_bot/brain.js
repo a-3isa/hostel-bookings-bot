@@ -304,6 +304,11 @@ const S = {
     '💳 الدفع: {payment}\n' +
     '📎 الإيصال: {receipt}\n' +
     '👤 بواسطة: {actor}',
+  // Said only when the payment opened or grew a line of its own, so the group
+  // is not surprised by a second row appearing under the booking.
+  paid_new_line: '📄 سطر منفصل بطريقة الدفع: {method}',
+  // The same fact on the review screen, before anything is written.
+  edit_line_review: '➕ دفعة {added} بطريقة {method} — سطر منفصل (إجمالي السطر: {total})',
   // An admin can add a payment and change other things in the same session.
   // The payment leads, because that is the part the group is watching for, and
   // whatever else moved is listed underneath rather than lost.
@@ -931,6 +936,50 @@ function editSet(dd, col, value) {
   dd.editNew[col] = value;
 }
 
+/** Is there a payment waiting that belongs on a line rather than on this row? */
+function hasLinePayment(dd) {
+  return Boolean(dd.payTarget && dd.payTarget.kind !== 'booking' && dd.paidAdded);
+}
+
+/**
+ * Which sheet LINE a payment belongs on.
+ *
+ * The user's rule, in their words: *if the new payment type is the same as the
+ * old one then the payment amount is added to each other, but if the new
+ * payment has a different type then add a new row* — and a third payment is
+ * checked against every line that exists by then, not only the first.
+ *
+ * Until 2026-08-14 there was no rule: the payment wrote طريقة الدفع onto the
+ * booking's own row whatever it said before, so a guest who paid cash and then
+ * by انستاباي ended up looking like they had only ever paid by انستاباي. The
+ * money was right and the method was a lie, and the Dashboard's per-method
+ * balances read that cell.
+ *
+ * Returns one of:
+ *   {kind:'booking'} the booking's own row — same method, or it has none yet
+ *   {kind:'line'}    a continuation row already carrying this method
+ *   {kind:'new'}     no row has this method; one is inserted under the block
+ */
+function paymentTarget(dd, method) {
+  const want = String(method || '').trim();
+  const lines = Array.isArray(dd.editLines) ? dd.editLines : [];
+  const own = String((dd.editOrig && dd.editOrig['طريقة الدفع']) || '').trim();
+
+  // An empty طريقة الدفع cell is filled, never left blank with a line beneath
+  // it — that is not what anyone means by two payment methods.
+  if (!own || own === want) return { kind: 'booking', row: dd.editRow };
+
+  const hit = lines.find((l) => String(l.method || '').trim() === want);
+  if (hit) {
+    return { kind: 'line', row: Number(hit.row), seq: Number(hit.seq),
+             base: Number(hit.amount) || 0 };
+  }
+
+  const maxSeq = lines.reduce((m, l) => Math.max(m, Number(l.seq) || 1), 1);
+  const after = Number(dd.blockEnd) || dd.editRow;
+  return { kind: 'new', seq: maxSeq + 1, insertAfter: after, row: after + 1, base: 0 };
+}
+
 /** Lock the edit session onto one sheet row, then continue with the right flow. */
 function applyPick(hit) {
   d.editRow = hit.row;
@@ -938,6 +987,14 @@ function applyPick(hit) {
   d.editNew = {};
   d.editName = hit.json['اسم المقيم'] || '';
   d.editPrivateId = hit.json['ID'] || '';
+  // Everything a payment needs to find its own line. The lookup carries these
+  // alongside the sheet's columns; see read_bookings_for_edit.sql. A booking
+  // with no lines yet simply has none, and the first payment in a second method
+  // opens line 2.
+  d.bookingId = hit.json.booking_id || null;
+  d.editLines = Array.isArray(hit.json.lines) ? hit.json.lines : [];
+  d.blockEnd = Number(hit.json.block_end) || hit.row;
+  d.totalIsFormula = Boolean(hit.json.total_is_formula);
   if (d.paidOnly) {
     // Cashier flow: the booking is found, so go straight to the amount. There is
     // no field menu for them — payment is the only thing they may touch.
@@ -1026,6 +1083,16 @@ function pickAptRoom(dd, cb) {
 
 function changeLines(dd) {
   const out_ = [];
+  // A payment that belongs on its own line is not a column changing on this
+  // row, so it is not in editNew — and the review would show a payment session
+  // as "ملاحظات: — ← …" and nothing about the money. Say it plainly instead.
+  if (dd.payTarget && dd.payTarget.kind !== 'booking' && dd.paidAdded) {
+    out_.push(t('edit_line_review', {
+      added: num(parseNum(dd.paidAdded) || 0),
+      method: dd.payMethod,
+      total: num(parseNum(dd.lineTotal) || 0),
+    }));
+  }
   for (const col of Object.keys(dd.editNew || {})) {
     out_.push(`${col}: ${showValue(dd.editOrig && dd.editOrig[col])} ← ${showValue(dd.editNew[col])}`);
   }
@@ -1088,6 +1155,116 @@ function undoRecord(dd) {
   };
 }
 
+// Columns copied onto a new payment line, so the row reads as the same guest.
+// E الجنسية is retired and left alone; K, N, P, R, S and T are the sheet's own
+// formulas and are never written on any path.
+const LINE_IDENTITY_COLS = [
+  'بوكنج ID', 'ID', 'اسم المقيم', 'نوع الحجز', 'رقم الهاتف',
+  'اسم الشقة', 'رقم الغرفة', 'تاريخ البداية', 'ملاحظات',
+];
+
+/**
+ * A payment in a method the booking does not already carry on that row.
+ *
+ * Two shapes, one flow. `insert: true` puts a row under the booking's block
+ * first; `insert: false` grows a line that is already there. Either way the
+ * booking's own row keeps its method, and only its اجمالي سعر الحجز moves —
+ * down by what the line takes, so the lines still sum to the price of the stay.
+ *
+ * The total is NOT touched when the sheet computes it (`=650*I18`, a nightly
+ * rate): that formula is the sheet's statement of what this stay costs per
+ * night, and replacing it with a scalar loses the rate. mirror.py leaves the
+ * same cells alone for the same reason.
+ */
+function commitPaymentLine(dd) {
+  const paidCol = 'اجمالي ما تم دفعه';
+  const totalCol = 'اجمالي سعر الحجز';
+  const target = dd.payTarget;
+  const added = Number(parseNum(dd.paidAdded) || 0);
+  const lineTotal = num(Number(parseNum(dd.lineTotal) || 0));
+
+  const fields = {};
+  if (target.kind === 'new') {
+    for (const col of LINE_IDENTITY_COLS) {
+      const v = dd.editOrig ? dd.editOrig[col] : undefined;
+      if (v !== undefined && v !== '') fields[col] = v;
+    }
+    // An open-ended stay counts its own nights from its own row, so the line
+    // gets the formula and not the number it happens to show today.
+    const nights = dd.editOrig ? dd.editOrig['عدد الليالي'] : '';
+    fields['عدد الليالي'] = nights === '=OPEN' ? '=TODAY()-J{r}' : (nights || '');
+    fields['معرف النظام'] = `${dd.bookingId || ''}-${target.seq}`;
+  }
+  fields[totalCol] = lineTotal;
+  fields[paidCol] = lineTotal;
+  fields['طريقة الدفع'] = dd.payMethod;
+
+  // Whatever else the admin changed in the same session still belongs to the
+  // booking's own row, alongside the reduced total.
+  const bookingFields = Object.assign({}, dd.editNew || {});
+  if (target.kind === 'new' && !dd.totalIsFormula) {
+    const was = parseNum(dd.editOrig ? dd.editOrig[totalCol] : 0) || 0;
+    bookingFields[totalCol] = num(was - added);
+  }
+
+  const bookingPaid = parseNum(dd.editOrig ? dd.editOrig[paidCol] : 0) || 0;
+  const linesPaid = (Array.isArray(dd.editLines) ? dd.editLines : [])
+    .reduce((s, l) => s + (Number(l.amount) || 0), 0);
+
+  dd.savingAt = Date.now();
+  out.sessionData = JSON.stringify(dd);   // the lock must outlive this turn
+  out.hasSave = true;
+  out.save = {
+    flow: 'payment_line',
+    insert: target.kind === 'new',
+    // Where the row goes. `insertAfter` is the last row the booking occupies;
+    // the new row is the one below it, and everything under that moves down.
+    insertAfter: target.insertAfter || null,
+    row: target.row,
+    lineSeq: target.seq,
+    bookingId: dd.bookingId || null,
+    bookingRow: dd.editRow,
+    bookingFields: Object.keys(bookingFields).length ? bookingFields : null,
+    // Inserting a row renumbers every row beneath it. The database is told so
+    // in the same breath, or the next payment lands on whoever moved into that
+    // number — which has happened once already, in the other direction.
+    shiftFrom: target.kind === 'new' ? target.row : null,
+    fields,
+    // Blanking a row the bot inserted would leave a hole the row calculation
+    // then writes into, so a new line is not offered to /undo. Growing a line
+    // that already existed is an ordinary edit and is.
+    undo: target.kind === 'new' ? null : {
+      row: target.row,
+      at: Date.now(),
+      name: dd.editName || '',
+      privateId: dd.editPrivateId || '',
+      before: { [totalCol]: num(target.base), [paidCol]: num(target.base) },
+      after: { [totalCol]: lineTotal, [paidCol]: lineTotal },
+    },
+    payment: {
+      added: num(added),
+      method: dd.payMethod,
+      lineSeq: target.seq,
+      ref: `${dd.editRow}:${dd.savingAt}`,
+    },
+    receiptFileId: dd.editReceipt || '',
+    groupChatId: CFG.GROUP_CHAT_ID,
+    groupText: t('paid_group_msg', {
+      name: mdEscape(dd.editName || t('empty')),
+      private_id: mdEscape(dd.editPrivateId || t('empty')),
+      apartment: mdEscape((dd.editOrig && dd.editOrig['اسم الشقة']) || t('empty')),
+      added: num(added),
+      paid: num(bookingPaid + linesPaid + added),
+      payment: dd.payMethod,
+      receipt: dd.editReceipt ? t('receipt_attached') : t('empty'),
+      actor,
+    }) + '\n' + t('paid_new_line', { method: dd.payMethod }),
+    savedText: t('paid_saved'),
+    savedNoGroupText: t('paid_saved_no_group'),
+    errorText: t('error'),
+  };
+}
+
 /**
  * Hand the changed columns to the sheet writer. Shared by the admin field menu
  * ("تم") and by the cashier's add-a-payment flow, which differ only in what the
@@ -1096,6 +1273,15 @@ function undoRecord(dd) {
 function commitEdit(dd) {
   const paidCol = 'اجمالي ما تم دفعه';
   if (saveLocked(dd)) return;            // a second tap on the same save
+
+  // A payment in a method this booking does not already have goes on a line of
+  // its own, which is a different write entirely — a row inserted or an
+  // existing line's cells grown, and the booking's own طريقة الدفع left saying
+  // what IT was paid by.
+  if (dd.payTarget && dd.payTarget.kind !== 'booking' && dd.paidAdded) {
+    commitPaymentLine(dd);
+    return;
+  }
 
   // The amount and the method are set in two separate turns — EDIT_PAID then
   // EDIT_PAYMENT — and a session that loses the first one writes the method on
@@ -1684,7 +1870,9 @@ switch (state) {
 
   case 'EDIT_MENU': {
     if (cbData === 'ef_done') {
-      if (!Object.keys(d.editNew || {}).length) {
+      // A payment on its own line is a change, and it is not in editNew — that
+      // holds the columns of the BOOKING's row, and this money is not on it.
+      if (!Object.keys(d.editNew || {}).length && !hasLinePayment(d)) {
         endSession(); reply(t('edit_no_changes')); break;
       }
       commitEdit(d);
@@ -1753,7 +1941,10 @@ switch (state) {
     if (total < 0) { reply(t('edit_paid_below_zero', { current: num(current) })); break; }
     d.paidAdded = num(v);               // for the cashier's group message
     d.paidTouched = true;               // admins get the checkout question after this
-    editSet(d, 'اجمالي ما تم دفعه', num(total));
+    // The cell is NOT written here any more. Which row the money lands on
+    // depends on the method, and the method is the next turn — write it now and
+    // a payment in a second method adds to the booking's own row before
+    // anything has decided that is where it belongs.
     reply(t('ask_payment'), keyGrid(PAYMENTS, 'xpay_'));
     setState('EDIT_PAYMENT', d);
     break;
@@ -1764,7 +1955,24 @@ switch (state) {
     const payKey = payKeyOf(cbData.slice('xpay_'.length));
     const pay = payLabel(payKey);
     if (!pay) break;
-    editSet(d, 'طريقة الدفع', pay);
+
+    // Now that the method is known, the money can be put on the right row.
+    const added = Number(parseNum(d.paidAdded) || 0);
+    const target = paymentTarget(d, pay);
+    d.payTarget = target;
+    d.payMethod = pay;
+    if (target.kind === 'booking') {
+      // The booking's own row: طريقة الدفع is this method already, or it had
+      // none. اجمالي ما تم دفعه is cumulative there, as it always has been.
+      editSet(d, 'اجمالي ما تم دفعه', num(paidSoFar(d) + added));
+      editSet(d, 'طريقة الدفع', pay);
+    } else {
+      // A line of its own — either one that already carries this method, whose
+      // cells simply grow, or a row that does not exist yet. Both are written
+      // by the payment_line branch, and neither touches طريقة الدفع on the
+      // booking's row. That cell describes the money on ITS row.
+      d.lineTotal = num(target.base + added);
+    }
     // Admins attach a receipt for the two transfer methods and may skip it. The
     // cashier is recording someone else's money, so anything that is not cash
     // needs proof, and there is no skip.
@@ -1839,7 +2047,7 @@ switch (state) {
   case 'EDIT_CONFIRM': {
     if (cbData === 'xecancel') { endSession(); reply(t('cancelled')); break; }
     if (cbData !== 'xedone') break;
-    if (!Object.keys(d.editNew || {}).length) {
+    if (!Object.keys(d.editNew || {}).length && !hasLinePayment(d)) {
       endSession(); reply(t('edit_no_changes')); break;
     }
     commitEdit(d);
