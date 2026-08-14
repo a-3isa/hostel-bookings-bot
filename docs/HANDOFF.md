@@ -15,7 +15,14 @@ reconcile.
 
 ### What is left: import and publish
 
-Blocked only on the network — see below. The sequence:
+**By hand, with the network as it is: [`n8n-manual-import.md`](n8n-manual-import.md).**
+Import [`bookings-bot.full.workflow.json`](../booking_bot/bookings-bot.full.workflow.json)
+— 50 nodes, produced by `deploy_graph.py --offline`, which applies that script's
+own operations to the file instead of the endpoint. The 33-node base file has no
+Postgres write, no reports and no scheduled mirror; importing it alone gives half
+a bot.
+
+The scripted sequence below is what to use once the endpoint is reachable again:
 
 ```
 python booking_bot/push_brain.py --check         # what this machine can reach
