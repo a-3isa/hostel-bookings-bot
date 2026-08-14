@@ -1,14 +1,52 @@
 # Handoff — where the Supabase migration stands
 
-## START HERE (2026-08-12)
+## START HERE (2026-08-14)
 
 **Everything below the line still applies. These are the immediate steps.**
 
+### 0. The U-suffix scheme is built and live. The n8n deploy is still blocked.
+
+Done on 2026-08-14, in three commits:
+
+- **Column U now carries `413`, `413-2`, `413-3`.** The base is the booking, the
+  suffix is which of its sheet LINES this row is. `parse_sheet_id()` in
+  `backfill.py` is the one answer to "what does this cell say", shared by every
+  reader, because four scripts read column U and have to agree exactly.
+- **A second payment is a line, not a booking.** `collapse_lines.py` was applied:
+  مروان (2200), محمد (1200) and امير سيف الدين (690) are one booking each now,
+  with `payments.line_seq` 1 and 2 and column U stamped. Bookings 22, 35 and 354
+  are gone. `merged_into` is empty and the follower-row model is retired.
+- **The mirror writes a line from its payment.** The booking's own row shows
+  what is left once the other lines are taken out, so the sheet's lines sum back
+  to exactly the total the database holds. Each line remembers what was written
+  in `payments.mirror_payload`.
+- **Row 18's `=(650*I18)-2200` is understood**, via `bookings.total_adjustment`.
+  It had been one guaranteed false difference on every reconcile, growing by 650
+  a day.
+
+State, verified live after all of it: **reconcile 0**, reindex no drift, and the
+mirror reproduces all 71 lines with **no writes and no conflicts**.
+
+Four schema migrations were applied directly (`payments.line_seq`,
+`payments.mirror_payload`, `sheet_snapshot.line_seq`,
+`bookings.total_adjustment`), and `bookings_live`, `bookings_model`,
+`reconcile_bookings`, `mixed_currency_bookings` and `reconcile_payments` were
+recreated. `schema.sql` matches what is live.
+
+**Still to do:** the bot does not write a suffix yet. When a payment in a second
+method arrives, the mirror needs to ALLOCATE a new line — insert a row, give the
+payment `line_seq = n` and `sheet_row`, and stamp `id-n`. Today a payment with no
+`sheet_row` is simply skipped, so the money is right in Postgres and invisible in
+the sheet until someone adds the row.
+
 ### 1. Nothing has been deployed since n8n went down
 
-n8n is **back up**, but the MCP bearer token in `~/.claude.json` (`n8n-mcp`) is
-**stale** — the endpoint answers `401`, and the MCP tools do not register at
-startup for the same reason. Refresh the token and restart Claude Code, then:
+n8n is **back up** — the endpoint answers, it just refuses the token. Still true
+on 2026-08-14: every bearer in `~/.claude.json` gets `401`, including the newest
+one (`iat` 1785966523). The scripts read the **top-level**
+`mcpServers["n8n-mcp"].headers.Authorization`, so that is the one to replace —
+see `push_brain.load_server()`. Mint a fresh MCP access token in n8n, put it
+there, restart Claude Code, then:
 
 ```
 python booking_bot/deploy_graph.py --publish   # formula guard + mirror node fix
@@ -46,18 +84,15 @@ python supabase/heal_formulas.py --apply    # restores N, P, S if any went blank
 
 ### 4. Next piece of work
 
-The **U-suffix scheme**, which is the one the user is waiting on: one booking in
-the database with many payments, and one sheet LINE per payment. Their words:
-*"اجمالي سعر الحجز will equal the amount paid in each step"*, and *"I don't want
-the booking with diff payment to have a second booking row in the database"*.
-Needs `413`, `413-2`, `413-3` in column U, taught to `reindex.py` (a suffixed
-row is a payment line, never a booking) and to `backfill.py` (skip them when
-syncing sheet→db, or it recreates the follower rows). Then collapse the three
-existing follower rows (مروان, محمد, امير) into payments.
+**Let the mirror allocate a line.** See section 0: the readers, the model and the
+collapse are done, and what is missing is the writer. A payment in a second
+method currently lands in `payments` with no `sheet_row` and is skipped by the
+mirror, so it is right in Postgres and absent from the sheet.
 
-Ahead of that on severity: **payments still match on `sheet_row`**, so a row
-inserted between a bot write and the next reindex puts money on the wrong guest.
-It has happened once. Column U exists to fix it; the bot does not use it yet.
+Ahead of that on severity: **the bot still matches payments on `sheet_row`**, so
+a row inserted between a bot write and the next reindex puts money on the wrong
+guest. It has happened once. `payments.line_seq` and column U are now what fix
+it — the supabase scripts use them, `brain.js` does not yet.
 
 
 Written 2026-08-09, updated the same day after Phase 4a. Read this first in a new
