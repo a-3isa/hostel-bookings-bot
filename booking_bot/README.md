@@ -20,6 +20,7 @@ including leaving **column P (المتبقي) empty** so the sheet's own formula
 | `build_workflow.py` | Renders the core graph as importable workflow JSON. |
 | `bookings-bot.workflow.json` | **Generated.** For *Import from File*. |
 | `validate_workflow.py` | Checks the JSON for dangling connections / orphan nodes. |
+| `test_workflow.py` | The generated graph still matches what the JS expects. |
 | `deploy_graph.py` | Adds the reports / shadow / reconcile / mirror branch to a live workflow. |
 | `push_brain.py` | Pushes `brain.js` and the Config access lists into a live workflow. |
 | `test_brain.mjs` | 379 offline assertions driving every flow end to end. |
@@ -99,15 +100,25 @@ registers `build_booking_handler()`, so nothing reaches them. The `Locations` /
 
 ```
 python booking_bot/build_workflow.py            # -> bookings-bot.workflow.json
-python booking_bot/validate_workflow.py         # structure, refs, the append ban
+python booking_bot/validate_workflow.py         # structure, refs, contract, append ban
+python -m pytest booking_bot/test_workflow.py   # and that those checks still bite
 python booking_bot/build_workflow.py --creds    # what the import will ask for
 ```
 
-Import the JSON, then bind credentials, create the `bookings_bot_sessions` data
-table (`chat_id` string, `state` string, `data` string, `updated_at` number) and
-fill in `Config.BOT_TOKEN` — which the generator leaves empty on purpose, since
-this file is committed. Then `deploy_graph.py --publish`, then
-`push_brain.py --publish`.
+Import the JSON, then:
+
+1. **Bind credentials** — 15 nodes need one; `--creds` lists them.
+2. **Create the `bookings_bot_sessions` data table**: `chat_id` (string),
+   `state` (string), `data` (string), `updated_at` (number). The session nodes
+   address it by name, so the name must match exactly.
+3. **Fill `Config.BOT_TOKEN`** — left empty by the generator on purpose, because
+   this file is committed and it is the one secret the graph carries.
+4. **Fill `Config.BOOKINGS_SHEET_GID`** with the numeric gid of إدخال الحجوزات
+   (from the sheet URL's `#gid=`). Optional: it only blackens a cancelled row,
+   and it is deliberately gated so that leaving it empty skips the formatting
+   rather than formatting that row of whichever tab is gid 0.
+
+Then `deploy_graph.py --publish`, then `push_brain.py --publish`.
 
 > **The node *parameters* have not been verified against a running n8n yet.** The
 > topology, the node names and every JS body are pinned by `brain.js` and the

@@ -92,6 +92,12 @@
               "type": "string"
             },
             {
+              "id": "gid",
+              "name": "BOOKINGS_SHEET_GID",
+              "value": "",
+              "type": "string"
+            },
+            {
               "id": "token",
               "name": "BOT_TOKEN",
               "value": "",
@@ -870,12 +876,73 @@
       }
     },
     {
+      "id": "has-receipt",
+      "name": "Has Receipt?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2360,
+        660
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has-receipt",
+              "leftValue": "={{ $('Brain').first().json.save.receiptFileId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "post-receipt-to-group",
+      "name": "Post Receipt To Group",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2560,
+        780
+      ],
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "={{ $('Brain').first().json.save.groupChatId }}",
+        "binaryData": false,
+        "photo": "={{ $('Brain').first().json.save.receiptFileId }}",
+        "additionalFields": {
+          "caption": "={{ $('Brain').first().json.save.groupText }}",
+          "parse_mode": "Markdown",
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
       "id": "post-to-group",
       "name": "Post To Group",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
       "position": [
-        2360,
+        2560,
         540
       ],
       "parameters": {
@@ -1000,6 +1067,76 @@
           }
         },
         "options": {}
+      }
+    },
+    {
+      "id": "should-format-row",
+      "name": "Should Format Row?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2960,
+        660
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "wants-format",
+              "leftValue": "={{ $('Brain').first().json.save.formatRow }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "gid-known",
+              "leftValue": "={{ $('Config').first().json.BOOKINGS_SHEET_GID }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "format-cancelled-row",
+      "name": "Format Cancelled Row",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3160,
+        660
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8:batchUpdate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ requests: [{ repeatCell: { range: { sheetId: Number($('Config').first().json.BOOKINGS_SHEET_GID), startRowIndex: $('Brain').first().json.save.row - 1, endRowIndex: $('Brain').first().json.save.row, startColumnIndex: 0, endColumnIndex: 21 }, cell: { userEnteredFormat: { backgroundColor: { red: 0, green: 0, blue: 0 }, textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 } } } }, fields: 'userEnteredFormat(backgroundColor,textFormat)' } }] }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
       }
     }
   ],
@@ -1299,7 +1436,7 @@
       "main": [
         [
           {
-            "node": "Post To Group",
+            "node": "Has Receipt?",
             "type": "main",
             "index": 0
           }
@@ -1313,7 +1450,36 @@
         ]
       ]
     },
+    "Has Receipt?": {
+      "main": [
+        [
+          {
+            "node": "Post Receipt To Group",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Post To Group",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Post To Group": {
+      "main": [
+        [
+          {
+            "node": "Send Saved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Receipt To Group": {
       "main": [
         [
           {
@@ -1340,6 +1506,28 @@
         [
           {
             "node": "Clear Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Session": {
+      "main": [
+        [
+          {
+            "node": "Should Format Row?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Format Row?": {
+      "main": [
+        [
+          {
+            "node": "Format Cancelled Row",
             "type": "main",
             "index": 0
           }

@@ -259,6 +259,12 @@ def build():
             {"id": "expense_tab", "name": "EXPENSE_TAB", "value": EXPENSE_TAB,
              "type": "string"},
             {"id": "sheet", "name": "SHEET_ID", "value": SHEET_ID, "type": "string"},
+            # The numeric gid of إدخال الحجوزات, needed only to blacken a
+            # cancelled row. Left EMPTY on purpose and the format step is gated
+            # on it: a wrong gid would not fail, it would silently format a row
+            # of some other tab. Find it in the sheet's URL (#gid=...) and fill
+            # it in, or leave it blank and cancellations simply go unformatted.
+            {"id": "gid", "name": "BOOKINGS_SHEET_GID", "value": "", "type": "string"},
             {"id": "token", "name": "BOT_TOKEN", "value": "", "type": "string"},
         ]},
         "options": {},
@@ -456,10 +462,41 @@ def build():
             "combinator": "and"},
         "options": {},
     }, (2160, 660))
+    # A transfer payment can carry a receipt — the file_id of a photo the user
+    # sent earlier in the flow. When there is one the group gets the picture
+    # with the announcement as its caption, which is the whole point of asking
+    # for it; when there is not, `receiptFileId` is '' and the group gets the
+    # same text as a plain message.
+    g.node("Has Receipt?", "n8n-nodes-base.if", 2.3, {
+        "conditions": {
+            "options": {"caseSensitive": True, "leftValue": "",
+                        "typeValidation": "loose", "version": 1},
+            "conditions": [{
+                "id": "has-receipt",
+                "leftValue": "={{ $('Brain').first().json.save.receiptFileId }}",
+                "rightValue": "",
+                "operator": {"type": "string", "operation": "notEmpty",
+                             "singleValue": True}}],
+            "combinator": "and"},
+        "options": {},
+    }, (2360, 660))
+    g.node("Post Receipt To Group", "n8n-nodes-base.telegram", 1.2, {
+        "operation": "sendPhoto",
+        "chatId": "={{ $('Brain').first().json.save.groupChatId }}",
+        "binaryData": False,
+        # A Telegram file_id, re-sent rather than re-uploaded: the photo is
+        # already on Telegram's servers, this bot never holds the bytes.
+        "photo": "={{ $('Brain').first().json.save.receiptFileId }}",
+        "additionalFields": {
+            "caption": "={{ $('Brain').first().json.save.groupText }}",
+            "parse_mode": "Markdown",
+            "appendAttribution": False,
+        },
+    }, (2560, 780), cred=TELEGRAM_CRED)
     g.node("Post To Group", "n8n-nodes-base.telegram", 1.2,
            telegram_send("={{ $('Brain').first().json.save.groupText }}",
                          "={{ $('Brain').first().json.save.groupChatId }}"),
-           (2360, 540), cred=TELEGRAM_CRED)
+           (2560, 540), cred=TELEGRAM_CRED)
     g.node("Send Saved", "n8n-nodes-base.telegram", 1.2,
            telegram_send("={{ $('Brain').first().json.save.savedText }}",
                          "={{ $('Brain').first().json.chatId }}"),
@@ -484,9 +521,12 @@ def build():
         node = next(n for n in g.nodes if n["name"] == writer)
         node["onError"] = "continueErrorOutput"
 
-    g.connect("Has Group?", "Post To Group", index=0)
+    g.connect("Has Group?", "Has Receipt?", index=0)
     g.connect("Has Group?", "Send Saved No Group", index=1)
+    g.connect("Has Receipt?", "Post Receipt To Group", index=0)
+    g.connect("Has Receipt?", "Post To Group", index=1)
     g.connect("Post To Group", "Send Saved")
+    g.connect("Post Receipt To Group", "Send Saved")
 
     # ── The conversation ends ────────────────────────────────────────────────
     #
@@ -513,6 +553,75 @@ def build():
     }, (2760, 660))
     g.connect("Send Saved", "Clear Session")
     g.connect("Send Saved No Group", "Clear Session")
+
+    # ── A cancelled row is marked in the sheet itself ────────────────────────
+    #
+    # `save.formatRow` is set only by the cancel flow. Zeroing عدد الليالي and
+    # اجمالي سعر الحجز takes the booking out of every total, but the row still
+    # reads like a live booking to anyone scrolling the tab — the black fill is
+    # what says "cancelled" to a person rather than to a formula.
+    #
+    # Gated on BOOKINGS_SHEET_GID being filled in as well, because the Sheets
+    # API addresses a tab by numeric id and the wrong id does not error: it
+    # formats that row of a different tab. Unset means skip, which is the right
+    # failure for something cosmetic.
+    g.node("Should Format Row?", "n8n-nodes-base.if", 2.3, {
+        "conditions": {
+            "options": {"caseSensitive": True, "leftValue": "",
+                        "typeValidation": "loose", "version": 1},
+            "conditions": [
+                {"id": "wants-format",
+                 "leftValue": "={{ $('Brain').first().json.save.formatRow }}",
+                 "rightValue": "",
+                 "operator": {"type": "boolean", "operation": "true",
+                              "singleValue": True}},
+                {"id": "gid-known",
+                 "leftValue": "={{ $('Config').first().json.BOOKINGS_SHEET_GID }}",
+                 "rightValue": "",
+                 "operator": {"type": "string", "operation": "notEmpty",
+                              "singleValue": True}},
+            ],
+            "combinator": "and"},
+        "options": {},
+    }, (2960, 660))
+
+    # repeatCell over the row's used width, A:U. Written as one JS expression
+    # rather than a JSON literal with expressions inside it: n8n evaluates the
+    # `={{ }}` wrapper, not strings nested within a structure, so a dict dumped
+    # here would post the expression text and format nothing.
+    #
+    # startRowIndex is 0-based and half-open; save.row is the 1-based sheet row.
+    format_body = (
+        "={{ JSON.stringify({ requests: [{ repeatCell: {"
+        " range: {"
+        " sheetId: Number($('Config').first().json.BOOKINGS_SHEET_GID),"
+        " startRowIndex: $('Brain').first().json.save.row - 1,"
+        " endRowIndex: $('Brain').first().json.save.row,"
+        " startColumnIndex: 0, endColumnIndex: 21 },"
+        " cell: { userEnteredFormat: {"
+        " backgroundColor: { red: 0, green: 0, blue: 0 },"
+        " textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 } } } },"
+        " fields: 'userEnteredFormat(backgroundColor,textFormat)'"
+        " } }] }) }}"
+    )
+    g.node("Format Cancelled Row", "n8n-nodes-base.httpRequest", 4.2, {
+        "method": "POST",
+        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}:batchUpdate",
+        # The Sheets OAuth2 credential on an HTTP node. Note that binding this
+        # over the MCP API fails — setNodeCredential refuses
+        # googleSheetsOAuth2Api on httpRequest, because that node resolves its
+        # credential type dynamically. Importing the JSON carries it; if the
+        # binding is lost, set it once in the editor.
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": True,
+        "specifyBody": "json",
+        "jsonBody": format_body,
+        "options": {},
+    }, (3160, 660), cred=SHEETS_CRED)
+
+    g.connect("Clear Session", "Should Format Row?")
+    g.connect("Should Format Row?", "Format Cancelled Row", index=0)
 
     return g
 
