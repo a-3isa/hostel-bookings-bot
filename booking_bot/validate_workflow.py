@@ -32,6 +32,36 @@ TRIGGER_TYPES = ("Trigger", "trigger")
 NODE_REF = re.compile(r"\$\(\s*'([^']+)'\s*\)")
 
 
+CFG_KEY = re.compile(r"\bCFG\.([A-Z][A-Z0-9_]*)")
+SAVE_FLOW = re.compile(r"flow:\s*'([a-z]+)'")
+
+
+def js_sources():
+    """brain.js and every node body, as text. The graph's real contract."""
+    out = [os.path.join(HERE, "brain.js")]
+    nodes_dir = os.path.join(HERE, "nodes")
+    if os.path.isdir(nodes_dir):
+        out += [os.path.join(nodes_dir, f) for f in sorted(os.listdir(nodes_dir))
+                if f.endswith(".js")]
+    for path in out:
+        with open(path, encoding="utf-8") as fh:
+            yield os.path.basename(path), fh.read()
+
+
+def cfg_keys_used():
+    """Every CFG.* the JS reads, across the Brain and the node bodies."""
+    keys = set()
+    for _name, src in js_sources():
+        keys.update(CFG_KEY.findall(src))
+    return keys
+
+
+def brain_flows():
+    """Every save.flow literal brain.js can emit."""
+    with open(os.path.join(HERE, "brain.js"), encoding="utf-8") as fh:
+        return set(SAVE_FLOW.findall(fh.read()))
+
+
 def load():
     if not os.path.exists(WF_PATH):
         sys.exit(f"{WF_PATH} does not exist — run build_workflow.py first")
@@ -88,7 +118,36 @@ def main():
             if ref not in nodes:
                 problems.append(f"{node['name']}: $('{ref}') names no node")
 
-    # 4. The append ban.
+    # 4. Config covers every key the JS reads. `CFG.GROUP_CHAT_ID` on a Config
+    #    node that has no such assignment is `undefined`, which reaches Telegram
+    #    as the string "undefined" and posts the announcement into nothing.
+    cfg = nodes.get("Config")
+    if cfg is None:
+        problems.append("no Config node")
+    else:
+        have = {a["name"] for a in
+                cfg["parameters"]["assignments"]["assignments"]}
+        for key in sorted(cfg_keys_used()):
+            if key not in have:
+                problems.append(f"Config has no {key}, and the JS reads CFG.{key}")
+
+    # 5. Every save.flow the Brain can emit has somewhere to go. Adding a flow
+    #    to brain.js and forgetting the route means that save silently does
+    #    nothing — the switch drops it, since fallbackOutput is none.
+    flows = brain_flows()
+    route = nodes.get("Route Save")
+    if route is None:
+        problems.append("no Route Save node")
+    elif flows:
+        keys = {r.get("outputKey") for r in
+                route["parameters"]["rules"]["values"]}
+        for flow in sorted(flows - keys):
+            problems.append(f"brain.js emits save.flow {flow!r} and Route Save "
+                            "has no output for it")
+        for extra in sorted(keys - flows):
+            problems.append(f"Route Save routes {extra!r}, which brain.js never emits")
+
+    # 6. The append ban.
     for node in wf["nodes"]:
         if node["type"].endswith("googleSheets"):
             op = node.get("parameters", {}).get("operation")
