@@ -14,3 +14,6 @@ __pycache__/
 bot_out.txt
 bot_err.txt
 *.log
+
+# The rebuilt workflow's id, which is per-instance and not a repo fact.
+booking_bot/.workflow_id
