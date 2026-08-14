@@ -129,7 +129,7 @@
             {
               "keyName": "chat_id",
               "condition": "eq",
-              "keyValue": "={{ $('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query.message.chat.id }}"
+              "keyValue": "={{ String($('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query.message.chat.id) }}"
             }
           ]
         },

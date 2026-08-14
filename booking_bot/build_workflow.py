@@ -277,14 +277,20 @@ def build():
     # `alwaysOutputData` is what lets a chat with no row through as an empty
     # item — the Brain's readSession() treats that as "no session", and without
     # it a first-time user would simply stop here.
+    #
+    # `String(...)` is load-bearing. Telegram's chat id arrives as a NUMBER, and
+    # `brain.js` stores it as a string (`const chatId = String(msg.chat.id)`),
+    # which is what Save Session and Clear Session write. A data table column has
+    # one type, so without the cast the lookup and the write disagree about it
+    # and every returning chat looks like a new one.
     g.node("Load Session", "n8n-nodes-base.dataTable", 1, {
         "operation": "get",
         "dataTableId": {"__rl": True, "mode": "name", "value": SESSION_TABLE},
         "filters": {"conditions": [
             {"keyName": "chat_id", "condition": "eq",
-             "keyValue": "={{ $('Telegram Trigger').first().json.message"
+             "keyValue": "={{ String($('Telegram Trigger').first().json.message"
                          "?.chat?.id ?? $('Telegram Trigger').first().json"
-                         ".callback_query.message.chat.id }}"}
+                         ".callback_query.message.chat.id) }}"}
         ]},
         "options": {},
     }, (-60, 300), alwaysOutputData=True)
