@@ -6,16 +6,6 @@ import { day, num } from '../../../lib/fmt';
 
 export const dynamic = 'force-dynamic';
 
-// What happened to the sheet when a second payment was recorded.
-const LINE = {
-  added: null, // handled separately, it is the good case
-  'no-row': 'هذا الحجز ليس له صف في الشيت',
-  unstamped: 'صف الشيت لا يحمل معرف النظام في العمود U',
-  mismatch: 'العمود U في ذلك الصف يشير إلى حجز آخر',
-  'sheets-config': 'الاتصال بجوجل شيت غير مضبوط على الخادم',
-  'sheets-error': 'تعذر الوصول إلى جوجل شيت',
-};
-
 export default async function EditBooking({ params, searchParams }) {
   const { id } = await params;
   const flags = await searchParams;
@@ -63,25 +53,6 @@ export default async function EditBooking({ params, searchParams }) {
       )}
       {flags?.error === 'amount' && (
         <div className="banner bad"><span className="ico">⚠</span><div>المبلغ غير صالح.</div></div>
-      )}
-      {flags?.line === 'added' && (
-        <div className="banner good">
-          <span className="ico">✓</span>
-          <div>
-            تمت إضافة الدفعة، وأُدرج سطر جديد في الشيت أسفل صف الحجز بالمبلغ وطريقة
-            الدفع الجديدة. خانة طريقة الدفع في صف الحجز لم تتغير — «متعدد» تظهر في
-            اللوحة فقط.
-          </div>
-        </div>
-      )}
-      {flags?.line && flags.line !== 'added' && (
-        <div className="banner">
-          <span className="ico">ℹ</span>
-          <div>
-            سُجّلت الدفعة في قاعدة البيانات فقط — {LINE[flags.line] ?? 'تعذر التحقق من صف الشيت'}.
-            لم يُدرج سطر في الشيت.
-          </div>
-        </div>
       )}
       {overlaps.length > 0 && (
         <div className="banner bad">

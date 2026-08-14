@@ -15,8 +15,6 @@ export const BOOKINGS_TAB = 'إدخال الحجوزات';
 // inserts a line, that id does not.
 const ID_COLUMN = 'U';
 const NAME_COLUMN = 'C';
-const PAID_COLUMN = 'M';
-const METHOD_COLUMN = 'O';
 
 const SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 const API = 'https://sheets.googleapis.com/v4/spreadsheets';
@@ -166,45 +164,9 @@ export async function deleteRow(rowNumber) {
   });
 }
 
-// Inserts a continuation line directly under `afterRow` and fills in only the
-// cells a second payment needs: the guest's name, the amount, the method, and
-// the id of the follower booking.
-//
-// The formula columns (K, N, P, R, S, T) are never written — `inheritFromBefore`
-// asks Sheets to carry the row above's formatting and filled formulas down, the
-// same as inserting a row by hand. Every row below moves DOWN by one, so callers
-// must renumber `sheet_row` upward to match.
-export async function insertPaymentRow(afterRow, { guestName, amount, method, bookingId }) {
-  await api('/:batchUpdate', {
-    method: 'POST',
-    body: JSON.stringify({
-      requests: [{
-        insertDimension: {
-          range: {
-            sheetId: await tabId(),
-            dimension: 'ROWS',
-            startIndex: afterRow,
-            endIndex: afterRow + 1,
-          },
-          inheritFromBefore: true,
-        },
-      }],
-    }),
-  });
-
-  const row = afterRow + 1;
-  await api('/values:batchUpdate', {
-    method: 'POST',
-    body: JSON.stringify({
-      valueInputOption: 'RAW',
-      data: [
-        { range: `${BOOKINGS_TAB}!${NAME_COLUMN}${row}`, values: [[guestName ?? '']] },
-        { range: `${BOOKINGS_TAB}!${PAID_COLUMN}${row}`, values: [[String(amount)]] },
-        { range: `${BOOKINGS_TAB}!${METHOD_COLUMN}${row}`, values: [[method ?? '']] },
-        { range: `${BOOKINGS_TAB}!${ID_COLUMN}${row}`, values: [[String(bookingId)]] },
-      ],
-    }),
-  });
-
-  return row;
-}
+// A continuation line used to be inserted from here, when a second payment in a
+// different method meant a second row by definition. It does not any more: a
+// payment joins the line of its own method and only a method not yet on the
+// booking opens a row, which needs every line the booking occupies to decide.
+// `supabase/mirror.py` is the one writer that knows them, and it inserts the
+// row itself. Nothing in the dashboard writes rows to the bookings tab now.
