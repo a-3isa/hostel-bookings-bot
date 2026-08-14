@@ -32,6 +32,13 @@ Bookings with no sheet_row — everything the web UI creates — are appended to
 bottom and stamped with their id, which is how a UI booking becomes visible to
 the sheet at all.
 
+A booking can occupy more than one LINE. طريقة الدفع has room for one method, so
+a guest who paid 600 in cash and 1600 by انستاباي needs two rows — and the second
+one is money, not a guest, so it lives in `payments` and is written out from
+there. Column U says which line each row is: `21`, then `21-2`. The booking's own
+row shows what is left after the other lines are taken out, so the sheet's lines
+sum back to exactly the total the database holds.
+
     python supabase/mirror.py            # report what it would do
     python supabase/mirror.py --apply    # write
 """
@@ -84,7 +91,17 @@ select
   -- method and the second is simply lost.
   (b.merged_into is not null
    or exists (select 1 from bookings f where f.merged_into = b.id)) as multi_line,
-  b.merged_into
+  b.merged_into,
+  -- The booking's continuation LINES: every payment that owns a sheet row of
+  -- its own. This is what replaced the follower bookings — the second line is
+  -- money, not a guest, so it lives in `payments` and the mirror writes it out
+  -- from there.
+  (select coalesce(jsonb_agg(jsonb_build_object(
+            'id', p.id, 'seq', p.line_seq, 'sheet_row', p.sheet_row,
+            'amount', p.amount, 'method', p.method,
+            'payload', p.mirror_payload) order by p.line_seq), '[]'::jsonb)
+     from payments p
+    where p.booking_id = b.id and p.line_seq > 1) as lines
 from bookings b
 order by b.sheet_row nulls last, b.id;
 """
@@ -100,6 +117,43 @@ def money(v):
         return ""
     f = float(v)
     return str(int(f)) if f == int(f) else str(f)
+
+
+def line_payload(row, line, sheet_row):
+    """What a continuation line's row should show.
+
+    Everything identifying the guest is repeated, because that is what the sheet
+    has always held on these rows and what its own formulas read. Only the money
+    and the method are the line's own — and column U, which says which line this
+    is: `21-2`, booking 21, line 2.
+
+    The user's rule for the money, in their words: *"اجمالي سعر الحجز will equal
+    the amount paid in each step"*. So the line's total IS its payment.
+    """
+    want = desired(row, sheet_row)
+    amount = money(line["amount"])
+    want["total"] = amount
+    want["paid"] = amount
+    want["payment_method"] = s(line["method"])
+    want["booking_id"] = f"{row['id']}-{line['seq']}"
+    return want
+
+
+def primary_payload(row, lines, sheet_row):
+    """The booking's own row, with what its other lines carry taken back out.
+
+    The booking holds 2200 because that is what the stay cost; its first line
+    shows 600 because the other 1600 is on the row below. Subtracting rather
+    than storing the split keeps the two sides reconcilable: the sheet's lines
+    sum back to exactly the number the database holds.
+    """
+    want = desired(row, sheet_row)
+    if not lines:
+        return want
+    spread = sum(float(ln["amount"] or 0) for ln in lines)
+    want["total"] = money(float(row["total"] or 0) - spread)
+    want["paid"] = money(float(row["paid"] or 0) - spread)
+    return want
 
 
 def desired(row, sheet_row):
@@ -244,6 +298,10 @@ def main():
         agreed = formula_owned = 0
         next_row = last_row + 1
 
+        # One item per sheet LINE, not per booking: a booking paid in two methods
+        # owns two rows, and each is checked and written on its own. `line` is
+        # None for the booking's own row.
+        items = []
         for row in rows:
             if row["mixed_currency"]:
                 skipped_mixed.append(row)
@@ -255,18 +313,29 @@ def main():
                 next_row += 1
                 continue
 
-            target = row["sheet_row"]
-            want = desired(row, target)
+            lines = row["lines"] or []
+            items.append((row, None, row["sheet_row"],
+                          primary_payload(row, lines, row["sheet_row"]),
+                          row["mirror_payload"]))
+            for ln in lines:
+                # A payment with no row of its own is one the bot recorded as an
+                # event. It has no line to write until something allocates one.
+                if ln["sheet_row"] is None:
+                    continue
+                items.append((row, ln, ln["sheet_row"],
+                              line_payload(row, ln, ln["sheet_row"]),
+                              ln["payload"]))
+
+        for row, line, target, want, payload in items:
             have = observed(by_row.get(target), target)
             owned = sheet_owned_keys(formulas_by_row.get(target))
-            payload = row["mirror_payload"]
             if owned:
                 formula_owned += len(owned)
 
             if not differing(want, have, owned):
                 agreed += 1
                 if payload is None:
-                    seeded.append((row, want, owned))
+                    seeded.append((row, line, target, want, owned))
                 continue
 
             if payload is None:
@@ -275,28 +344,30 @@ def main():
                 # `--assert-first-run` is that person deciding, once, after the
                 # reconcile has been checked.
                 if assert_first:
-                    writes.append((row, want, owned))
+                    writes.append((row, line, target, want, owned))
                 else:
-                    conflicts.append((row, want, have, owned, "never mirrored"))
+                    conflicts.append((row, target, want, have, owned, "never mirrored"))
             elif differing(payload, have, owned):
-                conflicts.append((row, want, have, owned,
+                conflicts.append((row, target, want, have, owned,
                                   "edited by hand since last mirror"))
             else:
-                writes.append((row, want, owned))
+                writes.append((row, line, target, want, owned))
 
-        print(f"{BOOKINGS_TAB}: {len(rows)} bookings, sheet rows 2–{last_row}")
+        print(f"{BOOKINGS_TAB}: {len(rows)} bookings on {len(items)} lines,"
+              f" sheet rows 2–{last_row}")
         print(f"  already correct:        {agreed}")
         print(f"  to write:               {len(writes)}")
-        for row, want, _owned in writes[:10]:
-            print(f"    row {row['sheet_row']}: {want['guest_name']}")
+        for row, line, target, want, _owned in writes[:10]:
+            tag = f" (line {line['seq']})" if line else ""
+            print(f"    row {target}: {want['guest_name']}{tag}")
         print(f"  to append (no row yet): {len(appends)}")
         for row in appends[:10]:
             print(f"    -> row {row['_target_row']}: {row['guest_name']}")
         print(f"  to seed (agree, first run): {len(seeded)}")
         print(f"  cells left to the sheet (formulas): {formula_owned}")
         print(f"  CONFLICTS (skipped):    {len(conflicts)}")
-        for row, want, have, owned, why in conflicts[:10]:
-            print(f"    row {row['sheet_row']}: {row['guest_name']} — {why}")
+        for row, target, want, have, owned, why in conflicts[:10]:
+            print(f"    row {target}: {row['guest_name']} — {why}")
             for k in differing(want, have, owned)[:4]:
                 print(f"        {k}: sheet {have.get(k)!r} / db {want[k]!r}")
         print(f"  mixed currency (skipped): {len(skipped_mixed)}")
@@ -334,8 +405,8 @@ def main():
                 batch.append({"range": f"{start}{target}:{end}{target}",
                               "values": [values]})
 
-        for row, want, owned in writes:
-            stage(row["sheet_row"], want, owned)
+        for _row, _line, target, want, owned in writes:
+            stage(target, want, owned)
         for row in appends:
             want = desired(row, row["_target_row"])
             stage(row["_target_row"], want, set())
@@ -346,12 +417,25 @@ def main():
             # apostrophe above is what stops a phone number becoming a float.
             ws.batch_update(batch, value_input_option="USER_ENTERED")
 
-        for row, want, _owned in writes:
-            cur.execute("update bookings set mirror_payload = %s, mirrored_at = now()"
-                        " where id = %s;", (json.dumps(want, ensure_ascii=False), row["id"]))
-        for row, want, _owned in seeded:
-            cur.execute("update bookings set mirror_payload = %s, mirrored_at = now()"
-                        " where id = %s;", (json.dumps(want, ensure_ascii=False), row["id"]))
+        def record(row, line, want):
+            """Remember what was written, on whatever owns the line.
+
+            A continuation line's record lives on the PAYMENT, not the booking:
+            one `mirror_payload` per booking could only describe one row, and
+            the hand-edit check needs to know what each row was left holding.
+            """
+            blob = json.dumps(want, ensure_ascii=False)
+            if line is None:
+                cur.execute("update bookings set mirror_payload = %s,"
+                            " mirrored_at = now() where id = %s;", (blob, row["id"]))
+            else:
+                cur.execute("update payments set mirror_payload = %s"
+                            " where id = %s;", (blob, line["id"]))
+
+        for row, line, _target, want, _owned in writes:
+            record(row, line, want)
+        for row, line, _target, want, _owned in seeded:
+            record(row, line, want)
         for row in appends:
             cur.execute("update bookings set sheet_row = %s, mirror_payload = %s,"
                         " mirrored_at = now() where id = %s;",
