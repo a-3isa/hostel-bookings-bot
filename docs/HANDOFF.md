@@ -41,12 +41,24 @@ the sheet until someone adds the row.
 
 ### 1. Nothing has been deployed since n8n went down
 
-n8n is **back up** — the endpoint answers, it just refuses the token. Still true
-on 2026-08-14: every bearer in `~/.claude.json` gets `401`, including the newest
-one (`iat` 1785966523). The scripts read the **top-level**
-`mcpServers["n8n-mcp"].headers.Authorization`, so that is the one to replace —
-see `push_brain.load_server()`. Mint a fresh MCP access token in n8n, put it
-there, restart Claude Code, then:
+n8n is **back up**, and the problem is not the endpoint. As of 2026-08-14 the
+scripts try **every** n8n credential in `~/.claude.json` against the workflow
+itself and none can reach it:
+
+```
+no n8n credential in ~/.claude.json can reach workflow 2H97FsGnzwmzl7YE:
+  token issued 1786699996, ending 7aimiYdU: no access to this workflow
+  token issued 1785966523, ending 5rktsI7c: HTTP 401
+  ...
+```
+
+The server named `n8n` **connects** and registers all 34 tools — it shows green
+in `/mcp` — but its account holds **zero workflows**, so a green line there is
+not evidence the deploy will work. The `n8n-mcp` entries are revoked outright.
+
+What is needed is an MCP access token minted in the n8n account that **owns**
+`2H97FsGnzwmzl7YE`, in any `mcpServers` entry whose name contains `n8n`;
+`push_brain.select_server()` finds it wherever it is put. Then:
 
 ```
 python booking_bot/deploy_graph.py --publish   # formula guard + mirror node fix
