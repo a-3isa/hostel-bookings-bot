@@ -41,6 +41,32 @@ E = dict(spent_at=0, item=1, amount=2, apartment=3, notes=4, payment=5,
 
 ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# Column U holds the booking's database id. A booking that needs a second sheet
+# LINE — a payment in another method, which the sheet has to show on its own row
+# because طريقة الدفع has room for exactly one — carries the same id with a
+# sequence suffix: `413`, then `413-2`, `413-3`. The base is always the booking,
+# so a suffixed line is a PAYMENT of a booking that already exists, and never a
+# booking of its own. Everything that reads column U has to know that before
+# anything writes a suffix, or the first `413-2` in the sheet gets adopted as a
+# second booking for the same guest — which is the bug this ordering avoids.
+SHEET_ID_RE = re.compile(r"^(\d+)(?:-(\d+))?$")
+
+
+def parse_sheet_id(raw):
+    """Column U as (booking id, line sequence), or (None, None).
+
+    `413` is the booking's own line and reads as sequence 1. `413-2` is its
+    second line. Anything else — blank, a stray note, a half-typed id — is not
+    an identity, and is reported as unstamped rather than guessed at.
+    """
+    m = SHEET_ID_RE.match(str(raw or "").strip())
+    if not m:
+        return None, None
+    seq = int(m.group(2) or 1)
+    # Sequences start at 1, and `413-0` is a typo rather than a line. Reading it
+    # as line zero would file a payment under a line no mirror will ever write.
+    return (None, None) if seq < 1 else (int(m.group(1)), seq)
+
 
 # Connection. Prefer SUPABASE_TRANSACTION_URL: the project's direct host
 # (db.<ref>.supabase.co) publishes an AAAA record only and is unreachable from an
@@ -179,6 +205,7 @@ def load_bookings(sh):
         nights_raw = cell(row, B["nights"])
         # A live formula in عدد الليالي is what "open-ended" means in the sheet.
         is_open = str(cell(frow, B["nights"])).startswith("=")
+        id_of, line_seq = parse_sheet_id(cell(row, 20))
         out.append({
             "sheet_row": i,
             "booking_ref": cell(row, B["booking_ref"]),
@@ -201,6 +228,14 @@ def load_bookings(sh):
             # Column U (index 20), the booking's database id. Blank on a row
             # nothing has stamped yet.
             "booking_id": cell(row, 20),
+            # The same cell, read as an identity. `id_of` is the booking this
+            # line belongs to and `line_seq` which of its lines this is.
+            "id_of": id_of,
+            "line_seq": line_seq,
+            # A continuation line carries money and a method for a booking whose
+            # own row is elsewhere, so it is not a booking: it must not be
+            # inserted as one, snapshotted as one, or adopted as one.
+            "is_payment_line": line_seq is not None and line_seq > 1,
             "is_open": is_open,
             "total": cell(row, B["total"]),
             "paid": cell(row, B["paid"]),
@@ -432,10 +467,21 @@ def main():
 
     sh = open_sheet()
     reg = load_registry(sh)
-    bookings = load_bookings(sh)
+    # A continuation line is money, not a booking. Left in, every one of them
+    # would be inserted as a booking of its own on the next --apply, and then
+    # reported as an extra guest by every reconcile afterwards.
+    rows = load_bookings(sh)
+    bookings = [b for b in rows if not b["is_payment_line"]]
+    lines = [b for b in rows if b["is_payment_line"]]
     expenses = load_expenses(sh)
 
     report(reg, bookings, expenses)
+    if lines:
+        print(f"payment lines (not bookings):  {len(lines)}")
+        for b in lines:
+            print(f"    row {b['sheet_row']}: {b['booking_id']} — "
+                  f"{b['paid']} {b['payment']}")
+        print()
     sql = build_sql(reg, bookings, expenses)
 
     if args.out:
