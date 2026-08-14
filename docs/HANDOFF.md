@@ -90,11 +90,30 @@ Four schema migrations were applied directly (`payments.line_seq`,
 `reconcile_bookings`, `mixed_currency_bookings` and `reconcile_payments` were
 recreated. `schema.sql` matches what is live.
 
-**Still to do:** the bot does not write a suffix yet. When a payment in a second
-method arrives, the mirror needs to ALLOCATE a new line — insert a row, give the
-payment `line_seq = n` and `sheet_row`, and stamp `id-n`. Today a payment with no
-`sheet_row` is simply skipped, so the money is right in Postgres and invisible in
-the sheet until someone adds the row.
+**The mirror allocates lines now** (2026-08-14). A line is a payment TYPE, which
+is the rule the user gave: a payment in a method the booking already has is
+ADDED to that method's line and its cell grows; only a method not yet on the
+booking opens a row; and a third payment is checked against every line that
+exists by then. Method **and currency** must match — there are no exchange rates
+here.
+
+- **`booking_lines` is the new table.** `payments` could not hold this: it had
+  `unique (booking_id, line_seq)` and `unique (sheet_row)`, so two cash payments
+  sharing one line and one row were rejected by the database itself. Summing
+  them into one payment row was the alternative and the user rejected it — each
+  payment keeps its own date and its own receipt. Line 1 is deliberately NOT in
+  the table; it is the booking's own row and `bookings` already describes it.
+- **The new row is inserted directly under the booking's block**, with
+  `inheritFromBefore` so K, N, P, R, S and T come down from the row above. Every
+  row below moves down by one in the sheet and in all three tables that remember
+  a row number — `bookings`, `payments`, `booking_lines`.
+- **The dashboard no longer writes rows.** `addPayment` records the payment and
+  stops; `insertPaymentRow` is gone. It was still building follower `bookings`
+  rows, a model the collapse retired, and it inserted a row per payment, which
+  is no longer the rule.
+- First live run: 52 payments assigned to a line, **0 rows inserted**, sheet
+  untouched, `reconcile_bookings` still 0. `supabase/test_lines.py` covers the
+  grouping, the numbering and the insert (27 tests).
 
 ### 1. Nothing has been deployed since n8n went down
 
@@ -153,15 +172,22 @@ python supabase/heal_formulas.py --apply    # restores N, P, S if any went blank
 
 ### 4. Next piece of work
 
-**Let the mirror allocate a line.** See section 0: the readers, the model and the
-collapse are done, and what is missing is the writer. A payment in a second
-method currently lands in `payments` with no `sheet_row` and is skipped by the
-mirror, so it is right in Postgres and absent from the sheet.
+**The bot still matches payments on `sheet_row`**, so a row inserted between a
+bot write and the next reindex puts money on the wrong guest. It has happened
+once. `payments.line_seq`, `booking_lines` and column U are now what fix it —
+the supabase scripts use them, `brain.js` does not yet. The change is written
+against `brain.js` and cannot ship until n8n is reachable.
 
-Ahead of that on severity: **the bot still matches payments on `sheet_row`**, so
-a row inserted between a bot write and the next reindex puts money on the wrong
-guest. It has happened once. `payments.line_seq` and column U are now what fix
-it — the supabase scripts use them, `brain.js` does not yet.
+**Not yet exercised on real data: the insert path.** Every live payment so far
+has matched a method the booking already had, so the first run allocated 52
+payments and inserted nothing. The insert is covered by tests against fakes —
+rehearsing it on live bookings is the accident it exists to prevent — so watch
+the first real second-method payment: run `mirror.py` (no `--apply`) first and
+read the line it says it will open and the row it will insert.
+
+Untouched, and still true: `reconcile_payments` lists 12 bookings whose paid
+cell has no `payments` rows behind it at all. Those predate payment recording;
+they are not a line-allocation problem.
 
 
 Written 2026-08-09, updated the same day after Phase 4a. Read this first in a new

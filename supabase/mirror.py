@@ -34,10 +34,18 @@ the sheet at all.
 
 A booking can occupy more than one LINE. طريقة الدفع has room for one method, so
 a guest who paid 600 in cash and 1600 by انستاباي needs two rows — and the second
-one is money, not a guest, so it lives in `payments` and is written out from
+one is money, not a guest, so it lives in `booking_lines` and is written out from
 there. Column U says which line each row is: `21`, then `21-2`. The booking's own
 row shows what is left after the other lines are taken out, so the sheet's lines
 sum back to exactly the total the database holds.
+
+**A line is a payment TYPE, not a payment.** A second payment in a method the
+booking already has joins that line and its cell grows; only a method not seen on
+this booking before opens a row, and that row is inserted directly under the
+booking's block, moving every row below it down by one. So a guest who pays cash
+three times occupies one cash line, and this script is the only thing that
+allocates a row — the bot and the web UI record the money and leave the sheet
+alone.
 
     python supabase/mirror.py            # report what it would do
     python supabase/mirror.py --apply    # write
@@ -92,16 +100,33 @@ select
   (b.merged_into is not null
    or exists (select 1 from bookings f where f.merged_into = b.id)) as multi_line,
   b.merged_into,
-  -- The booking's continuation LINES: every payment that owns a sheet row of
-  -- its own. This is what replaced the follower bookings — the second line is
-  -- money, not a guest, so it lives in `payments` and the mirror writes it out
-  -- from there.
+  -- The booking's continuation LINES: one per payment METHOD beyond the
+  -- booking's own. A line's money is the sum of the payments assigned to it, so
+  -- a second cash payment lands on the cash line and the cell simply grows.
   (select coalesce(jsonb_agg(jsonb_build_object(
-            'id', p.id, 'seq', p.line_seq, 'sheet_row', p.sheet_row,
-            'amount', p.amount, 'method', p.method,
-            'payload', p.mirror_payload) order by p.line_seq), '[]'::jsonb)
+            'id', l.id, 'seq', l.line_seq, 'sheet_row', l.sheet_row,
+            'amount', sums.amount, 'method', l.method, 'currency', l.currency,
+            'payload', l.mirror_payload) order by l.line_seq), '[]'::jsonb)
+     from booking_lines l
+     join lateral (select coalesce(sum(p.amount), 0) as amount
+                     from payments p
+                    where p.booking_id = l.booking_id
+                      and p.line_seq = l.line_seq) sums on true
+    where l.booking_id = b.id) as lines,
+  -- Payments that belong to no line yet. Every payment the bot and the web UI
+  -- record arrives like this; deciding which line each one joins is what
+  -- `plan_allocation` below does.
+  (select coalesce(jsonb_agg(jsonb_build_object(
+            'id', p.id, 'amount', p.amount, 'method', p.method,
+            'currency', p.currency) order by p.paid_at, p.id), '[]'::jsonb)
      from payments p
-    where p.booking_id = b.id and p.line_seq > 1) as lines
+    where p.booking_id = b.id and p.line_seq is null) as unallocated,
+  -- The currency of the booking's OWN line, which is the currency of whatever
+  -- has been assigned to line 1. Nothing to read means EGP, the default a
+  -- payment is recorded with.
+  (select p.currency from payments p
+    where p.booking_id = b.id and p.line_seq = 1
+    order by p.id limit 1) as primary_currency
 from bookings b
 order by b.sheet_row nulls last, b.id;
 """
@@ -128,7 +153,9 @@ def line_payload(row, line, sheet_row):
     is: `21-2`, booking 21, line 2.
 
     The user's rule for the money, in their words: *"اجمالي سعر الحجز will equal
-    the amount paid in each step"*. So the line's total IS its payment.
+    the amount paid in each step"*. So the line's total is what was paid in this
+    line's method — the sum of its payments, which is why a second كاش payment
+    changes this cell rather than adding a row.
     """
     want = desired(row, sheet_row)
     amount = money(line["amount"])
@@ -154,6 +181,116 @@ def primary_payload(row, lines, sheet_row):
     want["total"] = money(float(row["total"] or 0) - spread)
     want["paid"] = money(float(row["paid"] or 0) - spread)
     return want
+
+
+DEFAULT_CURRENCY = "EGP"
+
+
+def line_key(method, currency):
+    """What makes two payments the same LINE.
+
+    The rule is the payment TYPE: a second كاش joins the كاش line and its cell
+    grows; a first انستاباي opens a row of its own. Currency is part of the
+    identity because there are no exchange rates in this system — 1000 كاش جنيه
+    and 50 كاش يورو are not 1050 of anything and cannot share a cell.
+    """
+    return (s(method).strip(), s(currency).strip() or DEFAULT_CURRENCY)
+
+
+def plan_allocation(row):
+    """Which line each of this booking's unassigned payments joins.
+
+    Returns `(merges, new_lines, adopted)`:
+
+      merges     [(payment_id, line_seq)] — the type is already on the sheet, so
+                 the payment joins that row. Nothing is inserted.
+      new_lines  [{seq, method, currency, amount, payment_ids}] — a type this
+                 booking has not been paid in before. Each needs a row.
+      adopted    the key line 1 takes on when the booking had no method at all.
+
+    Two payments of the same new type in one run share ONE new line: three
+    payments in انستاباي on a booking that had none produce one row holding
+    their sum, not three rows.
+
+    A payment arriving on a booking with no method yet fills the booking's own
+    row instead of opening a second one. An empty طريقة الدفع cell with a
+    populated line beneath it is not what anyone means by two payment methods.
+    """
+    lines = row["lines"] or []
+    primary = line_key(row["payment_method"], row["primary_currency"])
+    adopted = None
+
+    seq_of = {}
+    if primary[0]:
+        seq_of[primary] = 1
+    for ln in lines:
+        seq_of.setdefault(line_key(ln["method"], ln["currency"]), ln["seq"])
+
+    next_seq = max([1] + [ln["seq"] for ln in lines]) + 1
+    merges, opened = [], {}
+    for p in row["unallocated"] or []:
+        key = line_key(p["method"], p["currency"])
+        if not primary[0] and adopted is None:
+            adopted = key
+            seq_of.setdefault(key, 1)
+        if key in seq_of:
+            merges.append((p["id"], seq_of[key]))
+        elif key in opened:
+            opened[key]["payment_ids"].append(p["id"])
+            opened[key]["amount"] += float(p["amount"] or 0)
+        else:
+            opened[key] = {"seq": next_seq, "method": key[0], "currency": key[1],
+                           "amount": float(p["amount"] or 0),
+                           "payment_ids": [p["id"]]}
+            next_seq += 1
+    return merges, list(opened.values()), adopted
+
+
+def block_end(row):
+    """The last sheet row this booking occupies — its own, or its lowest line."""
+    rows = [row["sheet_row"]] + [ln["sheet_row"] for ln in (row["lines"] or [])]
+    return max(r for r in rows if r is not None)
+
+
+def shift_rows_down(cur, at_row):
+    """Everything from `at_row` down moves one row further down.
+
+    Renumbered through negatives first: `sheet_row` is UNIQUE and not
+    deferrable, so a single incrementing UPDATE collides with a row it has not
+    reached yet.
+    """
+    for table in ("bookings", "payments", "booking_lines"):
+        cur.execute(f"update {table} set sheet_row = -(sheet_row + 1)"
+                    f" where sheet_row >= %s;", (at_row,))
+        cur.execute(f"update {table} set sheet_row = -sheet_row"
+                    f" where sheet_row < 0;")
+
+
+def open_line(cur, ws, row, line):
+    """Give a new line a row in the sheet and a row in the database.
+
+    The row goes directly under the booking's block, which is where a person
+    would put it, and `inheritFromBefore` carries the formatting and the
+    filled-down formulas of the row above — K, N, P, R, S and T are the sheet's
+    and are never written by this script.
+
+    Every row below the insert moves down by one, in the sheet and in all three
+    tables that remember a row number, or the next run writes a guest's money
+    onto whoever moved into their number.
+    """
+    cur.execute("insert into booking_lines (booking_id, line_seq, method, currency)"
+                " values (%s, %s, %s, %s) returning id;",
+                (row["id"], line["seq"], line["method"] or None, line["currency"]))
+    line_id = cur.fetchone()[0]
+    cur.execute("update payments set line_seq = %s where id = any(%s);",
+                (line["seq"], line["payment_ids"]))
+
+    at_row = block_end(row) + 1
+    ws.insert_rows([[""]], row=at_row, inherit_from_before=True)
+    shift_rows_down(cur, at_row)
+    cur.execute("update booking_lines set sheet_row = %s where id = %s;",
+                (at_row, line_id))
+    return line_id, at_row
 
 
 def desired(row, sheet_row):
@@ -271,32 +408,88 @@ def main():
     sh = open_sheet(writable=apply)
     ws = sh.worksheet(BOOKINGS_TAB)
 
-    # The whole block in one read, values as displayed.
-    known = {b["sheet_row"] for b in load_bookings(sh)}
-    last_row = max(known) if known else 1
-    grid = ws.get(f"A2:U{last_row}")
-    # The same block as FORMULAS. A cell holding `=500*I10` is someone saying
-    # "500 a night, however long this turns out to be" — a live number the sheet
-    # recomputes. Overwriting it with whatever scalar the database happens to
-    # hold would silently destroy that intent on every open-ended stay, which
-    # the scope document named as the one mistake that would make this migration
-    # a net loss. So a formula cell belongs to the sheet, and the mirror leaves
-    # it exactly alone.
-    formula_grid = ws.get(f"A2:U{last_row}", value_render_option="FORMULA")
-    by_row, formulas_by_row = {}, {}
-    for i, cells in enumerate(grid, start=2):
-        by_row[i] = cells
-    for i, cells in enumerate(formula_grid, start=2):
-        formulas_by_row[i] = cells
-
-    with psycopg.connect(**connect_args()) as conn, conn.cursor() as cur:
+    def load_rows(cur):
         cur.execute(SELECT)
         cols = [c.name for c in cur.description]
-        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def read_grid():
+        """The block twice: values as displayed, and the same cells as formulas.
+
+        A cell holding `=500*I10` is someone saying "500 a night, however long
+        this turns out to be" — a live number the sheet recomputes. Overwriting
+        it with whatever scalar the database happens to hold would silently
+        destroy that intent on every open-ended stay, which the scope document
+        named as the one mistake that would make this migration a net loss. So a
+        formula cell belongs to the sheet, and the mirror leaves it alone.
+        """
+        known = {b["sheet_row"] for b in load_bookings(sh)}
+        last = max(known) if known else 1
+        values = {i: cells for i, cells
+                  in enumerate(ws.get(f"A2:U{last}"), start=2)}
+        formulas = {i: cells for i, cells
+                    in enumerate(ws.get(f"A2:U{last}",
+                                        value_render_option="FORMULA"), start=2)}
+        return values, formulas, last
+
+    with psycopg.connect(**connect_args()) as conn, conn.cursor() as cur:
+        rows = load_rows(cur)
+
+        # Which line every unassigned payment belongs on. A type already on the
+        # sheet grows its own cell; a type not seen on this booking before needs
+        # a row, and that row is INSERTED, which moves every row below it.
+        merges, opens, adoptions = [], [], []
+        for row in rows:
+            if row["sheet_row"] is None:
+                continue        # nothing to insert under yet; it is appended below
+            m, new_lines, adopted = plan_allocation(row)
+            merges.extend((row, pid, seq) for pid, seq in m)
+            opens.extend((row, line) for line in new_lines)
+            if adopted:
+                adoptions.append((row, adopted))
+
+        print(f"payment lines: {len(merges)} joining a line already there,"
+              f" {len(opens)} new line(s), {len(adoptions)} filling an empty method")
+        for row, line in opens[:10]:
+            print(f"    booking {row['id']} {row['guest_name']}:"
+                  f" {line['method']} {line['amount']:g} {line['currency']}"
+                  f" -> line {line['seq']}, a row under {block_end(row)}")
+        for row, pid, seq in merges[:10]:
+            print(f"    payment {pid} -> booking {row['id']} line {seq}")
+
+        fresh_lines = set()
+        if apply and (merges or opens or adoptions):
+            for row, adopted in adoptions:
+                cur.execute("update bookings set payment_method = %s where id = %s;",
+                            (adopted[0], row["id"]))
+            for _row, pid, seq in merges:
+                cur.execute("update payments set line_seq = %s where id = %s;",
+                            (seq, pid))
+            # Bottom of the sheet upwards, so an insert never moves the row a
+            # later insert was measured against.
+            for row, line in sorted(opens, key=lambda o: block_end(o[0]),
+                                    reverse=True):
+                line_id, at_row = open_line(cur, ws, row, line)
+                fresh_lines.add(line_id)
+                print(f"  inserted row {at_row} for booking {row['id']}"
+                      f" line {line['seq']} ({line['method']})")
+            conn.commit()
+            # The inserts moved rows and the merges moved money, so both sides
+            # are re-read before anything is compared against anything.
+            rows = load_rows(cur)
+
+        by_row, formulas_by_row, last_row = read_grid()
 
         writes, seeded, appends, conflicts, skipped_mixed = [], [], [], [], []
         agreed = formula_owned = 0
-        next_row = last_row + 1
+        # A row this run inserted is still BLANK, so `load_bookings` — which
+        # knows a row by its guest name — cannot see it, and the append below
+        # would hand a UI booking a row number that already belongs to a line.
+        # The database remembers every row it has given out; trust that too.
+        claimed = [r["sheet_row"] for r in rows if r["sheet_row"] is not None]
+        claimed += [ln["sheet_row"] for r in rows for ln in (r["lines"] or [])
+                    if ln["sheet_row"] is not None]
+        next_row = max([last_row] + claimed) + 1
 
         # One item per sheet LINE, not per booking: a booking paid in two methods
         # owns two rows, and each is checked and written on its own. `line` is
@@ -343,7 +536,12 @@ def main():
                 # could be a hand edit; either way a person decides, not this.
                 # `--assert-first-run` is that person deciding, once, after the
                 # reconcile has been checked.
-                if assert_first:
+                #
+                # A row this run inserted itself is the exception: it is blank
+                # because nothing has been written into it yet, and reporting
+                # that as a possible hand edit would leave the sheet with an
+                # empty line and no way to fill it.
+                if assert_first or (line and line["id"] in fresh_lines):
                     writes.append((row, line, target, want, owned))
                 else:
                     conflicts.append((row, target, want, have, owned, "never mirrored"))
@@ -420,7 +618,7 @@ def main():
         def record(row, line, want):
             """Remember what was written, on whatever owns the line.
 
-            A continuation line's record lives on the PAYMENT, not the booking:
+            A continuation line's record lives on the LINE, not the booking:
             one `mirror_payload` per booking could only describe one row, and
             the hand-edit check needs to know what each row was left holding.
             """
@@ -429,8 +627,8 @@ def main():
                 cur.execute("update bookings set mirror_payload = %s,"
                             " mirrored_at = now() where id = %s;", (blob, row["id"]))
             else:
-                cur.execute("update payments set mirror_payload = %s"
-                            " where id = %s;", (blob, line["id"]))
+                cur.execute("update booking_lines set mirror_payload = %s,"
+                            " mirrored_at = now() where id = %s;", (blob, line["id"]))
 
         for row, line, _target, want, _owned in writes:
             record(row, line, want)

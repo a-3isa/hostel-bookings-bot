@@ -106,7 +106,7 @@ def main():
                 # booking with two lines would otherwise have both stamped with
                 # the same new row, which is what `sheet_row` alone could never
                 # express.
-                cur.execute("select id, sheet_row from payments"
+                cur.execute("select id, sheet_row from booking_lines"
                             " where booking_id = %s and line_seq = %s;", (bid, seq))
                 got = cur.fetchone()
                 if got is None:
@@ -182,12 +182,14 @@ def main():
 
         # Continuation lines, re-pointed from column U rather than dragged along
         # by a booking. Parked on negative ids first for the same reason the
-        # bookings are: payments.sheet_row is unique, so two lines swapping rows
-        # collide half way through a one-phase update.
-        for pid, _was, _now in line_moves:
-            cur.execute("update payments set sheet_row = %s where id = %s;", (-pid, pid))
-        for pid, _was, now in line_moves:
-            cur.execute("update payments set sheet_row = %s where id = %s;", (now, pid))
+        # bookings are: booking_lines.sheet_row is unique, so two lines swapping
+        # rows collide half way through a one-phase update.
+        for lid, _was, _now in line_moves:
+            cur.execute("update booking_lines set sheet_row = %s where id = %s;",
+                        (-lid, lid))
+        for lid, _was, now in line_moves:
+            cur.execute("update booking_lines set sheet_row = %s where id = %s;",
+                        (now, lid))
 
         written = []
         for row in adoptable:
