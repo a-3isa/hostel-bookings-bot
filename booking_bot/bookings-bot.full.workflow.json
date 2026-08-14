@@ -1,0 +1,2050 @@
+{
+  "name": "Bookings Bot (Telegram - Google Sheets)",
+  "nodes": [
+    {
+      "id": "telegram-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -460,
+        300
+      ],
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "webhookId": "bookings-bot-telegram",
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -260,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "admins",
+              "name": "ADMIN_USERS",
+              "value": "7941350507,@AbdulrahmanMohamed5,1226903540,5793725130",
+              "type": "string"
+            },
+            {
+              "id": "cashiers",
+              "name": "CASHIER_USERS",
+              "value": "@Seifgamal24,@seiiffseiif",
+              "type": "string"
+            },
+            {
+              "id": "tz",
+              "name": "TIMEZONE",
+              "value": "Africa/Cairo",
+              "type": "string"
+            },
+            {
+              "id": "group",
+              "name": "GROUP_CHAT_ID",
+              "value": "-4809181011",
+              "type": "string"
+            },
+            {
+              "id": "exp_group",
+              "name": "EXPENSE_GROUP_CHAT_ID",
+              "value": "-4809181011",
+              "type": "string"
+            },
+            {
+              "id": "report_group",
+              "name": "REPORT_GROUP_CHAT_ID",
+              "value": "-5057362381",
+              "type": "string"
+            },
+            {
+              "id": "bookings_tab",
+              "name": "BOOKINGS_TAB",
+              "value": "إدخال الحجوزات",
+              "type": "string"
+            },
+            {
+              "id": "expense_tab",
+              "name": "EXPENSE_TAB",
+              "value": "مصروفات عامة",
+              "type": "string"
+            },
+            {
+              "id": "sheet",
+              "name": "SHEET_ID",
+              "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8",
+              "type": "string"
+            },
+            {
+              "id": "gid",
+              "name": "BOOKINGS_SHEET_GID",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "token",
+              "name": "BOT_TOKEN",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "load-session",
+      "name": "Load Session",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        300
+      ],
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings_bot_sessions"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ $('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query.message.chat.id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "needs-bookings",
+      "name": "Needs Bookings?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        160,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "is-edit_find",
+              "leftValue": "={{ $json.state }}",
+              "rightValue": "EDIT_FIND",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "is-edit_pick",
+              "leftValue": "={{ $json.state }}",
+              "rightValue": "EDIT_PICK",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "is-notes",
+              "leftValue": "={{ $json.state }}",
+              "rightValue": "NOTES",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "read-bookings-for-edit",
+      "name": "Read Bookings For Edit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        360,
+        180
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Phase 4b: the lookup and the availability check read Postgres, not Sheets.\n-- Column aliases reproduce the sheet's headers exactly, so brain.js consumes\n-- this the way it consumed the Sheets node and needs no change.\n--\n-- bookings_live, NOT bookings_model, and the reason matters. The model folds a\n-- guest's continuation lines into one booking, which is right for a report and\n-- wrong here: this feeds the EDIT path, which writes back to a sheet row by\n-- number. Offer مروان as one 2200 row and the next payment lands on line 22\n-- while line 23 still holds its 1600 — the sheet would double-count. So this\n-- stays line-for-line with the sheet, exactly as the Sheets node was: all 55\n-- lines, cancelled ones included, because findConflicts() skips those by their\n-- ملغي note and the edit flow can still reach them.\n--\n-- '=OPEN' is deliberate. An open-ended stay arrived from the FORMULA read as\n-- '=TODAY()-J5', and both findConflicts() and showValue() key off that leading\n-- '='. Keeping the sentinel keeps that contract; Phase 5 replaces it with the\n-- open_ended boolean and deletes the sniffing.\nselect\n  b.sheet_row                                          as row_number,\n  coalesce(b.booking_ref, '')                          as \"بوكنج ID\",\n  coalesce(b.guest_ref, '')                            as \"ID\",\n  coalesce(b.guest_name, '')                           as \"اسم المقيم\",\n  coalesce(b.booking_type, '')                         as \"نوع الحجز\",\n  coalesce(b.phone, '')                                as \"رقم الهاتف\",\n  coalesce(b.apartment_name, '')                       as \"اسم الشقة\",\n  coalesce(b.room_number, '')                          as \"رقم الغرفة\",\n  case when b.open_ended then '=OPEN'\n       else coalesce(b.effective_nights::text, '') end as \"عدد الليالي\",\n  coalesce(to_char(b.arrival, 'YYYY-MM-DD'), '')       as \"تاريخ البداية\",\n  coalesce(to_char(b.departure, 'YYYY-MM-DD'), '')     as \"تاريخ المغادرة\",\n  coalesce(trim(to_char(b.effective_total, 'FM999999999.##')), '')     as \"اجمالي سعر الحجز\",\n  coalesce(trim(to_char(b.paid, 'FM999999999.##')), '')                as \"اجمالي ما تم دفعه\",\n  coalesce(b.payment_method, '')                       as \"طريقة الدفع\",\n  coalesce(trim(to_char(b.effective_remaining, 'FM999999999.##')), '') as \"المتبقي\",\n  coalesce(b.notes, '')                                as \"ملاحظات\"\nfrom bookings_live b\norder by b.sheet_row;\n",
+        "options": {}
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "id": "needs-locations",
+      "name": "Needs Locations?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        560,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "is-phone",
+              "leftValue": "={{ $json.state }}",
+              "rightValue": "PHONE",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "is-exp_amount",
+              "leftValue": "={{ $json.state }}",
+              "rightValue": "EXP_AMOUNT",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "is-edit_menu",
+              "leftValue": "={{ $json.state }}",
+              "rightValue": "EDIT_MENU",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "read-locations",
+      "name": "Read Locations",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        760,
+        180
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- The apartment/room registry, seeded from the الإتاحة tab and verified equal\n-- to it on 2026-08-09: 6 apartments, 26 rooms on both sides.\n--\n-- Aliases match the tab's own header row, so locationRegistry() reads this\n-- exactly as it read the Sheets node. Rooms sort numerically rather than by\n-- text, or room 10 would sit before room 2 on the keyboard.\nselect\n  a.name   as \"الشقة\",\n  r.number as \"الغرفة\"\nfrom rooms r\njoin apartments a on a.id = r.apartment_id\nwhere r.active and a.active\norder by a.id, length(r.number), r.number;\n",
+        "options": {}
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "id": "brain",
+      "name": "Brain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        300
+      ],
+      "parameters": {
+        "jsCode": "/**\n * Bookings receptionist bot — full conversation state machine.\n *\n * This is the source-of-truth copy of the JS that lives inside the \"Brain\"\n * Code node of n8n/bookings-bot.workflow.json. Edit here, then paste into the\n * node (or re-run n8n/sync-brain.py to rebuild the workflow JSON).\n *\n * Port of handlers/booking.py (PTB ConversationHandler) + strings.py.\n * Session state is kept in n8n workflow static data, keyed by chat id.\n */\n\n// ─── Config (from the \"Config\" Set node) ──────────────────────────────────────\n\nconst CFG = $('Config').first().json;\nconst upd = $('Telegram Trigger').first().json;\n\n// Access lists. Each entry is either a numeric Telegram user id or an @username\n// (stored lower-cased, without the @). Anyone on neither list gets nothing —\n// this bot is closed to everybody else.\n//\n// Usernames are matched because two of the people below were only ever given to\n// us as @handles. The trade-off is real: a user who clears or renames their\n// username loses access until the list is updated. Prefer ids when known.\nfunction parseUsers(raw) {\n  return String(raw || '')\n    .split(',').map(s => s.trim().toLowerCase().replace(/^@/, '')).filter(Boolean);\n}\n\n// Full access: booking, expense, edit/cancel.\nconst ADMIN_USERS = parseUsers(\n  CFG.ADMIN_USERS !== undefined && CFG.ADMIN_USERS !== ''\n    ? CFG.ADMIN_USERS\n    : '7941350507,@AbdulrahmanMohamed5,1226903540,5793725130'\n);\n\n// Cashier access: expenses, plus adding a payment to an existing booking.\nconst CASHIER_USERS = parseUsers(\n  CFG.CASHIER_USERS !== undefined && CFG.CASHIER_USERS !== ''\n    ? CFG.CASHIER_USERS\n    : '@Seifgamal24,@seiiffseiif'\n);\n\nconst TZ = CFG.TIMEZONE || 'Africa/Cairo';\n\n// ─── Option lists (indexes are baked into callback_data — never reorder) ──────\n\n// callback_data carries a STABLE KEY, never a list position. The old `pay_0`\n// form meant \"whatever is 3rd in the array today\", so reordering a list silently\n// changed what an in-flight tap saved. Keys are bound to a value for good; the\n// display order above them is free to change.\nconst BTYPE_OPTS = [\n  { key: 'external', label: 'خارجي' },\n  { key: 'booking', label: 'بوكينج' },\n];\n\nconst PAYMENTS = [\n  { key: 'cash', label: 'كاش' },\n  { key: 'instapay', label: 'انستاباي' },\n  { key: 'airbnb', label: 'Airbnb' },\n  { key: 'vcash', label: 'فودافون كاش' },\n  { key: 'unpaid', label: 'غير مدفوع' },\n  { key: 'eur', label: 'يورو' },\n  { key: 'usd', label: 'دولار' },\n];\n\nconst EXP_PAYMENTS = ['cash', 'instapay', 'vcash'];\n\n/** Payment methods that produce a transfer receipt worth attaching. */\nconst RECEIPT_PAYMENT_KEYS = ['instapay', 'vcash'];\n\nconst CASH_KEY = 'cash';\nconst UNPAID_KEY = 'unpaid';\n\n/**\n * Resolve a payment from callback data.\n *\n * Accepts the old positional form (`pay_3`) as well as the current key form\n * (`pay_vcash`). A keyboard drawn before this code deployed is still on\n * someone's screen; without this, their next tap does nothing and they have to\n * start the booking again. The order below is the order those old keyboards\n * were drawn in — do not rewrite it to match a future PAYMENTS reordering.\n */\nconst LEGACY_PAY_ORDER = ['cash', 'instapay', 'airbnb', 'vcash', 'unpaid', 'eur', 'usd'];\n\nfunction payByKey(key) {\n  const direct = PAYMENTS.find(p => p.key === key);\n  if (direct) return direct;\n  if (/^\\d+$/.test(String(key))) {\n    const legacy = LEGACY_PAY_ORDER[Number(key)];\n    return legacy ? PAYMENTS.find(p => p.key === legacy) || null : null;\n  }\n  return null;\n}\n\nfunction payLabel(key) { const p = payByKey(key); return p ? p.label : ''; }\n\n/** The canonical key for a payment, whichever form the callback used. */\nfunction payKeyOf(key) { const p = payByKey(key); return p ? p.key : ''; }\n\n/**\n * Apartments and their rooms come from the الإتاحة tab (one row per\n * apartment+room), so opening a property or changing a room count is a sheet\n * edit rather than a deploy. This list is only the fallback for a failed read —\n * a Sheets hiccup must not stop the bot taking a booking. Room counts here match\n * الإتاحة as of 2026-08-08; the old code offered 5 rooms everywhere, which\n * invented a room 5 in four of the six apartments.\n */\nconst FALLBACK_REGISTRY = [\n  { apartment: 'ذاكر حسين', rooms: ['1', '2', '3', '4', '5'] },\n  { apartment: 'احمد فهيم', rooms: ['1', '2', '3', '4', '5'] },\n  { apartment: 'انبي 3', rooms: ['1', '2', '3', '4'] },\n  { apartment: 'انبي 2', rooms: ['1', '2', '3', '4'] },\n  { apartment: 'ابو حديد 11', rooms: ['1', '2', '3', '4'] },\n  { apartment: 'عبدالله العربي', rooms: ['1', '2', '3', '4'] },\n];\n\n// Fields an already-saved booking may be edited through. Money + stay details\n// only: the identity columns (اسم المقيم, ID, بوكنج ID, رقم الهاتف, نوع الحجز)\n// are deliberately not editable. Keyed by callback suffix; append-only.\nconst EDIT_FIELDS = [\n  { key: 'total',   labelKey: 'btn_edit_total',   col: 'اجمالي سعر الحجز' },\n  { key: 'paid',    labelKey: 'btn_edit_paid',    col: 'اجمالي ما تم دفعه' },\n  { key: 'payment', labelKey: 'btn_edit_payment', col: 'طريقة الدفع' },\n  { key: 'nights',  labelKey: 'btn_edit_nights',  col: 'عدد الليالي' },\n  { key: 'arrival', labelKey: 'btn_edit_arrival', col: 'تاريخ البداية' },\n  { key: 'aptroom', labelKey: 'btn_edit_aptroom', col: null },   // writes G and H\n  { key: 'notes',   labelKey: 'btn_edit_notes',   col: 'ملاحظات' },\n];\n\n// ─── Strings (port of strings.py) ─────────────────────────────────────────────\n\nconst S = {\n  choose_action: 'اختر العملية:',\n  btn_add_booking: '➕ حجز',\n  btn_add_expense: '💸 مصروف',\n  not_authorized: '⛔ غير مصرح لك باستخدام هذا البوت.',\n\n  exp_ask_id: '🔢 رقم المصروف (إن وجد) أو اضغط تخطي:',\n  exp_ask_item: '📝 البند (وصف المصروف):',\n  exp_ask_amount: '💰 المبلغ:',\n  exp_ask_apartment: '🏠 الشقة:',\n  btn_apt_none: 'بدون/عام',\n  exp_ask_payment: '💳 طريقة الدفع:',\n  exp_ask_notes: '🗒️ ملاحظات (اختياري) أو اضغط تخطي:',\n  exp_confirm_summary:\n    '📋 *مراجعة المصروف:*\\n\\n' +\n    '🔢 رقم المصروف: {exp_id}\\n' +\n    '📝 البند: {item}\\n' +\n    '💰 المبلغ: {amount}\\n' +\n    '🏠 الشقة: {apartment}\\n' +\n    '💳 الدفع: {payment}\\n' +\n    '🗒️ ملاحظات: {notes}\\n' +\n    '👤 المسئول: {responsible}\\n' +\n    '🕐 التاريخ: {date}\\n' +\n    '📎 الإيصال: {receipt}',\n  exp_group_msg:\n    '💸 *مصروف جديد*\\n\\n' +\n    '🔢 رقم المصروف: {exp_id}\\n' +\n    '📝 البند: {item}\\n' +\n    '💰 المبلغ: {amount}\\n' +\n    '🏠 الشقة: {apartment}\\n' +\n    '💳 الدفع: {payment}\\n' +\n    '🗒️ ملاحظات: {notes}\\n' +\n    '👤 المسئول: {actor}\\n' +\n    '🕐 التاريخ: {date}\\n' +\n    '📎 الإيصال: {receipt}',\n  exp_saved: '✅ تم حفظ المصروف وإرساله للجروب.\\nأرسل /start من جديد.',\n  exp_saved_no_group:\n    '✅ تم حفظ المصروف.\\n⚠️ تعذّر الإرسال للجروب (تأكد من إضافة البوت).\\nأرسل /start من جديد.',\n\n  ask_booking_id: '🔖 أدخل رقم البوكينج (إن وجد) أو اضغط تخطي:',\n  btn_skip: 'تخطي',\n  ask_private_id: '🆔 أدخل الـ ID:',\n  ask_name: '👤 اسم المقيم:',\n  name_error: '❌ أحرف ومسافات فقط، 3 أحرف على الأقل. حاول مجدداً:',\n  ask_btype: '📑 نوع الحجز:',\n  ask_phone: '📞 رقم الهاتف:',\n  ask_apt_room: '🏠 اختر الشقة والغرفة:',\n  ask_nights: '🌙 عدد الليالي:',\n  btn_infinity: '∞ مفتوح',\n  num_error: '❌ أدخل رقماً صحيحاً:',\n  ask_arrival: '📅 اختر تاريخ البداية:',\n  cal_months: ['', 'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',\n    'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'],\n  cal_days: ['Sa', 'Su', 'Mo', 'Tu', 'We', 'Th', 'Fr'],\n  ask_total: '💰 اجمالي سعر الحجز:',\n  // An open-ended stay has no total to ask for. Asking for one produces a\n  // number somebody made up, and the sheet then grew hand-typed `=500*I10`\n  // formulas to express what was meant — six of them, before this existed.\n  ask_rate: '💰 سعر الليلة (الحجز مفتوح، الاجمالي يُحسب تلقائياً):',\n  rate_per_night: '{rate} / ليلة',\n  running_total: 'يُحسب تلقائياً',\n  ask_payment: '💳 طريقة الدفع:',\n  ask_paid: '💵 اجمالي ما تم دفعه:',\n  ask_receipt: '📎 أرسل صورة إيصال التحويل أو اضغط تخطي:',\n  receipt_error: '❌ أرسل صورة الإيصال أو اضغط تخطي:',\n  receipt_attached: '✅ مرفق',\n  ask_notes: '📝 ملاحظات (اختياري) أو اضغط تخطي:',\n  confirm_summary:\n    '📋 *مراجعة الحجز:*\\n\\n' +\n    '🔖 بوكنج ID: {booking_id}\\n' +\n    '🆔 ID: {private_id}\\n' +\n    '👤 المقيم: {name}\\n' +\n    '📑 نوع الحجز: {btype}\\n' +\n    '📞 الهاتف: {phone}\\n' +\n    '🏠 الشقة: {apartment}\\n' +\n    '🚪 الغرفة: {room}\\n' +\n    '🌙 عدد الليالي: {nights}\\n' +\n    '📅 البداية: {arrival}\\n' +\n    '📅 المغادرة: {departure}\\n' +\n    '💰 الاجمالي: {total}\\n' +\n    '💵 المدفوع: {paid}\\n' +\n    '🧾 المتبقي: {remaining}\\n' +\n    '💳 الدفع: {payment}\\n' +\n    '📝 ملاحظات: {notes}\\n' +\n    '📎 الإيصال: {receipt}',\n  group_msg:\n    '🆕 *حجز جديد*\\n\\n' +\n    '🔖 بوكنج ID: {booking_id}\\n' +\n    '🆔 ID: {private_id}\\n' +\n    '👤 المقيم: {name}\\n' +\n    '📑 نوع الحجز: {btype}\\n' +\n    '📞 الهاتف: {phone}\\n' +\n    '🏠 الشقة: {apartment}\\n' +\n    '🚪 الغرفة: {room}\\n' +\n    '🌙 عدد الليالي: {nights}\\n' +\n    '📅 البداية: {arrival}\\n' +\n    '📅 المغادرة: {departure}\\n' +\n    '💰 الاجمالي: {total}\\n' +\n    '💵 المدفوع: {paid}\\n' +\n    '🧾 المتبقي: {remaining}\\n' +\n    '💳 الدفع: {payment}\\n' +\n    '📝 ملاحظات: {notes}\\n' +\n    '📎 الإيصال: {receipt}\\n' +\n    '👤 بواسطة: {actor}',\n  // ── Edit / cancel an already-saved booking ──\n  btn_edit_booking: '✏️ تعديل حجز',\n  edit_ask_paid_add:\n    '💵 أدخل المبلغ المضاف (المدفوع حالياً: {current}):\\n' +\n    '↩️ للاسترداد أو تصحيح خطأ أدخل رقماً سالباً، مثل ‎-500',\n  edit_paid_below_zero: '❌ المدفوع لا يمكن أن يقل عن صفر. المدفوع حالياً: {current}',\n  edit_ask_id: '🔎 أدخل الـ ID:',\n  edit_not_found: '❌ لا يوجد حجز بهذا الـ ID. حاول مجدداً أو أرسل /cancel:',\n  edit_pick_match: '🔎 أكثر من حجز بنفس الرقم — اختر الحجز:',\n  edit_menu: '✏️ اختر ما تريد تعديله:',\n  btn_edit_total: '💰 اجمالي سعر الحجز',\n  // The button says what the step DOES. It never set a total — it always asked\n  // for an amount to add and summed it with what was already paid — and calling\n  // it \"اجمالي ما تم دفعه\" invited people to type the new total, which would be\n  // counted on top of the old one.\n  btn_edit_paid: '💵 إضافة دفعة',\n  btn_edit_payment: '💳 طريقة الدفع',\n  btn_edit_nights: '🌙 عدد الليالي',\n  btn_edit_arrival: '📅 تاريخ البداية',\n  btn_edit_aptroom: '🏠 الشقة والغرفة',\n  btn_edit_notes: '📝 ملاحظات',\n  btn_edit_done: '✅ تم',\n  // ── Checking an open-ended booking out, off the back of a payment ──\n  edit_ask_left: '🚪 هل غادر النزيل؟',\n  btn_yes: 'نعم',\n  btn_no: 'لا',\n  edit_ask_departure: '📅 اختر تاريخ المغادرة:',\n  edit_departure_before_arrival:\n    '❌ المغادرة ({departure}) قبل تاريخ البداية ({arrival}). اختر تاريخاً آخر:',\n  edit_confirm_summary: '📋 *مراجعة التعديل:*\\n\\n{changes}',\n  edit_departure_line: '📅 تاريخ المغادرة: {departure}',\n  btn_delete_booking: '🗑️ إلغاء الحجز',\n  edit_no_changes: 'لم يتم تغيير أي شيء. أرسل /start من جديد.',\n  edit_saved: '✅ تم حفظ التعديلات وإرسالها للجروب.\\nأرسل /start من جديد.',\n  edit_saved_no_group: '✅ تم حفظ التعديلات.\\n⚠️ تعذّر الإرسال للجروب.\\nأرسل /start من جديد.',\n  edit_group_msg:\n    '✏️ *تعديل حجز*\\n\\n' +\n    '👤 المقيم: {name}\\n' +\n    '🆔 ID: {private_id}\\n\\n' +\n    '{changes}\\n\\n' +\n    '👤 بواسطة: {actor}',\n  del_confirm: '⚠️ تأكيد إلغاء الحجز التالي؟\\n\\n{summary}',\n  del_saved: '✅ تم إلغاء الحجز وإرساله للجروب.\\nأرسل /start من جديد.',\n  del_saved_no_group: '✅ تم إلغاء الحجز.\\n⚠️ تعذّر الإرسال للجروب.\\nأرسل /start من جديد.',\n  del_group_msg:\n    '🗑️ *إلغاء حجز*\\n\\n' +\n    '👤 المقيم: {name}\\n' +\n    '🆔 ID: {private_id}\\n' +\n    '🏠 الشقة: {apartment}\\n' +\n    '🚪 الغرفة: {room}\\n' +\n    '📅 البداية: {arrival}\\n' +\n    '👤 بواسطة: {actor}',\n  del_note: 'ملغي',\n  // ── Cashier: add a payment to an existing booking ──\n  btn_add_paid: '💵 إضافة مبلغ مدفوع',\n  paid_ask_id: '🔎 أدخل الـ ID الخاص بالحجز:',\n  paid_ask_amount: '💵 أدخل المبلغ المدفوع (المدفوع حالياً: {current}):',\n  paid_ask_receipt: '📎 أرسل صورة إيصال التحويل:',\n  paid_receipt_error: '❌ لا بد من إرسال صورة الإيصال:',\n  paid_saved: '✅ تم تسجيل الدفعة وإرسالها للجروب.\\nأرسل /start من جديد.',\n  paid_saved_no_group: '✅ تم تسجيل الدفعة.\\n⚠️ تعذّر الإرسال للجروب.\\nأرسل /start من جديد.',\n  paid_group_msg:\n    '💵 *دفعة جديدة*\\n\\n' +\n    '👤 المقيم: {name}\\n' +\n    '🆔 ID: {private_id}\\n' +\n    '🏠 الشقة: {apartment}\\n' +\n    '➕ المبلغ المضاف: {added}\\n' +\n    '💵 اجمالي ما تم دفعه: {paid}\\n' +\n    '💳 الدفع: {payment}\\n' +\n    '📎 الإيصال: {receipt}\\n' +\n    '👤 بواسطة: {actor}',\n  // An admin can add a payment and change other things in the same session.\n  // The payment leads, because that is the part the group is watching for, and\n  // whatever else moved is listed underneath rather than lost.\n  payment_other_changes: '✏️ تعديلات أخرى:\\n{changes}',\n  // ── Undo ──\n  undo_none: 'لا يوجد تعديل يمكن التراجع عنه.',\n  undo_expired: '⌛ انتهت مهلة التراجع (10 دقائق). استخدم تعديل حجز.',\n  undo_not_supported:\n    'التراجع متاح للتعديلات والدفعات فقط.\\nلإلغاء حجز جديد استخدم *تعديل حجز* ← 🗑️ إلغاء الحجز.',\n  undo_confirm: '↩️ *تراجع عن آخر تعديل؟*\\n\\n{changes}',\n  undo_saved: '✅ تم التراجع وإرساله للجروب.\\nأرسل /start من جديد.',\n  undo_saved_no_group: '✅ تم التراجع.\\n⚠️ تعذّر الإرسال للجروب.\\nأرسل /start من جديد.',\n  undo_group_msg:\n    '↩️ *تراجع عن تعديل*\\n\\n' +\n    '👤 المقيم: {name}\\n' +\n    '🆔 ID: {private_id}\\n\\n' +\n    '{changes}\\n\\n' +\n    '👤 بواسطة: {actor}',\n  conflict_warning:\n    '⚠️ *تعارض في الحجز* — {room} محجوزة في نفس الفترة ({count}):\\n{list}',\n  // Two lines per clash on purpose. The first says who is in the room and for\n  // how long; the second says exactly which nights are contested, which is the\n  // number the receptionist is actually deciding on.\n  conflict_line:\n    '• {name}{id_part}\\n' +\n    '   🛏️ {arrival} ← {departure}\\n' +\n    '   🔻 التداخل: {overlap_from} ← {overlap_to}{nights_part}',\n  conflict_id_part: ' — ID {private_id}',\n  conflict_nights_part: ' ({nights} ليلة)',\n  btn_confirm_anyway: '⚠️ احفظ رغم التعارض',\n  btn_confirm: '✅ حفظ',\n  btn_cancel: '❌ إلغاء',\n  saved: '✅ تم حفظ الحجز وإرساله للجروب.\\nأرسل /start لإدخال حجز جديد.',\n  saved_no_group:\n    '✅ تم حفظ الحجز.\\n⚠️ تعذّر الإرسال للجروب (تأكد من إضافة البوت للجروب).\\nأرسل /start لإدخال حجز جديد.',\n  cancelled: 'تم الإلغاء. أرسل /start للبدء من جديد.',\n  error: '⚠️ حدث خطأ أثناء الحفظ. حاول مجدداً.',\n  infinity_label: '∞ مفتوح',\n  empty: '—',\n};\n\nfunction t(key, vars) {\n  let val = S[key] !== undefined ? S[key] : key;\n  if (typeof val === 'string' && vars) {\n    val = val.replace(/\\{(\\w+)\\}/g, (m, k) => (vars[k] !== undefined ? String(vars[k]) : m));\n  }\n  return val;\n}\n\n// ─── Keyboard helpers (port of _grid / _skip_kb / _num_keyboard) ──────────────\n\nfunction grid(options, prefix, perRow) {\n  perRow = perRow || 2;\n  const rows = [];\n  for (let i = 0; i < options.length; i += perRow) {\n    rows.push(options.slice(i, i + perRow).map((opt, j) => ({\n      text: opt, callback_data: `${prefix}${i + j}`,\n    })));\n  }\n  return { inline_keyboard: rows };\n}\n\nfunction skipKb(cbData) {\n  return { inline_keyboard: [[{ text: t('btn_skip'), callback_data: cbData }]] };\n}\n\nfunction numKeyboard(lo, hi, prefix, extra, perRow) {\n  perRow = perRow || 5;\n  const nums = [];\n  for (let n = lo; n <= hi; n++) nums.push({ text: String(n), callback_data: `${prefix}${n}` });\n  const rows = [];\n  for (let i = 0; i < nums.length; i += perRow) rows.push(nums.slice(i, i + perRow));\n  if (extra) rows.push(extra);\n  return { inline_keyboard: rows };\n}\n\n/** A grid over [{ key, label }] options, keyed rather than positional. */\nfunction keyGrid(options, prefix, perRow) {\n  perRow = perRow || 2;\n  const rows = [];\n  for (let i = 0; i < options.length; i += perRow) {\n    rows.push(options.slice(i, i + perRow).map(o => ({\n      text: o.label, callback_data: `${prefix}${o.key}`,\n    })));\n  }\n  return { inline_keyboard: rows };\n}\n\n/**\n * Apartment + room grid over the registry loaded this turn.\n *\n * The callback carries a position into `reg` and `reg` is written to the session\n * alongside it, so the tap is resolved against exactly the list that was shown.\n * A sheet edit between the keyboard being drawn and the button being pressed\n * cannot shift the meaning — which is the whole failure mode a global index has.\n */\nfunction aptRoomKb(reg) {\n  const rows = [];\n  reg.forEach((entry, i) => {\n    rows.push([{ text: `🏠 ${entry.apartment}`, callback_data: 'ar_hdr' }]);\n    rows.push(entry.rooms.map(room => ({\n      text: String(room), callback_data: `ar_${i}_${room}`,\n    })));\n  });\n  return { inline_keyboard: rows };\n}\n\n// ─── Date helpers ─────────────────────────────────────────────────────────────\n\nconst MIN_YEAR = 2000, MIN_MONTH = 1;\n\nfunction todayParts() {\n  // \"today\" in the bot's timezone, not the n8n container's UTC clock.\n  const f = new Intl.DateTimeFormat('en-CA', {\n    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',\n  });\n  const [y, m, d] = f.format(new Date()).split('-').map(Number);\n  return { y, m, d };\n}\n\nfunction nowStamp() {\n  const f = new Intl.DateTimeFormat('en-CA', {\n    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',\n    hour: '2-digit', minute: '2-digit', hour12: false,\n  });\n  // en-CA gives \"2026-08-06, 14:05\" → normalise to \"2026-08-06 14:05\"\n  return f.format(new Date()).replace(',', '').replace(/\\s+/, ' ');\n}\n\nfunction daysInMonth(y, m) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); }\n\n/** Whole days from one ISO date to another, or null if either is unparseable. */\nfunction daysBetween(fromIso, toIso) {\n  const a = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(String(fromIso || '').trim());\n  const b = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(String(toIso || '').trim());\n  if (!a || !b) return null;\n  const ms = Date.UTC(+b[1], +b[2] - 1, +b[3]) - Date.UTC(+a[1], +a[2] - 1, +a[3]);\n  return Math.round(ms / 86400000);\n}\n\nfunction isoAddDays(iso, days) {\n  const [y, m, d] = iso.split('-').map(Number);\n  const dt = new Date(Date.UTC(y, m - 1, d + days));\n  return dt.toISOString().slice(0, 10);\n}\n\n/** Calendar keyboard, weeks starting Saturday (Python Calendar(firstweekday=5)). */\nfunction calKeyboard(year, month) {\n  const tp = todayParts();\n  const rows = [\n    [\n      { text: '◀️', callback_data: `cal_prev_${year}_${String(month).padStart(2, '0')}` },\n      { text: `${S.cal_months[month]} ${year}`, callback_data: 'cal_ignore' },\n      { text: '▶️', callback_data: `cal_next_${year}_${String(month).padStart(2, '0')}` },\n    ],\n    S.cal_days.map(d => ({ text: d, callback_data: 'cal_ignore' })),\n  ];\n  const first = new Date(Date.UTC(year, month - 1, 1)).getUTCDay(); // Sun=0..Sat=6\n  const lead = (first - 6 + 7) % 7;                                // blanks before day 1\n  const total = daysInMonth(year, month);\n  let row = [];\n  for (let i = 0; i < lead; i++) row.push({ text: ' ', callback_data: 'cal_ignore' });\n  for (let day = 1; day <= total; day++) {\n    const isToday = year === tp.y && month === tp.m && day === tp.d;\n    row.push({\n      text: isToday ? `[${day}]` : String(day),\n      callback_data: `cal_day_${year}_${String(month).padStart(2, '0')}_${String(day).padStart(2, '0')}`,\n    });\n    if (row.length === 7) { rows.push(row); row = []; }\n  }\n  if (row.length) {\n    while (row.length < 7) row.push({ text: ' ', callback_data: 'cal_ignore' });\n    rows.push(row);\n  }\n  return { inline_keyboard: rows };\n}\n\n// ─── Value helpers (port of _num / _txt / _parse_num / validate_name) ─────────\n\n/**\n * Arabic-Indic and Persian digits, rewritten as ASCII.\n *\n * The keyboard these receptionists type on produces ٢٥, not 25, and everything\n * downstream — parseFloat, the ID comparison, the sheet — speaks ASCII only.\n * Observed live on 2026-08-09: an admin looked up \"٢٥\", guest 25 exists on row\n * 45, and the bot said \"لا يوجد حجز بهذا الـ ID\". The same typo class silently\n * re-prompts on any amount entered in Arabic digits.\n */\nfunction asciiDigits(s) {\n  return String(s === undefined || s === null ? '' : s).replace(\n    /[٠-٩۰-۹]/g,\n    ch => String(ch.charCodeAt(0) & 0x0f),\n  );\n}\n\nfunction parseNum(text) {\n  const v = parseFloat(asciiDigits(text).trim().replace(/,/g, ''));\n  return Number.isNaN(v) ? null : v;\n}\n\n/** Drop trailing .0 for whole numbers so the sheet stays clean. */\nfunction num(v) {\n  const f = Number(v);\n  return Number.isInteger(f) ? f : Math.round(f * 100) / 100;\n}\n\n/** Force text storage (preserve leading zeros in phones/IDs) via Sheets' ' marker. */\nfunction txt(v) { return v ? `'${v}` : v; }\n\nfunction validateName(text) {\n  const cleaned = String(text).trim();\n  if (cleaned.length < 3) return null;\n  if (!/^[A-Za-z؀-ۿ\\s]+$/.test(cleaned)) return null;\n  return cleaned;\n}\n\n/** Quote a tab name for A1 notation (tab names here contain Arabic + spaces). */\nfunction a1Tab(tab) { return `'${String(tab).replace(/'/g, \"''\")}'`; }\n\n// ─── Session store (n8n Data Table, via the \"Load Session\" node) ──────────────\n//\n// This used to be $getWorkflowStaticData('global'). That silently loses state on\n// every *manual* execution — n8n only persists static data for production runs —\n// so a button tap after /start always arrived with no session and fell straight\n// through to \"No Action Needed\". The row now comes from the `bookings_bot_sessions`\n// data table and is written back by the \"Save Session\" node.\n\nconst SESSION_TTL_MS = 12 * 60 * 60 * 1000;\n\n// ─── Parse the incoming Telegram update ───────────────────────────────────────\n\nconst cq = upd.callback_query || null;\nconst msg = cq ? cq.message : upd.message;\nconst from = cq ? cq.from : (upd.message ? upd.message.from : null);\n\nif (!msg || !from) return [];                       // ignore edits, joins, etc.\n\nconst chatId = String(msg.chat.id);\nconst text = cq ? null : String(upd.message.text || '');\nconst cbData = cq ? String(cq.data || '') : null;\nconst cbId = cq ? cq.id : null;\n\n// Telegram sends photos as an array of sizes, smallest first; the last entry is\n// the highest resolution. Only the RECEIPT states consume this.\nconst photoSizes = (!cq && upd.message && upd.message.photo) ? upd.message.photo : null;\nconst photoFileId =\n  photoSizes && photoSizes.length ? photoSizes[photoSizes.length - 1].file_id : null;\n\nif (!cq && !upd.message.text && !photoFileId) return [];   // stickers etc → ignore\n\nconst responsible =\n  [from.first_name, from.last_name].filter(Boolean).join(' ') ||\n  (from.username ? `@${from.username}` : String(from.id));\n\n/**\n * Escape legacy-Markdown metacharacters. Group posts go out with\n * parse_mode: 'Markdown', and Telegram rejects the whole message with a 400 if\n * the entities do not balance — a single underscore in a username (@ahmed_isa)\n * is enough to lose the notification.\n */\nfunction mdEscape(s) { return String(s).replace(/([_*[\\]`])/g, '\\\\$1'); }\n\n/**\n * Who performed this action, for the group notification — the display name on\n * its own. `responsible` already falls back to the @handle, then to the numeric\n * id, for accounts with no name set.\n */\nconst actor = mdEscape(responsible);\n\n// ─── Who is this, and what may they do? ───────────────────────────────────────\n\nconst fromId = String(from.id);\nconst fromUsername = String(from.username || '').toLowerCase();\n\nfunction inList(list) {\n  return list.includes(fromId) || (Boolean(fromUsername) && list.includes(fromUsername));\n}\n\nconst isAdmin = inList(ADMIN_USERS);\nconst isCashier = !isAdmin && inList(CASHIER_USERS);   // admin wins if on both\n\n// ─── Load the session for this chat ───────────────────────────────────────────\n// \"Load Session\" is a Data Table node filtered on chat_id. It has\n// alwaysOutputData enabled, so a chat with no row yields an empty item ({}).\n\nconst loadedRow = $('Load Session').first().json || {};\n\nfunction readSession(row) {\n  if (!row || !row.state) return null;                // no row, or session ended\n  if (Date.now() - Number(row.updated_at || 0) > SESSION_TTL_MS) return null;\n  let parsed = {};\n  try { parsed = JSON.parse(row.data || '{}'); } catch (e) { parsed = {}; }\n  return { state: row.state, data: parsed };\n}\n\nconst session = readSession(loadedRow);\nconst d = session ? session.data : {};\nconst state = session ? session.state : null;\n\n// \"Read Bookings For Edit\" only runs on the turns that need it, so on every\n// other turn the node is unexecuted and referencing it throws. That is the\n// point — the lookup costs a Sheets call only when it is actually used.\nfunction bookingRows() {\n  try {\n    return $('Read Bookings For Edit').all().map((i, idx) => ({\n      // n8n's Sheets read exposes the true sheet row as row_number. Prefer it:\n      // positional arithmetic breaks if the node ever drops a blank row, and\n      // editing the wrong row is the worst failure this flow has.\n      row: Number(i.json.row_number) || idx + 2,\n      json: i.json,\n    }));\n  } catch (e) {\n    return [];\n  }\n}\n\n/**\n * Apartments and rooms as the الإتاحة tab has them: one row per apartment+room\n * in columns A and B, which is exactly the registry this bot needs. Same gated\n * pattern as bookingRows — unexecuted on turns that draw no apartment keyboard.\n *\n * Falls back to the baked-in list rather than returning nothing: an empty grid\n * would leave a receptionist unable to finish a booking over a transient read.\n */\nfunction locationRegistry() {\n  let rows = [];\n  try {\n    rows = $('Read Locations').all().map(i => i.json);\n  } catch (e) {\n    return FALLBACK_REGISTRY;\n  }\n  const byApartment = [];\n  const seen = {};\n  for (const rowJson of rows) {\n    // The read starts at the tab's header row, so the columns normally arrive\n    // named. Fall back to position if that header is ever edited — the grid\n    // must not empty itself over a renamed column.\n    let apartment = rowJson['الشقة'];\n    let room = rowJson['الغرفة'];\n    if (apartment === undefined || room === undefined) {\n      const vals = Object.keys(rowJson).filter(k => k !== 'row_number').map(k => rowJson[k]);\n      apartment = vals[0];\n      room = vals[1];\n    }\n    apartment = String(apartment === undefined ? '' : apartment).trim();\n    room = String(room === undefined ? '' : room).trim();\n    if (!apartment || !room) continue;\n    if (seen[apartment] === undefined) {\n      seen[apartment] = byApartment.length;\n      byApartment.push({ apartment, rooms: [] });\n    }\n    const entry = byApartment[seen[apartment]];\n    if (entry.rooms.indexOf(room) === -1) entry.rooms.push(room);\n  }\n  return byApartment.length ? byApartment : FALLBACK_REGISTRY;\n}\n\n/**\n * Bookings that clash with a stay: same apartment, same room, overlapping dates.\n *\n * Cancelled rows are ignored, and a stay whose nights cell is a live formula is\n * open-ended, so it runs to infinity and clashes with anything after its start.\n * Half-open ranges — a departure and an arrival on the same day do not overlap,\n * because that is a normal same-day turnover.\n */\n/** A cell the sheet stores text-forced with a leading apostrophe, as read. */\nfunction plainId(v) {\n  return v === undefined || v === null ? '' : String(v).replace(/^'/, '').trim();\n}\n\nfunction findConflicts(apartment, room, arrival, nights, isOpen, skipRow) {\n  const startA = arrival;\n  const endA = isOpen ? null : isoAddDays(arrival, nights);\n  const hits = [];\n  for (const x of bookingRows()) {\n    const j = x.json;\n    if (skipRow && x.row === skipRow) continue;\n    if (String(j['اسم الشقة'] || '').trim() !== String(apartment).trim()) continue;\n    if (String(j['رقم الغرفة'] || '').trim() !== String(room).trim()) continue;\n    if (String(j['ملاحظات'] || '').indexOf(t('del_note')) !== -1) continue;\n    const startB = String(j['تاريخ البداية'] || '').trim();\n    if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(startB)) continue;\n    const rawNights = j['عدد الليالي'];\n    const openB = String(rawNights === undefined ? '' : rawNights).trim().startsWith('=');\n    const nB = parseNum(rawNights);\n    const endB = openB || nB === null ? null : isoAddDays(startB, Math.trunc(nB));\n    // [startA, endA) ∩ [startB, endB) ≠ ∅, with null standing in for +∞.\n    const startsBeforeOtherEnds = endB === null || startA < endB;\n    const otherStartsBeforeThisEnds = endA === null || startB < endA;\n    if (startsBeforeOtherEnds && otherStartsBeforeThisEnds) {\n      // The overlapping stretch itself, not just the other stay's dates. A\n      // receptionist deciding whether to put someone in an occupied room needs\n      // to know it is one night, not eleven — and the two stays' own dates make\n      // them work that out in their head while a guest waits.\n      const overlapFrom = startB > startA ? startB : startA;\n      let overlapTo = null;                       // null = both run open-ended\n      if (endA !== null && endB !== null) overlapTo = endA < endB ? endA : endB;\n      else if (endA !== null) overlapTo = endA;\n      else if (endB !== null) overlapTo = endB;\n      hits.push({\n        name: j['اسم المقيم'] || t('empty'),\n        privateId: plainId(j['ID']),\n        phone: plainId(j['رقم الهاتف']),\n        arrival: startB,\n        departure: endB === null ? t('infinity_label') : endB,\n        overlapFrom,\n        overlapTo: overlapTo === null ? t('infinity_label') : overlapTo,\n        overlapNights: overlapTo === null ? null : daysBetween(overlapFrom, overlapTo),\n      });\n    }\n  }\n  // Soonest first: the stay about to end is the one most likely to make the\n  // clash acceptable.\n  hits.sort((a, b) => (a.arrival < b.arrival ? -1 : a.arrival > b.arrival ? 1 : 0));\n  return hits;\n}\n\n// ─── Output builder ───────────────────────────────────────────────────────────\n\nconst out = {\n  chatId,\n  callbackQueryId: cbId,\n  hasCallback: Boolean(cbId),\n  hasReply: false,\n  reply: null,\n  hasSave: false,\n  save: null,\n  // Persisted by \"Save Session\". Default to whatever we loaded, so a turn that\n  // changes nothing (an ignored tap) leaves the session exactly as it was.\n  sessionState: session ? session.state : '',\n  sessionData: session ? JSON.stringify(session.data) : '{}',\n};\n\nfunction reply(text_, markup, markdown) {\n  out.hasReply = true;\n  out.reply = {\n    chat_id: chatId,\n    text: text_,\n    ...(markdown ? { parse_mode: 'Markdown' } : {}),\n    ...(markup ? { reply_markup: markup } : {}),\n  };\n}\n\nfunction setState(state, data) {\n  out.sessionState = state;\n  out.sessionData = JSON.stringify(data || {});\n}\n\n/** An ended session is stored as an empty state, not a deleted row — one upsert\n *  node then covers both cases and there is no delete branch to keep in sync. */\nfunction endSession() {\n  out.sessionState = '';\n  out.sessionData = '{}';\n}\n\n// ─── Access gate ──────────────────────────────────────────────────────────────\n// Nobody outside the two lists gets a conversation. Commands get one plain\n// refusal so a legitimate new colleague knows to ask for access; anything else\n// is dropped without a reply and without touching the session table, so the bot\n// cannot be made to chatter at a stranger who keeps typing.\n\nif (!isAdmin && !isCashier) {\n  if ((text || '').startsWith('/')) {\n    endSession();\n    reply(t('not_authorized'));\n    return [{ json: out }];\n  }\n  return [];\n}\n\n// ─── Derived / summary (port of _derived + _summary_kwargs) ───────────────────\n\nfunction derived(dd) {\n  const nightsDisp = dd.infinity ? t('infinity_label') : String(dd.nights);\n  const departure = dd.infinity ? t('infinity_label') : isoAddDays(dd.arrival_date, dd.nights);\n  // An open-ended stay has no total yet — it is a rate, and the bill is however\n  // many nights it turns out to be. Showing a scalar here would be inventing a\n  // checkout date nobody has agreed to, so the summary shows the rate and says\n  // the total is still running.\n  if (dd.infinity) {\n    return {\n      remaining: t('running_total'),\n      nights_disp: nightsDisp,\n      departure,\n      total_disp: t('rate_per_night', { rate: num(dd.nightly_rate) }),\n    };\n  }\n  return {\n    remaining: num(dd.total - dd.paid),\n    nights_disp: nightsDisp,\n    departure,\n    total_disp: num(dd.total),\n  };\n}\n\n// Every message built from these vars is sent with parse_mode: 'Markdown', so\n// each free-text field the user typed (or that came back off the sheet) has to be\n// escaped. An unbalanced _ or * makes Telegram reject the whole message with a\n// 400: the row is still written, but the confirmation or the group post silently\n// never arrives. Fixed values — apartment names, payment methods, dates, numbers\n// — come from our own lists and are left alone.\nfunction summaryVars(dd, dv) {\n  return {\n    booking_id: mdEscape(dd.booking_id || t('empty')),\n    private_id: mdEscape(dd.private_id), name: mdEscape(dd.name), btype: dd.btype,\n    phone: mdEscape(dd.phone), apartment: dd.apartment, room: dd.room,\n    nights: dv.nights_disp, arrival: dd.arrival_date, departure: dv.departure,\n    total: dv.total_disp, paid: num(dd.paid), remaining: dv.remaining,\n    payment: dd.payment, notes: mdEscape(dd.notes || t('empty')),\n    receipt: dd.receipt ? t('receipt_attached') : t('empty'),\n    actor,\n  };\n}\n\nfunction expVars(dd) {\n  return {\n    exp_id: mdEscape(dd.exp_id || t('empty')),\n    item: mdEscape(dd.exp_item), amount: num(dd.exp_amount),\n    apartment: dd.exp_apartment || t('empty'), payment: dd.exp_payment,\n    notes: mdEscape(dd.exp_notes || t('empty')), responsible: mdEscape(dd.responsible),\n    date: dd.exp_date,\n    receipt: dd.exp_receipt ? t('receipt_attached') : t('empty'),\n    // The sheet's اسم المسئول column keeps the plain name (`responsible`); only\n    // the group post carries the @handle, so the two are not interchangeable.\n    actor,\n  };\n}\n\n// ─── Step transitions shared by several states ────────────────────────────────\n\nfunction askPhone() { reply(t('ask_phone')); setState('PHONE', d); }\nfunction askArrival() {\n  const tp = todayParts();\n  d.cal_year = tp.y; d.cal_month = tp.m;\n  reply(t('ask_arrival'), calKeyboard(tp.y, tp.m));\n  setState('ARRIVAL', d);\n}\nfunction showConfirm() {\n  const dv = derived(d);\n  // The one turn where the room is known along with the dates, so it is the only\n  // place a clash can be caught before the row is written.\n  const clashes = findConflicts(d.apartment, d.room, d.arrival_date, d.nights, d.infinity);\n  d.conflict = clashes.length > 0;\n  let body = t('confirm_summary', summaryVars(d, dv));\n  if (d.conflict) {\n    body += '\\n\\n' + t('conflict_warning', {\n      room: `${mdEscape(d.apartment)} — ${mdEscape(String(d.room))}`,\n      count: clashes.length,\n      list: clashes\n        .map(c => t('conflict_line', {\n          name: mdEscape(c.name),\n          id_part: c.privateId ? t('conflict_id_part', { private_id: mdEscape(c.privateId) }) : '',\n          arrival: c.arrival,\n          departure: c.departure,\n          overlap_from: c.overlapFrom,\n          overlap_to: c.overlapTo,\n          nights_part: c.overlapNights ? t('conflict_nights_part', { nights: c.overlapNights }) : '',\n        }))\n        .join('\\n'),\n    });\n  }\n  reply(body, {\n    inline_keyboard: [\n      // A conflict does not block the save — a receptionist standing in front of\n      // a guest knows things the sheet does not. It does make them say so.\n      [{ text: d.conflict ? t('btn_confirm_anyway') : t('btn_confirm'), callback_data: 'save' }],\n      [{ text: t('btn_cancel'), callback_data: 'cancel' }],\n    ],\n  }, true);\n  setState('CONFIRM', d);\n}\nfunction showExpConfirm() {\n  d.exp_date = nowStamp();\n  d.responsible = responsible;\n  reply(t('exp_confirm_summary', expVars(d)), {\n    inline_keyboard: [\n      [{ text: t('btn_confirm'), callback_data: 'esave' }],\n      [{ text: t('btn_cancel'), callback_data: 'ecancel' }],\n    ],\n  }, true);\n  setState('EXP_CONFIRM', d);\n}\n// ─── Edit flow helpers ────────────────────────────────────────────────────────\n\nfunction startEdit() { reply(t('edit_ask_id'), null); setState('EDIT_FIND', {}); }\n\n/** Menu of editable fields, plus finish and cancel-the-booking. */\nfunction showEditMenu(dd) {\n  const rows = EDIT_FIELDS.map(f => [{ text: t(f.labelKey), callback_data: `ef_${f.key}` }]);\n  rows.push([{ text: t('btn_edit_done'), callback_data: 'ef_done' }]);\n  rows.push([{ text: t('btn_delete_booking'), callback_data: 'ef_delete' }]);\n  reply(t('edit_menu'), { inline_keyboard: rows });\n  setState('EDIT_MENU', dd);\n}\n\n/**\n * What is paid on this booking right now: an amount already added earlier in\n * this same edit session if there is one, otherwise the sheet's value. Without\n * the editNew check, adding twice in one session would both times add to the\n * original figure and silently lose the first payment.\n */\nfunction paidSoFar(dd) {\n  const col = 'اجمالي ما تم دفعه';\n  if (dd.editNew && dd.editNew[col] !== undefined) return Number(dd.editNew[col]) || 0;\n  return parseNum(dd.editOrig ? dd.editOrig[col] : 0) || 0;\n}\n\n/**\n * True when a save was already fired for this session moments ago.\n *\n * The session is deliberately kept until the write succeeds, so a failed write\n * leaves the button usable — which is also what lets an impatient double tap\n * write the row twice. Swallow the second tap for a minute; after that the user\n * is retrying a real failure and is let through.\n */\nconst SAVE_LOCK_MS = 60 * 1000;\n\nfunction saveLocked(dd) {\n  return Boolean(dd.savingAt) && (Date.now() - Number(dd.savingAt)) < SAVE_LOCK_MS;\n}\n\n/** Record a change, keeping the original value for the group diff. */\nfunction editSet(dd, col, value) {\n  if (!dd.editNew) dd.editNew = {};\n  dd.editNew[col] = value;\n}\n\n/** Lock the edit session onto one sheet row, then continue with the right flow. */\nfunction applyPick(hit) {\n  d.editRow = hit.row;\n  d.editOrig = hit.json;\n  d.editNew = {};\n  d.editName = hit.json['اسم المقيم'] || '';\n  d.editPrivateId = hit.json['ID'] || '';\n  if (d.paidOnly) {\n    // Cashier flow: the booking is found, so go straight to the amount. There is\n    // no field menu for them — payment is the only thing they may touch.\n    reply(t('paid_ask_amount', { current: num(paidSoFar(d)) }));\n    setState('EDIT_PAID', d);\n    return;\n  }\n  showEditMenu(d);\n}\n\n/**\n * Where a completed edit step goes next.\n *\n *  - cashier: linear, saves as soon as the payment (and its receipt) is in;\n *  - admin who just recorded a payment: asked whether the guest has left, since\n *    settling up is when a checkout actually gets noticed. That question is\n *    asked once per session (`leaveAsked`) and ends in a summary + approval\n *    rather than the field menu;\n *  - anything else: back to the field menu.\n */\nfunction afterEditStep(dd) {\n  if (dd.paidOnly) { commitEdit(dd); return; }\n  if (dd.paidTouched && !dd.leaveAsked) {\n    reply(t('edit_ask_left'), {\n      inline_keyboard: [[\n        { text: t('btn_yes'), callback_data: 'xleft_yes' },\n        { text: t('btn_no'), callback_data: 'xleft_no' },\n      ]],\n    });\n    setState('EDIT_LEFT', dd);\n    return;\n  }\n  showEditMenu(dd);\n}\n\n/** Final review of everything this edit session changed, before it is written. */\nfunction showEditConfirm(dd) {\n  reply(t('edit_confirm_summary', { changes: changeLines(dd) }), {\n    inline_keyboard: [\n      [{ text: t('btn_confirm'), callback_data: 'xedone' }],\n      [{ text: t('btn_cancel'), callback_data: 'xecancel' }],\n    ],\n  }, true);\n  setState('EDIT_CONFIRM', dd);\n}\n\nfunction bookingLabel(rowJson) {\n  return [rowJson['اسم المقيم'], rowJson['اسم الشقة'], rowJson['تاريخ البداية']]\n    .filter(Boolean).join(' — ');\n}\n\n/**\n * A cell as it should appear in a Markdown message: an open-ended stay is stored\n * as a live formula, so show the word instead; everything else is sheet text and\n * has to be escaped before it reaches Telegram.\n */\nfunction showValue(v) {\n  if (v === undefined || v === '') return t('empty');\n  return String(v).trim().startsWith('=') ? t('infinity_label') : mdEscape(v);\n}\n\n/**\n * '2000 ← 4500' lines for every column that actually changed, plus the resulting\n * departure date when a checkout was recorded. تاريخ المغادرة is a sheet formula\n * (J + I) so it is never written — it is shown here because it is what the person\n * approving actually wants to see.\n */\n/**\n * Resolve an `ar_<i>_<room>` tap against the registry that was offered.\n *\n * `dd.reg` is what the keyboard was drawn from, so the index means the same\n * thing at tap time as it did at draw time. The FALLBACK_REGISTRY branch only\n * catches conversations that were mid-flow when this code deployed and so carry\n * no `reg`; without it those taps would silently do nothing.\n */\nfunction pickAptRoom(dd, cb) {\n  const m = /^ar_(\\d+)_(.+)$/.exec(cb || '');\n  if (!m) return null;\n  const reg = (dd.reg && dd.reg.length) ? dd.reg : FALLBACK_REGISTRY;\n  const entry = reg[Number(m[1])];\n  if (!entry) return null;\n  const room = String(m[2]);\n  if (entry.rooms.indexOf(room) === -1) return null;\n  return { apartment: entry.apartment, room };\n}\n\nfunction changeLines(dd) {\n  const out_ = [];\n  for (const col of Object.keys(dd.editNew || {})) {\n    out_.push(`${col}: ${showValue(dd.editOrig && dd.editOrig[col])} ← ${showValue(dd.editNew[col])}`);\n  }\n  if (dd.departure) out_.push(t('edit_departure_line', { departure: dd.departure }));\n  return out_.join('\\n');\n}\n\n/**\n * The changed columns that are not the payment itself.\n *\n * The paid and method columns are already spelled out by the payment message,\n * so repeating them underneath as \"0 ← 40\" would say the same thing twice in\n * two different vocabularies.\n */\nfunction otherChangeLines(dd) {\n  const skip = ['اجمالي ما تم دفعه', 'طريقة الدفع'];\n  const out_ = [];\n  for (const col of Object.keys(dd.editNew || {})) {\n    if (skip.indexOf(col) !== -1) continue;\n    out_.push(`${col}: ${showValue(dd.editOrig && dd.editOrig[col])} ← ${showValue(dd.editNew[col])}`);\n  }\n  if (dd.departure) out_.push(t('edit_departure_line', { departure: dd.departure }));\n  return out_.join('\\n');\n}\n\nconst UNDO_WINDOW_MS = 10 * 60 * 1000;\n\n/** 'المدفوع: 2100 ← 1200' — the reverse of the diff that produced this record. */\nfunction undoLines(rec) {\n  return Object.keys(rec.before || {})\n    .map(col => `${col}: ${showValue((rec.after || {})[col])} ← ${showValue(rec.before[col])}`)\n    .join('\\n');\n}\n\n/**\n * The pre-image of an edit: the sheet's value for every column about to change.\n *\n * A missing column is restored as an empty string rather than being skipped —\n * \"this cell was blank before\" is a value, and skipping it would leave the new\n * value in place on undo.\n *\n * Deliberately not produced for booking/expense appends. Blanking an appended\n * row would leave a gap, and the next write picks its row with `filled + 2`, so\n * the row after it would be overwritten. Cancelling a booking is the right tool\n * there, and it has its own flow.\n */\nfunction undoRecord(dd) {\n  const before = {};\n  for (const col of Object.keys(dd.editNew || {})) {\n    const v = dd.editOrig ? dd.editOrig[col] : undefined;\n    before[col] = v === undefined ? '' : v;\n  }\n  return {\n    row: dd.editRow,\n    at: Date.now(),\n    name: dd.editName || '',\n    privateId: dd.editPrivateId || '',\n    before,\n    after: dd.editNew || {},\n  };\n}\n\n/**\n * Hand the changed columns to the sheet writer. Shared by the admin field menu\n * (\"تم\") and by the cashier's add-a-payment flow, which differ only in what the\n * group and the confirmation say.\n */\nfunction commitEdit(dd) {\n  const paidCol = 'اجمالي ما تم دفعه';\n  if (saveLocked(dd)) return;            // a second tap on the same save\n\n  // The amount and the method are set in two separate turns — EDIT_PAID then\n  // EDIT_PAYMENT — and a session that loses the first one writes the method on\n  // its own. Reported live on 2026-08-12: \"changed amount paid and type, only\n  // the type was saved\". The method cannot be recorded without the money it\n  // describes, so if the amount went missing, put it back from what the guest\n  // has actually paid.\n  if (dd.paidAdded && dd.editNew && dd.editNew[paidCol] === undefined) {\n    const orig = parseNum(dd.editOrig ? dd.editOrig[paidCol] : 0) || 0;\n    dd.editNew[paidCol] = num(orig + Number(dd.paidAdded));\n  }\n  // And the reverse: a method with no payment behind it is just a relabel, so\n  // it must not carry a payment act into the database.\n  if (!dd.editNew || dd.editNew[paidCol] === undefined) dd.paidAdded = 0;\n\n  dd.savingAt = Date.now();\n  out.sessionData = JSON.stringify(dd);  // the lock must outlive this turn\n  out.hasSave = true;\n  out.save = {\n    flow: 'edit',\n    row: dd.editRow,                 // from the lookup, never computed\n    // The pre-image of exactly the columns being changed, so /undo can put them\n    // back. Persisted by \"Clear Session\" once the write has actually landed.\n    undo: undoRecord(dd),\n    fields: dd.editNew,              // only the columns that actually changed\n    // What was paid THIS TIME, and how — not the running total the sheet gets.\n    // The sheet has one paid cell and one method cell per row, so a guest who\n    // pays twice in two methods loses the first one there; recording the act\n    // separately is what lets the database keep both without anybody inserting\n    // a row. `ref` is the idempotency key, and reuses the save lock's timestamp\n    // so a double tap converges instead of paying twice.\n    payment: dd.paidAdded\n      ? {\n        added: dd.paidAdded,\n        method: dd.editNew['طريقة الدفع'] ||\n          (dd.editOrig ? dd.editOrig['طريقة الدفع'] : '') || '',\n        ref: `${dd.editRow}:${dd.savingAt}`,\n      }\n      : null,\n    receiptFileId: dd.editReceipt || '',\n    groupChatId: CFG.GROUP_CHAT_ID,\n    // A payment leads the message whoever recorded it. The step is called\n    // \"إضافة دفعة\" now, so the group should read as one — \"0 ← 40\" describes a\n    // cell changing, not money arriving, and the group is watching for money.\n    // Anything else the admin changed in the same session follows underneath.\n    groupText: (dd.paidOnly || dd.paidAdded)\n      ? t('paid_group_msg', {\n        name: mdEscape(dd.editName || t('empty')),\n        private_id: mdEscape(dd.editPrivateId || t('empty')),\n        apartment: mdEscape((dd.editOrig && dd.editOrig['اسم الشقة']) || t('empty')),\n        added: num(dd.paidAdded || 0),\n        paid: dd.editNew[paidCol],\n        payment: dd.editNew['طريقة الدفع'] || t('empty'),\n        receipt: dd.editReceipt ? t('receipt_attached') : t('empty'),\n        actor,\n      }) + (otherChangeLines(dd)\n        ? '\\n\\n' + t('payment_other_changes', { changes: otherChangeLines(dd) })\n        : '')\n      : t('edit_group_msg', {\n        name: mdEscape(dd.editName), private_id: mdEscape(dd.editPrivateId),\n        changes: changeLines(dd), actor,\n      }),\n    savedText: (dd.paidOnly || dd.paidAdded) ? t('paid_saved') : t('edit_saved'),\n    savedNoGroupText: (dd.paidOnly || dd.paidAdded)\n      ? t('paid_saved_no_group') : t('edit_saved_no_group'),\n    errorText: t('error'),\n  };\n}\n\nfunction startBooking() { reply(t('ask_booking_id'), skipKb('bid_skip')); setState('BOOKING_ID', {}); }\nfunction startExpense() { reply(t('exp_ask_id'), skipKb('eid_skip')); setState('EXP_ID', {}); }\n\n/**\n * Cashier's add-a-payment entry. It deliberately reuses the EDIT_FIND state:\n * the \"Needs Bookings?\" gate in the workflow keys the Sheets lookup off that\n * exact state name, so a separate state would need a graph change to be able to\n * find anything. `paidOnly` on the session data is what makes it linear.\n */\nfunction startPaid() { reply(t('paid_ask_id')); setState('EDIT_FIND', { paidOnly: true }); }\n\n// ─── Entry points: /start and /cancel ─────────────────────────────────────────\n\nif (text === '/start' || (text || '').startsWith('/start@')) {\n  endSession();\n  if (isAdmin) {\n    reply(t('choose_action'), {\n      inline_keyboard: [\n        [{ text: t('btn_add_booking'), callback_data: 'choice_booking' }],\n        [{ text: t('btn_add_expense'), callback_data: 'choice_expense' }],\n        [{ text: t('btn_edit_booking'), callback_data: 'choice_edit' }],\n      ],\n    });\n  } else {\n    // Cashier: expenses, or a payment against a booking. No booking entry, no\n    // field menu — those buttons are never rendered, and CHOICE refuses their\n    // callback_data anyway in case an old keyboard is still on screen.\n    reply(t('choose_action'), {\n      inline_keyboard: [\n        [{ text: t('btn_add_expense'), callback_data: 'choice_expense' }],\n        [{ text: t('btn_add_paid'), callback_data: 'choice_paid' }],\n      ],\n    });\n  }\n  setState('CHOICE', {});\n  return [{ json: out }];\n}\n\nif (text === '/cancel' || (text || '').startsWith('/cancel@')) {\n  endSession();\n  reply(t('cancelled'));\n  return [{ json: out }];\n}\n\n// ─── /undo ────────────────────────────────────────────────────────────────────\n// \"Clear Session\" parks the last edit's pre-image on the (now stateless) session\n// row, so the record survives the write that produced it. Undo restores those\n// columns and nothing else.\n\nif (text === '/undo' || (text || '').startsWith('/undo@')) {\n  let parked = {};\n  try { parked = JSON.parse(loadedRow.data || '{}'); } catch (e) { parked = {}; }\n  const rec = parked.lastWrite;\n  if (!rec || !rec.row) { reply(t(parked.lastAppend ? 'undo_not_supported' : 'undo_none'), null, true); }\n  else if (Date.now() - Number(rec.at || 0) > UNDO_WINDOW_MS) { reply(t('undo_expired')); }\n  else {\n    out.sessionState = 'UNDO_CONFIRM';\n    out.sessionData = JSON.stringify({ undo: rec });\n    reply(t('undo_confirm', { changes: undoLines(rec) }), {\n      inline_keyboard: [\n        [{ text: t('btn_confirm'), callback_data: 'undo_yes' }],\n        [{ text: t('btn_cancel'), callback_data: 'undo_no' }],\n      ],\n    }, true);\n  }\n  return [{ json: out }];\n}\n\n// No active conversation and not a command → stay silent (matches PTB).\nif (!state) return [{ json: out }];\n\n// ─── State machine ────────────────────────────────────────────────────────────\n\nswitch (state) {\n\n  case 'UNDO_CONFIRM': {\n    if (cbData === 'undo_no') { endSession(); reply(t('cancelled')); break; }\n    if (cbData !== 'undo_yes') break;\n    const rec = d.undo || {};\n    if (!rec.row) { endSession(); reply(t('undo_none')); break; }\n    if (Date.now() - Number(rec.at || 0) > UNDO_WINDOW_MS) {\n      endSession(); reply(t('undo_expired')); break;\n    }\n    if (saveLocked(d)) break;\n    d.savingAt = Date.now();\n    setState('UNDO_CONFIRM', d);\n    out.hasSave = true;\n    out.save = {\n      flow: 'edit',                    // same writer: row + named columns\n      row: rec.row,\n      fields: rec.before,              // put the old values back\n      // No `undo` record: undoing an undo would ping-pong, and the sheet history\n      // is the right tool past this point.\n      receiptFileId: '',\n      groupChatId: CFG.GROUP_CHAT_ID,\n      groupText: t('undo_group_msg', {\n        name: mdEscape(rec.name || t('empty')),\n        private_id: mdEscape(rec.privateId || t('empty')),\n        changes: undoLines(rec),\n        actor,\n      }),\n      savedText: t('undo_saved'),\n      savedNoGroupText: t('undo_saved_no_group'),\n      errorText: t('error'),\n    };\n    break;\n  }\n\n  // ── Router ────────────────────────────────────────────────────────────────\n  case 'CHOICE':\n    if (cbData === 'choice_expense') startExpense();\n    else if (cbData === 'choice_paid' && isCashier) startPaid();\n    else if (cbData === 'choice_booking' && isAdmin) startBooking();\n    else if (cbData === 'choice_edit' && isAdmin) startEdit();\n    break;\n\n  // ── Expense flow ──────────────────────────────────────────────────────────\n  case 'EXP_ID':\n    d.exp_id = cbData === 'eid_skip' ? '' : (text || '').trim();\n    reply(t('exp_ask_item'));\n    setState('EXP_ITEM', d);\n    break;\n\n  case 'EXP_ITEM':\n    if (cq) break;\n    d.exp_item = text.trim();\n    reply(t('exp_ask_amount'));\n    setState('EXP_AMOUNT', d);\n    break;\n\n  case 'EXP_AMOUNT': {\n    if (cq) break;\n    const v = parseNum(text);\n    if (v === null || v < 0) { reply(t('num_error')); break; }\n    d.exp_amount = v;\n    // Same session-scoped list trick as the booking grid: what was offered is\n    // stored, and the callback indexes into that rather than into a live read.\n    d.aptList = locationRegistry().map(e => e.apartment);\n    const kb = grid(d.aptList, 'eapt_');\n    kb.inline_keyboard.push([{ text: t('btn_apt_none'), callback_data: 'eapt_none' }]);\n    reply(t('exp_ask_apartment'), kb);\n    setState('EXP_APT', d);\n    break;\n  }\n\n  case 'EXP_APT': {\n    if (!cbData || !cbData.startsWith('eapt_')) break;\n    const suffix = cbData.slice('eapt_'.length);\n    if (suffix === 'none') d.exp_apartment = '';\n    else {\n      // A conversation that started before this code deployed has no aptList;\n      // resolving against the fallback beats silently filing the expense with\n      // no apartment at all.\n      const list = (d.aptList && d.aptList.length)\n        ? d.aptList : FALLBACK_REGISTRY.map(e => e.apartment);\n      const chosen = list[Number(suffix)];\n      if (!chosen) break;\n      d.exp_apartment = chosen;\n    }\n    reply(t('exp_ask_payment'), keyGrid(EXP_PAYMENTS.map(k => payByKey(k)).filter(Boolean), 'epay_'));\n    setState('EXP_PAY', d);\n    break;\n  }\n\n  case 'EXP_PAY':\n    if (!cbData || !cbData.startsWith('epay_')) break;\n    const expKey = /^\\d+$/.test(cbData.slice('epay_'.length))\n      ? EXP_PAYMENTS[Number(cbData.slice('epay_'.length))]   // pre-key keyboards\n      : payKeyOf(cbData.slice('epay_'.length));\n    d.exp_payment = payLabel(expKey);\n    if (!d.exp_payment) break;\n    if (RECEIPT_PAYMENT_KEYS.indexOf(expKey) !== -1) {\n      reply(t('ask_receipt'), skipKb('ereceipt_skip'));\n      setState('EXP_RECEIPT', d);\n      break;\n    }\n    reply(t('exp_ask_notes'), skipKb('enotes_skip'));\n    setState('EXP_NOTES', d);\n    break;\n\n  case 'EXP_RECEIPT':\n    if (cbData === 'ereceipt_skip') d.exp_receipt = '';\n    else if (photoFileId) d.exp_receipt = photoFileId;\n    else { reply(t('receipt_error'), skipKb('ereceipt_skip')); break; }\n    reply(t('exp_ask_notes'), skipKb('enotes_skip'));\n    setState('EXP_NOTES', d);\n    break;\n\n  case 'EXP_NOTES':\n    d.exp_notes = cbData === 'enotes_skip' ? '' : (text || '').trim();\n    showExpConfirm();\n    break;\n\n  case 'EXP_CONFIRM': {\n    if (cbData === 'ecancel') { endSession(); reply(t('cancelled')); break; }\n    if (cbData !== 'esave') break;\n    if (saveLocked(d)) break;\n    d.savingAt = Date.now();\n    setState('EXP_CONFIRM', d);          // keep the state, persist the lock\n    const now = nowStamp();\n    out.hasSave = true;\n    out.save = {\n      flow: 'expense',\n      tabA1: a1Tab(CFG.EXPENSE_TAB),\n      keyRange: `${a1Tab(CFG.EXPENSE_TAB)}!B:B`,   // البند — manual key column, no formulas\n      // Keyed by the sheet's real header text — the Google Sheets node maps by\n      // column NAME, not letter. Verified against row 1 on 2026-08-06; note the\n      // responsible column is \"اسم المسئول\", not \"المسئول\".\n      fields: {\n        'تاريخ': now,\n        'البند': d.exp_item,\n        'المبلغ': num(d.exp_amount),\n        'الشقة': d.exp_apartment,\n        'ملاحظات': d.exp_notes,\n        'طريقة الدفع': d.exp_payment,\n        'اسم المسئول': d.responsible || responsible,\n        'الرقم': txt(d.exp_id || ''),\n      },\n      // Legacy positional form, still consumed by the HTTP write path.\n      ranges: [{\n        range: 'A{r}:H{r}',\n        values: [[\n          now, d.exp_item, num(d.exp_amount), d.exp_apartment,\n          d.exp_notes, d.exp_payment, d.responsible || responsible, txt(d.exp_id || ''),\n        ]],\n      }],\n      receiptFileId: d.exp_receipt || '',   // '' → group gets a plain text message\n      groupChatId: CFG.EXPENSE_GROUP_CHAT_ID,\n      groupText: t('exp_group_msg', expVars(d)),\n      savedText: t('exp_saved'),\n      savedNoGroupText: t('exp_saved_no_group'),\n      errorText: t('error'),\n    };\n    break;\n  }\n\n  // ── Booking flow ──────────────────────────────────────────────────────────\n  case 'BOOKING_ID':\n    d.booking_id = cbData === 'bid_skip' ? '' : (text || '').trim();\n    reply(t('ask_private_id'));\n    setState('PRIVATE_ID', d);\n    break;\n\n  case 'PRIVATE_ID':\n    if (cq) break;\n    d.private_id = text.trim();\n    reply(t('ask_name'));\n    setState('NAME', d);\n    break;\n\n  case 'NAME': {\n    if (cq) break;\n    const nm = validateName(text);\n    if (nm === null) { reply(t('name_error')); break; }\n    d.name = nm;\n    if (d.booking_id) { d.btype = 'بوكينج'; askPhone(); }\n    else { reply(t('ask_btype'), keyGrid(BTYPE_OPTS, 'bt_')); setState('BTYPE', d); }\n    break;\n  }\n\n  case 'BTYPE': {\n    if (!cbData || !cbData.startsWith('bt_')) break;\n    const raw = cbData.slice('bt_'.length);\n    const bt = BTYPE_OPTS.find(o => o.key === raw) ||\n      (/^\\d+$/.test(raw) ? BTYPE_OPTS[Number(raw)] : null);   // pre-key keyboards\n    if (!bt) break;\n    d.btype = bt.label;\n    askPhone();\n    break;\n  }\n\n  case 'PHONE':\n    if (cq) break;\n    d.phone = text.trim();\n    d.reg = locationRegistry();\n    reply(t('ask_apt_room'), aptRoomKb(d.reg));\n    setState('APT_ROOM', d);\n    break;\n\n  case 'APT_ROOM': {\n    if (cbData === 'ar_hdr') break;                       // header tap → no-op\n    const picked = pickAptRoom(d, cbData);\n    if (!picked) break;\n    d.apartment = picked.apartment;\n    d.room = picked.room;\n    reply(t('ask_nights'), numKeyboard(1, 30, 'nights_',\n      [{ text: t('btn_infinity'), callback_data: 'nights_inf' }], 5));\n    setState('NIGHTS', d);\n    break;\n  }\n\n  case 'NIGHTS': {\n    if (cbData && cbData.startsWith('nights_')) {\n      const suffix = cbData.slice('nights_'.length);\n      if (suffix === 'inf') { d.infinity = true; d.nights = null; }\n      else { d.infinity = false; d.nights = Number(suffix); }\n      askArrival();\n      break;\n    }\n    if (cq) break;\n    const v = parseNum(text);\n    if (v === null || v <= 0) { reply(t('num_error')); break; }\n    d.infinity = false; d.nights = Math.trunc(v);\n    askArrival();\n    break;\n  }\n\n  case 'ARRIVAL': {\n    if (!cbData) break;\n    if (cbData === 'cal_ignore') break;                   // answer callback only\n\n    let m = /^cal_(prev|next)_(\\d+)_(\\d+)$/.exec(cbData);\n    if (m) {\n      const dir = m[1], y = Number(m[2]), mo = Number(m[3]);\n      let ny = y, nm = mo;\n      if (dir === 'prev') { nm = mo - 1; if (nm === 0) { nm = 12; ny = y - 1; } }\n      else { nm = mo + 1; if (nm === 13) { nm = 1; ny = y + 1; } }\n      if (ny < MIN_YEAR || (ny === MIN_YEAR && nm < MIN_MONTH)) break;\n      d.cal_year = ny; d.cal_month = nm;\n      reply(t('ask_arrival'), calKeyboard(ny, nm));\n      setState('ARRIVAL', d);\n      break;\n    }\n\n    m = /^cal_day_(\\d+)_(\\d+)_(\\d+)$/.exec(cbData);\n    if (m) {\n      d.arrival_date = `${m[1]}-${m[2]}-${m[3]}`;\n      // An open stay is priced per night; a fixed one is priced in full.\n      if (d.infinity) { reply(t('ask_rate')); setState('RATE', d); }\n      else { reply(t('ask_total')); setState('TOTAL', d); }\n    }\n    break;\n  }\n\n  case 'RATE': {\n    if (cq) break;\n    const v = parseNum(text);\n    if (v === null || v <= 0) { reply(t('num_error')); break; }\n    d.nightly_rate = v;\n    // No total: the sheet computes it from the rate and the night count, both\n    // of which keep moving while the guest is still in the room.\n    d.total = null;\n    reply(t('ask_payment'), keyGrid(PAYMENTS, 'pay_'));\n    setState('PAYMENT', d);\n    break;\n  }\n\n  case 'TOTAL': {\n    if (cq) break;\n    const v = parseNum(text);\n    if (v === null || v < 0) { reply(t('num_error')); break; }\n    d.total = v;\n    reply(t('ask_payment'), keyGrid(PAYMENTS, 'pay_'));\n    setState('PAYMENT', d);\n    break;\n  }\n\n  case 'PAYMENT': {\n    if (!cbData || !cbData.startsWith('pay_')) break;\n    const raw = cbData.slice('pay_'.length);\n    if (!payByKey(raw)) break;\n    d.paymentKey = payKeyOf(raw);\n    d.payment = payLabel(raw);\n    if (d.paymentKey === UNPAID_KEY) {                     // nothing paid → skip PAID\n      d.paid = 0;\n      reply(t('ask_notes'), skipKb('notes_skip'));\n      setState('NOTES', d);\n    } else {\n      reply(t('ask_paid'));\n      setState('PAID', d);\n    }\n    break;\n  }\n\n  // The receipt is asked *after* the paid amount, so the user enters the figure\n  // first and then attaches the transfer proving it.\n  case 'RECEIPT':\n    if (cbData === 'receipt_skip') d.receipt = '';\n    else if (photoFileId) d.receipt = photoFileId;\n    else { reply(t('receipt_error'), skipKb('receipt_skip')); break; }\n    reply(t('ask_notes'), skipKb('notes_skip'));\n    setState('NOTES', d);\n    break;\n\n  case 'PAID': {\n    if (cq) break;\n    const v = parseNum(text);\n    if (v === null || v < 0) { reply(t('num_error')); break; }\n    d.paid = v;\n    if (RECEIPT_PAYMENT_KEYS.indexOf(d.paymentKey) !== -1) {  // transfer → offer receipt\n      reply(t('ask_receipt'), skipKb('receipt_skip'));\n      setState('RECEIPT', d);\n      break;\n    }\n    reply(t('ask_notes'), skipKb('notes_skip'));\n    setState('NOTES', d);\n    break;\n  }\n\n  case 'NOTES':\n    d.notes = cbData === 'notes_skip' ? '' : (text || '').trim();\n    showConfirm();\n    break;\n\n  case 'CONFIRM': {\n    if (cbData === 'cancel') { endSession(); reply(t('cancelled')); break; }\n    if (cbData !== 'save') break;\n    if (saveLocked(d)) break;\n    d.savingAt = Date.now();\n    setState('CONFIRM', d);              // keep the state, persist the lock\n    const dv = derived(d);\n\n    // Column I (عدد الليالي): open-ended → live formula; else the integer.\n    // Column J = تاريخ البداية; the sheet derives K (مغادرة) = J + I automatically.\n    // \"{r}\" is substituted with the real row number by \"Build Booking Row\".\n    const nightsCell = d.infinity ? '=TODAY()-J{r}' : d.nights;\n\n    // اجمالي سعر الحجز on an open stay is the rate times however many nights it\n    // has run, expressed as the formula rather than as a number that goes stale\n    // overnight. This is what people were already typing by hand — `=500*I10`\n    // appeared on five rows — now written deliberately, with the rate also\n    // stored properly in the database.\n    const totalCell = d.infinity ? `=${num(d.nightly_rate)}*I{r}` : num(d.total);\n\n    // Legacy positional form, still consumed by the HTTP write path. Derived from\n    // `fields` below so the two cannot drift apart.\n    const aToJ = [\n      txt(d.booking_id), txt(d.private_id), d.name, d.btype,\n      '', txt(d.phone), d.apartment, Number(d.room),   // E (الجنسية) retired, kept blank\n      nightsCell, d.arrival_date,\n    ];\n\n    out.hasSave = true;\n    out.save = {\n      flow: 'booking',\n      tabA1: a1Tab(CFG.BOOKINGS_TAB),\n      keyRange: `${a1Tab(CFG.BOOKINGS_TAB)}!C:C`,  // اسم المقيم — no formula → true last row\n      // Keyed by the sheet's real header text (verified against row 1 on\n      // 2026-08-06). Input columns ONLY: K تاريخ المغادرة, N نسبة البرنامج,\n      // P المتبقي, R تاريخ الإدخال, S صافي الدخل and T آخر تعديل are calculated\n      // by the sheet and are deliberately absent here, so the node never writes\n      // them and their formulas survive.\n      fields: {\n        'بوكنج ID': txt(d.booking_id),\n        'ID': txt(d.private_id),\n        'اسم المقيم': d.name,\n        'نوع الحجز': d.btype,\n        'الجنسية': '',                                  // retired, kept blank\n        'رقم الهاتف': txt(d.phone),\n        'اسم الشقة': d.apartment,\n        'رقم الغرفة': Number(d.room),\n        'عدد الليالي': nightsCell,\n        'تاريخ البداية': d.arrival_date,\n        'اجمالي سعر الحجز': totalCell,\n        'اجمالي ما تم دفعه': num(d.paid),\n        'طريقة الدفع': d.payment,\n        'ملاحظات': d.notes,\n      },\n      ranges: [\n        { range: 'A{r}:J{r}', values: [aToJ] },\n        { range: 'L{r}:M{r}', values: [[totalCell, num(d.paid)]] },\n        { range: 'O{r}', values: [[d.payment]] },       // P skipped on purpose\n        { range: 'Q{r}', values: [[d.notes]] },\n      ],\n      // The booking's first payment, recorded as its own act so that a later\n      // one in a different method adds to it instead of replacing its label.\n      // No row number exists yet — the append decides it — so the idempotency\n      // key uses the guest and the moment instead.\n      payment: parseNum(d.paid)\n        ? { added: num(d.paid), method: d.payment, ref: `new:${d.private_id || d.name}:${Date.now()}` }\n        : null,\n      receiptFileId: d.receipt || '',   // '' → group gets a plain text message\n      groupChatId: CFG.GROUP_CHAT_ID,\n      groupText: t('group_msg', summaryVars(d, dv)),\n      savedText: t('saved'),\n      savedNoGroupText: t('saved_no_group'),\n      errorText: t('error'),\n    };\n    break;\n  }\n\n  // ── Edit / cancel an existing booking ─────────────────────────────────────\n\n  case 'EDIT_FIND': {\n    if (cq) break;\n    const q = (text || '').trim();\n    if (!q) { reply(t(d.paidOnly ? 'paid_ask_id' : 'edit_ask_id')); break; }\n    // Matches column B (ID) only — not بوكنج ID. The user is told to enter the\n    // ID, and B is a required step at entry so every saved booking is reachable.\n    // Compared in ASCII on both sides: the receptionist's keyboard produces\n    // ٢٥ and the stored ID is 25, and those are the same booking.\n    const qn = asciiDigits(q);\n    const hits = bookingRows().filter(x => asciiDigits(x.json['ID'] || '').trim() === qn);\n    if (!hits.length) { reply(t('edit_not_found')); break; }\n    if (hits.length > 1) {                          // IDs are not enforced unique\n      reply(t('edit_pick_match'), {\n        inline_keyboard: hits.map(h => [{\n          text: bookingLabel(h.json), callback_data: `epick_${h.row}`,\n        }]),\n      });\n      setState('EDIT_PICK', d);\n      break;\n    }\n    applyPick(hits[0]);\n    break;\n  }\n\n  case 'EDIT_PICK': {\n    const m = /^epick_(\\d+)$/.exec(cbData || '');\n    if (!m) break;\n    const want = Number(m[1]);\n    const hit = bookingRows().find(x => x.row === want);\n    if (!hit) { reply(t('edit_not_found')); setState('EDIT_FIND', d); break; }\n    applyPick(hit);\n    break;\n  }\n\n  case 'EDIT_MENU': {\n    if (cbData === 'ef_done') {\n      if (!Object.keys(d.editNew || {}).length) {\n        endSession(); reply(t('edit_no_changes')); break;\n      }\n      commitEdit(d);\n      break;\n    }\n    if (cbData === 'ef_delete') {\n      reply(t('del_confirm', { summary: bookingLabel(d.editOrig || {}) }), {\n        inline_keyboard: [\n          [{ text: t('btn_confirm'), callback_data: 'edel_yes' }],\n          [{ text: t('btn_cancel'), callback_data: 'edel_no' }],\n        ],\n      });\n      setState('EDIT_DEL_CONFIRM', d);\n      break;\n    }\n    switch (cbData) {\n      case 'ef_total':   reply(t('ask_total'));  setState('EDIT_TOTAL', d);   break;\n      case 'ef_paid':\n        reply(t('edit_ask_paid_add', { current: num(paidSoFar(d)) }));\n        setState('EDIT_PAID', d);\n        break;\n      case 'ef_payment': reply(t('ask_payment'), keyGrid(PAYMENTS, 'xpay_')); setState('EDIT_PAYMENT', d); break;\n      case 'ef_nights':\n        reply(t('ask_nights'), numKeyboard(1, 30, 'xnights_',\n          [{ text: t('btn_infinity'), callback_data: 'xnights_inf' }], 5));\n        setState('EDIT_NIGHTS', d);\n        break;\n      case 'ef_arrival': {\n        const tp = todayParts();\n        reply(t('ask_arrival'), calKeyboard(tp.y, tp.m));\n        setState('EDIT_ARRIVAL', d);\n        break;\n      }\n      case 'ef_aptroom':\n        d.reg = locationRegistry();\n        reply(t('ask_apt_room'), aptRoomKb(d.reg));\n        setState('EDIT_APT_ROOM', d);\n        break;\n      case 'ef_notes':   reply(t('ask_notes'), skipKb('xnotes_skip')); setState('EDIT_NOTES', d); break;\n      default: break;\n    }\n    break;\n  }\n\n  case 'EDIT_TOTAL': {\n    if (cq) break;\n    const v = parseNum(text);\n    if (v === null || v < 0) { reply(t('num_error')); break; }\n    editSet(d, 'اجمالي سعر الحجز', num(v));\n    showEditMenu(d);\n    break;\n  }\n\n  // Changing the paid amount always forces a payment method next — the money\n  // moved somehow, and the sheet must say how.\n  // The entered figure is an ADDITIONAL payment, not a replacement — the common\n  // case is a guest settling the rest later. Added to whatever is already paid.\n  case 'EDIT_PAID': {\n    if (cq) break;\n    const v = parseNum(text);\n    if (v === null) { reply(t('num_error')); break; }\n    // Negative is allowed — a refund, or undoing a mistyped payment. The total\n    // may not go below zero though; that is always an error, not a credit.\n    const current = paidSoFar(d);\n    const total = current + v;\n    if (total < 0) { reply(t('edit_paid_below_zero', { current: num(current) })); break; }\n    d.paidAdded = num(v);               // for the cashier's group message\n    d.paidTouched = true;               // admins get the checkout question after this\n    editSet(d, 'اجمالي ما تم دفعه', num(total));\n    reply(t('ask_payment'), keyGrid(PAYMENTS, 'xpay_'));\n    setState('EDIT_PAYMENT', d);\n    break;\n  }\n\n  case 'EDIT_PAYMENT': {\n    if (!cbData || !cbData.startsWith('xpay_')) break;\n    const payKey = payKeyOf(cbData.slice('xpay_'.length));\n    const pay = payLabel(payKey);\n    if (!pay) break;\n    editSet(d, 'طريقة الدفع', pay);\n    // Admins attach a receipt for the two transfer methods and may skip it. The\n    // cashier is recording someone else's money, so anything that is not cash\n    // needs proof, and there is no skip.\n    const needsReceipt = d.paidOnly\n      ? payKey !== CASH_KEY\n      : RECEIPT_PAYMENT_KEYS.indexOf(payKey) !== -1;\n    if (needsReceipt) {\n      if (d.paidOnly) reply(t('paid_ask_receipt'));\n      else reply(t('ask_receipt'), skipKb('xreceipt_skip'));\n      setState('EDIT_RECEIPT', d);\n      break;\n    }\n    afterEditStep(d);\n    break;\n  }\n\n  case 'EDIT_RECEIPT':\n    if (photoFileId) d.editReceipt = photoFileId;\n    else if (cbData === 'xreceipt_skip' && !d.paidOnly) d.editReceipt = '';\n    else if (d.paidOnly) { reply(t('paid_receipt_error')); break; }\n    else { reply(t('receipt_error'), skipKb('xreceipt_skip')); break; }\n    afterEditStep(d);\n    break;\n\n  // Asked once, right after a payment is recorded: has the guest gone? A \"no\"\n  // goes straight to the review; a \"yes\" needs the date before the stay length\n  // can be worked out.\n  case 'EDIT_LEFT': {\n    if (cbData !== 'xleft_yes' && cbData !== 'xleft_no') break;\n    d.leaveAsked = true;\n    if (cbData === 'xleft_no') { showEditConfirm(d); break; }\n    const tp = todayParts();\n    reply(t('edit_ask_departure'), calKeyboard(tp.y, tp.m));\n    setState('EDIT_DEPARTURE', d);\n    break;\n  }\n\n  case 'EDIT_DEPARTURE': {\n    if (!cbData || cbData === 'cal_ignore') break;\n    let m = /^cal_(prev|next)_(\\d+)_(\\d+)$/.exec(cbData);\n    if (m) {\n      const dir = m[1], y = Number(m[2]), mo = Number(m[3]);\n      let ny = y, nm = mo;\n      if (dir === 'prev') { nm = mo - 1; if (nm === 0) { nm = 12; ny = y - 1; } }\n      else { nm = mo + 1; if (nm === 13) { nm = 1; ny = y + 1; } }\n      if (ny < MIN_YEAR || (ny === MIN_YEAR && nm < MIN_MONTH)) break;\n      reply(t('edit_ask_departure'), calKeyboard(ny, nm));\n      setState('EDIT_DEPARTURE', d);\n      break;\n    }\n    m = /^cal_day_(\\d+)_(\\d+)_(\\d+)$/.exec(cbData);\n    if (!m) break;\n    const departure = `${m[1]}-${m[2]}-${m[3]}`;\n    const arrival = String((d.editOrig || {})['تاريخ البداية'] || '').trim();\n    const nights = daysBetween(arrival, departure);\n    // A checkout before check-in is a mis-tap, not a zero-night stay. Same-day is\n    // allowed: the =TODAY()-J formula reads 0 on the arrival date too.\n    if (nights === null || nights < 0) {\n      const tp = todayParts();\n      reply(t('edit_departure_before_arrival', { departure, arrival: arrival || t('empty') }),\n        calKeyboard(tp.y, tp.m));\n      break;\n    }\n    d.departure = departure;\n    // Only عدد الليالي is written. تاريخ المغادرة is the sheet's own J + I formula,\n    // so it lands on the right date by itself — writing it would destroy it.\n    editSet(d, 'عدد الليالي', nights);\n    showEditConfirm(d);\n    break;\n  }\n\n  case 'EDIT_CONFIRM': {\n    if (cbData === 'xecancel') { endSession(); reply(t('cancelled')); break; }\n    if (cbData !== 'xedone') break;\n    if (!Object.keys(d.editNew || {}).length) {\n      endSession(); reply(t('edit_no_changes')); break;\n    }\n    commitEdit(d);\n    break;\n  }\n\n  case 'EDIT_NIGHTS': {\n    if (cbData && cbData.startsWith('xnights_')) {\n      const suffix = cbData.slice('xnights_'.length);\n      // The row is already known, so the open-ended formula can be written out\n      // directly instead of carrying a {r} placeholder.\n      editSet(d, 'عدد الليالي',\n        suffix === 'inf' ? `=TODAY()-J${d.editRow}` : Number(suffix));\n      showEditMenu(d);\n      break;\n    }\n    if (cq) break;\n    const v = parseNum(text);\n    if (v === null || v <= 0) { reply(t('num_error')); break; }\n    editSet(d, 'عدد الليالي', Math.trunc(v));\n    showEditMenu(d);\n    break;\n  }\n\n  case 'EDIT_ARRIVAL': {\n    if (!cbData || cbData === 'cal_ignore') break;\n    let m = /^cal_(prev|next)_(\\d+)_(\\d+)$/.exec(cbData);\n    if (m) {\n      const dir = m[1], y = Number(m[2]), mo = Number(m[3]);\n      let ny = y, nm = mo;\n      if (dir === 'prev') { nm = mo - 1; if (nm === 0) { nm = 12; ny = y - 1; } }\n      else { nm = mo + 1; if (nm === 13) { nm = 1; ny = y + 1; } }\n      if (ny < MIN_YEAR || (ny === MIN_YEAR && nm < MIN_MONTH)) break;\n      reply(t('ask_arrival'), calKeyboard(ny, nm));\n      setState('EDIT_ARRIVAL', d);\n      break;\n    }\n    m = /^cal_day_(\\d+)_(\\d+)_(\\d+)$/.exec(cbData);\n    if (m) {\n      editSet(d, 'تاريخ البداية', `${m[1]}-${m[2]}-${m[3]}`);\n      showEditMenu(d);\n    }\n    break;\n  }\n\n  case 'EDIT_APT_ROOM': {\n    if (cbData === 'ar_hdr') break;\n    const picked = pickAptRoom(d, cbData);\n    if (!picked) break;\n    editSet(d, 'اسم الشقة', picked.apartment);\n    editSet(d, 'رقم الغرفة', Number(picked.room));\n    showEditMenu(d);\n    break;\n  }\n\n  case 'EDIT_NOTES':\n    editSet(d, 'ملاحظات', cbData === 'xnotes_skip' ? '' : (text || '').trim());\n    showEditMenu(d);\n    break;\n\n  case 'EDIT_DEL_CONFIRM': {\n    if (cbData === 'edel_no') { showEditMenu(d); break; }\n    if (cbData !== 'edel_yes') break;\n    if (saveLocked(d)) break;\n    d.savingAt = Date.now();\n    setState('EDIT_DEL_CONFIRM', d);\n    const orig = d.editOrig || {};\n    // Append rather than clobber, so an existing note is not lost.\n    const prevNote = String(orig['ملاحظات'] || '').trim();\n    out.hasSave = true;\n    out.save = {\n      flow: 'cancel',\n      row: d.editRow,\n      // A cancelled booking is worth nothing and occupies no nights, and the\n      // sheet has to say so: عدد الليالي and اجمالي سعر الحجز both go to zero.\n      // Otherwise the row keeps counting towards occupancy and revenue in every\n      // tab that sums those columns, and an open-ended cancellation keeps\n      // billing a guest who left — its nights cell is a live =TODAY()-J that\n      // never stops climbing.\n      //\n      // اجمالي ما تم دفعه is deliberately NOT zeroed. If the guest paid and the\n      // booking was then cancelled, that money still changed hands; erasing it\n      // here would hide a refund that may or may not have happened.\n      fields: {\n        'ملاحظات': prevNote ? `${prevNote} ${t('del_note')}` : t('del_note'),\n        'عدد الليالي': 0,\n        'اجمالي سعر الحجز': 0,\n      },\n      formatRow: true,                  // black fill / white text, via HTTP\n      receiptFileId: '',\n      groupChatId: CFG.GROUP_CHAT_ID,\n      groupText: t('del_group_msg', {\n        name: mdEscape(orig['اسم المقيم'] || t('empty')),\n        private_id: mdEscape(orig['ID'] || t('empty')),\n        apartment: mdEscape(orig['اسم الشقة'] || t('empty')),\n        room: mdEscape(orig['رقم الغرفة'] || t('empty')),\n        arrival: mdEscape(orig['تاريخ البداية'] || t('empty')),\n        actor,\n      }),\n      savedText: t('del_saved'),\n      savedNoGroupText: t('del_saved_no_group'),\n      errorText: t('error'),\n    };\n    break;\n  }\n}\n\n// On a save the session is deliberately kept until the write succeeds, so a\n// failed write leaves the user on CONFIRM and the Save button still works.\nreturn [{ json: out }];\n"
+      }
+    },
+    {
+      "id": "has-callback",
+      "name": "Has Callback?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1160,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has-callback",
+              "leftValue": "={{ $json.hasCallback }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "answer-callback",
+      "name": "Answer Callback",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1360,
+        120
+      ],
+      "parameters": {
+        "resource": "callback",
+        "operation": "answerQuery",
+        "queryId": "={{ $json.callbackQueryId }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "id": "has-reply",
+      "name": "Has Reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1160,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has-reply",
+              "leftValue": "={{ $json.hasReply }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "send-reply",
+      "name": "Send Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1360,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $('Config').first().json.BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.reply) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "save-session",
+      "name": "Save Session",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        1160,
+        480
+      ],
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings_bot_sessions"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.chatId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "chat_id": "={{ $json.chatId }}",
+            "state": "={{ $json.sessionState }}",
+            "data": "={{ $json.sessionData }}",
+            "updated_at": "={{ Date.now() }}"
+          }
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "has-save",
+      "name": "Has Save?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1160,
+        660
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has-save",
+              "leftValue": "={{ $json.hasSave }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "route-save",
+      "name": "Route Save",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1360,
+        660
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "is-booking",
+                    "leftValue": "={{ $json.save.flow }}",
+                    "rightValue": "booking",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "booking"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "is-expense",
+                    "leftValue": "={{ $json.save.flow }}",
+                    "rightValue": "expense",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "expense"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "is-edit",
+                    "leftValue": "={{ $json.save.flow }}",
+                    "rightValue": "edit",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "edit"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "is-cancel",
+                    "leftValue": "={{ $json.save.flow }}",
+                    "rightValue": "cancel",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "cancel"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      }
+    },
+    {
+      "id": "read-booking-key",
+      "name": "Read Booking Key",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1560,
+        480
+      ],
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "إدخال الحجوزات"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "rangeDefinition": "specifyRangeA1",
+              "range": "C2:C2000"
+            }
+          }
+        }
+      },
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "id": "build-booking-row",
+      "name": "Build Booking Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        480
+      ],
+      "parameters": {
+        "jsCode": "/**\n * Turns the Brain's named save.fields into one flat row for the Google Sheets\n * `update` node, and works out which row to write.\n *\n * The key column carries no fill-down formula, so its length is the true last\n * data row (same trick as sheets.append_booking_input in the Python bot).\n * Row 1 is the header, hence + 2.\n */\n\nconst save = $('Brain').first().json.save;\n\n// alwaysOutputData is on for the read, so an empty sheet arrives as a single\n// blank item — drop it before counting or every row would be off by one.\nconst rows = $input.all().filter(i => i.json && Object.keys(i.json).length > 0);\nconst r = rows.length + 2;\n\n// The sheet's own calculated columns. Never written, on any path: a value —\n// even '' — replaces the formula with a dead number, and the Dashboard and the\n// per-property tabs all read them. A hard filter, not a convention.\nconst FORMULA_COLS = [\n  'تاريخ المغادرة',   // K = J + I\n  'نسبة البرنامج',    // N\n  'المتبقي',          // P = L - M\n  'تاريخ الإدخال',    // R\n  'صافي الدخل',       // S = L - N\n  'آخر تعديل',        // T\n];\n\nconst out = { row_number: r };\nfor (const k of Object.keys(save.fields)) {\n  if (FORMULA_COLS.indexOf(k) !== -1) continue;\n  const v = save.fields[k];\n  // e.g. the open-ended nights cell '=TODAY()-J{r}'\n  out[k] = typeof v === 'string' ? v.replace(/\\{r\\}/g, String(r)) : v;\n}\n\nreturn [{ json: out }];\n"
+      }
+    },
+    {
+      "id": "write-booking-row",
+      "name": "Write Booking Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1960,
+        480
+      ],
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "إدخال الحجوزات"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [
+            "row_number"
+          ],
+          "value": {}
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "read-expense-key",
+      "name": "Read Expense Key",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1560,
+        660
+      ],
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "مصروفات عامة"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "rangeDefinition": "specifyRangeA1",
+              "range": "B2:B2000"
+            }
+          }
+        }
+      },
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "id": "build-expense-row",
+      "name": "Build Expense Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        660
+      ],
+      "parameters": {
+        "jsCode": "/**\n * Same as Build Booking Row, for the expense tab. The key column is B (البند),\n * which is typed in by hand and carries no formula.\n */\n\nconst save = $('Brain').first().json.save;\n\nconst rows = $input.all().filter(i => i.json && Object.keys(i.json).length > 0);\nconst r = rows.length + 2;\n\nconst out = { row_number: r };\nfor (const k of Object.keys(save.fields)) {\n  const v = save.fields[k];\n  out[k] = typeof v === 'string' ? v.replace(/\\{r\\}/g, String(r)) : v;\n}\n\nreturn [{ json: out }];\n"
+      }
+    },
+    {
+      "id": "write-expense-row",
+      "name": "Write Expense Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1960,
+        660
+      ],
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "مصروفات عامة"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [
+            "row_number"
+          ],
+          "value": {}
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "build-edit-row",
+      "name": "Build Edit Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        840
+      ],
+      "parameters": {
+        "jsCode": "/**\n * Flattens an edit/cancel save into one item for the Google Sheets `update` node.\n *\n * Unlike the append path there is no row arithmetic here — the row came from the\n * lookup. Only the columns the user actually changed are emitted, and the write\n * node uses autoMapInputData, so every other column (including the formula\n * columns K, N, P, R, S, T) is left untouched. Writing an unchanged value back\n * would be wrong for عدد الليالي in particular: the sheet may hold a live\n * =TODAY()-J{row} formula there and reading it back gives only its result.\n */\n\nconst save = $('Brain').first().json.save;\n\n// The sheet's own calculated columns. Nothing this bot writes may ever name\n// one: writing a value — even '' — replaces the formula with a dead number, and\n// the Dashboard and every per-property tab read them.\n//\n// This is a hard filter rather than a convention. The Brain is careful today,\n// but \"careful\" is what every one of these columns had before it was found\n// empty, and a guard costs one line where an audit costs an afternoon.\nconst FORMULA_COLS = [\n  'تاريخ المغادرة',   // K = J + I\n  'نسبة البرنامج',    // N\n  'المتبقي',          // P = L - M\n  'تاريخ الإدخال',    // R\n  'صافي الدخل',       // S = L - N\n  'آخر تعديل',        // T\n];\n\nconst fields = {};\nfor (const k of Object.keys(save.fields || {})) {\n  if (FORMULA_COLS.indexOf(k) !== -1) continue;\n  fields[k] = save.fields[k];\n}\n\nreturn [{ json: { row_number: save.row, ...fields } }];\n"
+      }
+    },
+    {
+      "id": "write-edit-row",
+      "name": "Write Edit Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1960,
+        840
+      ],
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "إدخال الحجوزات"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [
+            "row_number"
+          ],
+          "value": {}
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "has-group",
+      "name": "Has Group?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2160,
+        660
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has-group",
+              "leftValue": "={{ $('Brain').first().json.save.groupChatId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "has-receipt",
+      "name": "Has Receipt?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2360,
+        660
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has-receipt",
+              "leftValue": "={{ $('Brain').first().json.save.receiptFileId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "post-receipt-to-group",
+      "name": "Post Receipt To Group",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2560,
+        780
+      ],
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "={{ $('Brain').first().json.save.groupChatId }}",
+        "binaryData": false,
+        "photo": "={{ $('Brain').first().json.save.receiptFileId }}",
+        "additionalFields": {
+          "caption": "={{ $('Brain').first().json.save.groupText }}",
+          "parse_mode": "Markdown",
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "id": "post-to-group",
+      "name": "Post To Group",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2560,
+        540
+      ],
+      "parameters": {
+        "chatId": "={{ $('Brain').first().json.save.groupChatId }}",
+        "text": "={{ $('Brain').first().json.save.groupText }}",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "id": "send-saved",
+      "name": "Send Saved",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2560,
+        540
+      ],
+      "parameters": {
+        "chatId": "={{ $('Brain').first().json.chatId }}",
+        "text": "={{ $('Brain').first().json.save.savedText }}",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "id": "send-saved-no-group",
+      "name": "Send Saved No Group",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2360,
+        780
+      ],
+      "parameters": {
+        "chatId": "={{ $('Brain').first().json.chatId }}",
+        "text": "={{ $('Brain').first().json.save.savedNoGroupText }}",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "id": "send-save-error",
+      "name": "Send Save Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2160,
+        960
+      ],
+      "parameters": {
+        "chatId": "={{ $('Brain').first().json.chatId }}",
+        "text": "={{ $('Brain').first().json.save.errorText }}",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "id": "clear-session",
+      "name": "Clear Session",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        2760,
+        660
+      ],
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings_bot_sessions"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ $('Brain').first().json.chatId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "chat_id": "={{ $('Brain').first().json.chatId }}",
+            "state": "",
+            "data": "={{ JSON.stringify({ lastWrite: $('Brain').first().json.save.undo || null, lastAppend: ['booking','expense'].includes($('Brain').first().json.save.flow) }) }}",
+            "updated_at": "={{ Date.now() }}"
+          }
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "should-format-row",
+      "name": "Should Format Row?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2960,
+        660
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "wants-format",
+              "leftValue": "={{ $('Brain').first().json.save.formatRow }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "gid-known",
+              "leftValue": "={{ $('Config').first().json.BOOKINGS_SHEET_GID }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "format-cancelled-row",
+      "name": "Format Cancelled Row",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3160,
+        660
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8:batchUpdate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ requests: [{ repeatCell: { range: { sheetId: Number($('Config').first().json.BOOKINGS_SHEET_GID), startRowIndex: $('Brain').first().json.save.row - 1, endRowIndex: $('Brain').first().json.save.row, startColumnIndex: 0, endColumnIndex: 21 }, cell: { userEnteredFormat: { backgroundColor: { red: 0, green: 0, blue: 0 }, textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 } } } }, fields: 'userEnteredFormat(backgroundColor,textFormat)' } }] }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "name": "Report Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "position": [
+        -1200,
+        800
+      ],
+      "id": "report-schedule"
+    },
+    {
+      "name": "Report Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "tz",
+              "name": "TIMEZONE",
+              "value": "Africa/Cairo",
+              "type": "string"
+            },
+            {
+              "id": "grp",
+              "name": "REPORT_GROUP_CHAT_ID",
+              "value": "-5057362381",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "position": [
+        -960,
+        800
+      ],
+      "id": "report-config"
+    },
+    {
+      "name": "Read Report Formulas",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "إدخال الحجوزات"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "rangeDefinition": "specifyRangeA1",
+              "range": "A:U"
+            }
+          },
+          "outputFormatting": {
+            "values": {
+              "general": "FORMULA",
+              "date": "FORMATTED_STRING"
+            }
+          }
+        }
+      },
+      "position": [
+        -720,
+        800
+      ],
+      "id": "read-report-formulas"
+    },
+    {
+      "name": "Read Report Values",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "إدخال الحجوزات"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "rangeDefinition": "specifyRangeA1",
+              "range": "A:U"
+            }
+          }
+        }
+      },
+      "position": [
+        -480,
+        800
+      ],
+      "executeOnce": true,
+      "id": "read-report-values"
+    },
+    {
+      "name": "Build Reports",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "jsCode": "/**\n * Scheduled reports for the ops group — the \"Build Reports\" Code node.\n *\n * Input: إدخال الحجوزات read TWICE over the same range, and joined on row_number.\n * Neither render mode alone is enough:\n *\n *   - evaluated (\"Read Report Values\") gives real numbers for المتبقي, which is\n *     a sheet formula, but reports an open-ended stay as departing *today*,\n *     every day, because عدد الليالي is a live =TODAY()-J and the sheet derives\n *     تاريخ المغادرة from it;\n *   - FORMULA (\"Read Report Formulas\") shows exactly which rows are open-ended,\n *     but hands back formula text for المتبقي — and for اجمالي سعر الحجز too,\n *     which is `=500*I{row}` on nightly-rate bookings.\n *\n * So: money and dates come from the evaluated read, open-endedness from the\n * formula read. One extra Sheets call a day buys an exact answer.\n *\n * Output: one item per message to send, so the Telegram node downstream just\n * loops. Zero items on a quiet day means no message at all, which is the point:\n * a digest that fires \"nothing today\" every morning stops being read.\n *\n * Two reports share one trigger and one read:\n *   - the daily digest, every day;\n *   - the debt report, Saturdays only (the start of the working week here).\n */\n\n// The reports branch has its own Config: the Telegram trigger's Config node\n// does not execute on a schedule run, and referencing an unexecuted node throws.\nconst CFG = $('Report Config').first().json;\nconst TZ = CFG.TIMEZONE || 'Africa/Cairo';\nconst CHAT_ID = CFG.REPORT_GROUP_CHAT_ID;\n\nconst LONG_STAY_DAYS = 30;\nconst DEBT_WEEKDAY = 6;                       // 0 = Sunday … 6 = Saturday\n\nconst S = {\n  digest_title: '☀️ *تقرير اليوم* — {date}',\n  arrivals: '🛬 *وصول اليوم* ({n})',\n  departures: '🛫 *مغادرة اليوم* ({n})',\n  long_stays: '🕰️ *إقامات مفتوحة أطول من {days} يوم* ({n})',\n  line_guest: '• {name} — {apartment} غرفة {room}',\n  line_long: '• {name} — {apartment} غرفة {room} — منذ {arrival} ({days} يوم)',\n  nothing: 'لا يوجد',\n  debt_title: '💰 *المبالغ المتبقية* — {date}',\n  debt_line: '• {name} — {apartment} غرفة {room} — متبقي {amount}',\n  debt_total: '\\n*الإجمالي المتبقي: {total}*',\n  debt_none: '✅ لا توجد مبالغ متبقية.',\n};\n\nfunction t(key, vars) {\n  let v = S[key] === undefined ? key : S[key];\n  if (vars) v = v.replace(/\\{(\\w+)\\}/g, (m, k) => (vars[k] === undefined ? m : String(vars[k])));\n  return v;\n}\n\n/** Telegram is sent parse_mode Markdown; guest names are free text. */\nfunction esc(s) { return String(s === undefined || s === null ? '' : s).replace(/([_*[\\]`])/g, '\\\\$1'); }\n\nfunction todayIso() {\n  return new Intl.DateTimeFormat('en-CA', {\n    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',\n  }).format(new Date());\n}\n\nfunction weekdayInTz() {\n  const name = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' })\n    .format(new Date());\n  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(name);\n}\n\nfunction daysBetween(fromIso, toIso) {\n  const a = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(String(fromIso || '').trim());\n  const b = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(String(toIso || '').trim());\n  if (!a || !b) return null;\n  return Math.round(\n    (Date.UTC(+b[1], +b[2] - 1, +b[3]) - Date.UTC(+a[1], +a[2] - 1, +a[3])) / 86400000\n  );\n}\n\nfunction isoAddDays(iso, days) {\n  const m = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(String(iso || '').trim());\n  if (m === null) return null;\n  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3] + days)).toISOString().slice(0, 10);\n}\n\nfunction parseNum(v) {\n  const n = parseFloat(String(v === undefined ? '' : v).replace(/,/g, ''));\n  return Number.isNaN(n) ? null : n;\n}\n\nconst today = todayIso();\n\n// row_number → true when عدد الليالي is a live formula, i.e. the stay is open.\nconst openByRow = {};\nfor (const i of $('Read Report Formulas').all()) {\n  const j = i.json || {};\n  openByRow[String(j.row_number)] =\n    String(j['عدد الليالي'] === undefined ? '' : j['عدد الليالي']).trim().startsWith('=');\n}\n\nconst rows = $input.all()\n  .map(i => i.json)\n  .filter(j => j && String(j['اسم المقيم'] || '').trim())\n  // A cancelled booking is still a row; it must not appear as an arrival.\n  .filter(j => String(j['ملاحظات'] || '').indexOf('ملغي') === -1);\n\nconst arrivals = [];\nconst departures = [];\nconst longStays = [];\nconst debts = [];\n\nfor (const j of rows) {\n  const name = esc(j['اسم المقيم']);\n  const apartment = esc(j['اسم الشقة'] || '—');\n  const room = esc(j['رقم الغرفة'] || '—');\n  const arrival = String(j['تاريخ البداية'] || '').trim();\n  const isOpen = openByRow[String(j.row_number)] === true;\n  const nights = parseNum(j['عدد الليالي']);\n  // The sheet derives تاريخ المغادرة as J + I; trust it, but only for a stay\n  // that actually has an end. For an open one it always evaluates to today.\n  const departure = isOpen ? '' : (String(j['تاريخ المغادرة'] || '').trim() ||\n    (nights === null ? '' : isoAddDays(arrival, Math.trunc(nights))));\n\n  if (arrival === today) arrivals.push(t('line_guest', { name, apartment, room }));\n  if (departure && departure === today) departures.push(t('line_guest', { name, apartment, room }));\n\n  const age = daysBetween(arrival, today);\n  if (isOpen && age !== null && age > LONG_STAY_DAYS) {\n    longStays.push(t('line_long', { name, apartment, room, arrival, days: age }));\n  }\n\n  const remaining = parseNum(j['المتبقي']);\n  if (remaining !== null && remaining > 0) {\n    debts.push({ amount: remaining, line: t('debt_line', { name, apartment, room, amount: remaining }) });\n  }\n}\n\nconst messages = [];\n\n// ── Daily digest ──\n// Sent only when there is something to say.\nif (arrivals.length || departures.length || longStays.length) {\n  const parts = [t('digest_title', { date: today }), ''];\n  if (arrivals.length) parts.push(t('arrivals', { n: arrivals.length }), ...arrivals, '');\n  if (departures.length) parts.push(t('departures', { n: departures.length }), ...departures, '');\n  if (longStays.length) {\n    parts.push(t('long_stays', { days: LONG_STAY_DAYS, n: longStays.length }), ...longStays);\n  }\n  messages.push({ chat_id: CHAT_ID, text: parts.join('\\n').trim(), parse_mode: 'Markdown' });\n}\n\n// ── Debt report, Saturdays ──\nif (weekdayInTz() === DEBT_WEEKDAY) {\n  debts.sort((a, b) => b.amount - a.amount);          // biggest first\n  const total = debts.reduce((sum, x) => sum + x.amount, 0);\n  const parts = [t('debt_title', { date: today }), ''];\n  if (debts.length) {\n    parts.push(...debts.map(x => x.line), t('debt_total', { total: Math.round(total * 100) / 100 }));\n  } else {\n    parts.push(t('debt_none'));\n  }\n  messages.push({ chat_id: CHAT_ID, text: parts.join('\\n').trim(), parse_mode: 'Markdown' });\n}\n\nreturn messages.map(json => ({ json }));\n"
+      },
+      "position": [
+        -240,
+        800
+      ],
+      "id": "build-reports"
+    },
+    {
+      "name": "Send Report",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "position": [
+        0,
+        800
+      ],
+      "id": "send-report"
+    },
+    {
+      "name": "Build Shadow Write",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "jsCode": "/**\n * Turns a completed sheet write into one Postgres upsert — the \"Build Shadow\n * Write\" Code node.\n *\n * This runs only after the spreadsheet write has already succeeded, and its\n * output feeds a Postgres node whose onError is `continueRegularOutput`. During\n * the trust period the sheet is authoritative and Supabase is a shadow copy, so\n * the rule is absolute: **nothing here may fail a booking**. If Supabase is\n * down, asleep, or wrong, the receptionist still sees the normal ✅ and the\n * daily reconcile reports the missing row.\n *\n * Keyed on `sheet_row`, so a retry or a replay converges instead of duplicating.\n *\n * The row number lives on whichever Build * Row node ran, and referencing a node\n * that did not execute throws — hence the try/catch ladder, the same trick\n * brain.js uses for its gated Sheets reads.\n */\n\nconst brain = $('Brain').first().json;\nconst save = brain.save || {};\n\n/** The row the sheet write actually landed on. */\nfunction sheetRow() {\n  for (const node of ['Build Booking Row', 'Build Expense Row', 'Build Edit Row']) {\n    try {\n      const n = $(node).first().json;\n      if (n && n.row_number) return Number(n.row_number);\n    } catch (e) { /* did not execute this turn */ }\n  }\n  return Number(save.row) || null;      // edit/cancel/undo carry it on the payload\n}\n\nconst row = sheetRow();\nif (!row) return [];                    // nothing identifiable to mirror\n\nfunction sqlStr(v) {\n  if (v === undefined || v === null || v === '') return 'NULL';\n  return `'${String(v).replace(/'/g, \"''\")}'`;\n}\n\nfunction sqlNum(v) {\n  if (v === undefined || v === null || v === '') return 'NULL';\n  // The sheet stores IDs and phones text-forced with a leading apostrophe.\n  const n = Number(String(v).replace(/^'/, '').replace(/,/g, ''));\n  return Number.isFinite(n) ? String(n) : 'NULL';\n}\n\n/** Strip the ' that forces Sheets to keep leading zeros. */\nfunction plain(v) {\n  return v === undefined || v === null ? '' : String(v).replace(/^'/, '');\n}\n\nconst F = save.fields || {};\nconst flow = save.flow;\nlet sql = null;\n\nif (flow === 'booking' || flow === 'edit' || flow === 'cancel') {\n  // An open-ended stay is the one case where عدد الليالي holds a formula rather\n  // than a number. That is exactly what `open_ended` records, so the database\n  // never has to tell the two apart by reading the cell twice.\n  const nightsRaw = F['عدد الليالي'];\n  const isOpen = typeof nightsRaw === 'string' && nightsRaw.trim().startsWith('=');\n  const cols = [];\n  const set = [];\n\n  function put(col, value, quoted) {\n    if (value === undefined) return;\n    cols.push(`${col} = ${quoted}`);\n    set.push(`${col} = excluded.${col}`);\n  }\n\n  put('booking_ref', F['بوكنج ID'], sqlStr(plain(F['بوكنج ID'])));\n  put('guest_ref', F['ID'], sqlStr(plain(F['ID'])));\n  put('guest_name', F['اسم المقيم'], sqlStr(F['اسم المقيم']));\n  put('booking_type', F['نوع الحجز'], sqlStr(F['نوع الحجز']));\n  put('phone', F['رقم الهاتف'], sqlStr(plain(F['رقم الهاتف'])));\n  put('apartment_name', F['اسم الشقة'], sqlStr(F['اسم الشقة']));\n  put('room_number', F['رقم الغرفة'], sqlStr(F['رقم الغرفة']));\n  put('arrival', F['تاريخ البداية'], `${sqlStr(F['تاريخ البداية'])}::date`);\n  if (nightsRaw !== undefined) {\n    cols.push(`nights = ${isOpen ? 'NULL' : sqlNum(nightsRaw)}`);\n    set.push('nights = excluded.nights');\n    cols.push(`open_ended = ${isOpen ? 'true' : 'false'}`);\n    set.push('open_ended = excluded.open_ended');\n  }\n  // On an open stay the sheet cell is `=<rate>*I{row}`, so sqlNum would make it\n  // NULL. The rate itself is what the database stores — `nightly_rate` — and\n  // `bookings_live.effective_total` recomputes the running bill from it, which\n  // is exactly what the sheet's formula shows.\n  const totalRaw = F['اجمالي سعر الحجز'];\n  const rateMatch = typeof totalRaw === 'string' && /^=([0-9.]+)\\*I/.exec(totalRaw.trim());\n  if (rateMatch) {\n    cols.push(`nightly_rate = ${rateMatch[1]}`);\n    set.push('nightly_rate = excluded.nightly_rate');\n    cols.push('total = NULL');\n    set.push('total = excluded.total');\n  } else {\n    put('total', totalRaw, sqlNum(totalRaw));\n  }\n  put('paid', F['اجمالي ما تم دفعه'], `coalesce(${sqlNum(F['اجمالي ما تم دفعه'])}, 0)`);\n  put('payment_method', F['طريقة الدفع'], sqlStr(F['طريقة الدفع']));\n  put('notes', F['ملاحظات'], sqlStr(F['ملاحظات']));\n\n  if (save.receiptFileId) {\n    cols.push(`receipt_file_id = ${sqlStr(save.receiptFileId)}`);\n    set.push('receipt_file_id = excluded.receipt_file_id');\n  }\n  if (flow === 'cancel') {\n    cols.push('cancelled_at = now()');\n    set.push('cancelled_at = excluded.cancelled_at');\n  }\n  if (brain.actor || save.actor) {\n    cols.push(`created_by = ${sqlStr(brain.actor || save.actor)}`);\n  }\n\n  if (!cols.length) return [];\n  const names = cols.map(c => c.split(' = ')[0]);\n  const values = cols.map(c => c.slice(c.indexOf(' = ') + 3));\n  sql =\n    `insert into bookings (sheet_row, ${names.join(', ')}, source) values ` +\n    `(${row}, ${values.join(', ')}, 'bot') ` +\n    `on conflict (sheet_row) do update set ${set.join(', ')}, updated_at = now();`;\n\n  // ── The payment, as its own row ────────────────────────────────────────────\n  //\n  // One `payments` row per SHEET LINE, keyed on sheet_row. The sheet has a\n  // single cumulative paid cell per line, so that is the most this can honestly\n  // record — mirroring it line for line keeps the two in step and stays\n  // idempotent on a retry. Individual payments get their own rows after the\n  // flip, when the sheet is no longer the one holding the number.\n  //\n  // Without this the table goes stale the moment it is created: it was\n  // backfilled at 09:50 and the first live payment at 09:52 was already missing\n  // from it, which `reconcile_payments` duly reported.\n  const act = save.payment;\n  if (act && Number(act.added)) {\n    // ── A payment as an EVENT ────────────────────────────────────────────────\n    //\n    // The sheet holds one method per row, so a guest paying twice in two\n    // methods keeps the running total but loses the first label — confirmed\n    // live on row 59, where 'كاش' became 'انستاباي' while the amount added up\n    // correctly. This records what was actually paid this time, and how, so the\n    // database keeps both and nobody has to insert a row to say it.\n    //\n    // Its own row, never an upsert on the line: two payments against one line\n    // must be two rows. `client_ref` carries the bot's save-lock timestamp, so\n    // a double tap converges rather than paying twice.\n    const methodSql = sqlStr(act.method);\n    sql +=\n      ' insert into payments (booking_id, amount, method, currency, receipt_file_id, ' +\n      'paid_at, client_ref, source) select coalesce(b.merged_into, b.id), ' +\n      `${sqlNum(act.added)}, ${methodSql}, ` +\n      `case when ${methodSql} like '%دولار%' then 'USD' ` +\n      `when ${methodSql} like '%يورو%' then 'EUR' else 'EGP' end, ` +\n      `${sqlStr(save.receiptFileId)}, now(), ${sqlStr(act.ref)}, 'bot' ` +\n      `from bookings b where b.sheet_row = ${row} ` +\n      'on conflict (client_ref) do nothing;';\n  } else if (F['اجمالي ما تم دفعه'] !== undefined) {\n    // No payment act on the payload: a correction typed into the paid column,\n    // an /undo, or a replay of an older session. Fall back to mirroring the\n    // line, which is what every row backfilled from the sheet looks like.\n    const paidSql = sqlNum(F['اجمالي ما تم دفعه']);\n    if (paidSql === 'NULL' || Number(paidSql) === 0) {\n      // Paid cleared — an /undo, or a correction. The line no longer records a\n      // payment, so neither may the table: both the mirrored line row and any\n      // payment acts recorded against that line go.\n      //\n      // A first payment made at booking time is keyed `new:<guest>:<ms>`, not\n      // `<row>:<ms>`, because the row did not exist yet — so zeroing the paid\n      // cell of a brand new booking leaves that act behind. The daily\n      // reconcile_payments reports it, which is the right place for something\n      // this rare to surface rather than a guess made here.\n      sql += ` delete from payments where sheet_row = ${row}` +\n             ` or client_ref like '${row}:%';`;\n    } else {\n      // booking_id resolves through merged_into: a continuation line's payment\n      // belongs to the booking it continues, not to the line.\n      // The method IS the currency: طريقة الدفع = دولار means the amount is\n      // dollars. Derived in SQL so it works whether the method came from this\n      // edit or fell back to the column.\n      const methodExpr =\n        F['طريقة الدفع'] === undefined ? 'b.payment_method' : sqlStr(F['طريقة الدفع']);\n      sql +=\n        ' insert into payments (booking_id, amount, method, currency, receipt_file_id, ' +\n        'paid_at, sheet_row, source) select coalesce(b.merged_into, b.id), ' +\n        // An edit that changes only the amount leaves the method field absent.\n        // Falling back to the column rather than to NULL, because the row was\n        // just upserted above and so already holds the current method — writing\n        // NULL here would erase how the guest paid.\n        `${paidSql}, ${methodExpr}, ` +\n        `case when ${methodExpr} like '%دولار%' then 'USD' ` +\n        `when ${methodExpr} like '%يورو%' then 'EUR' else 'EGP' end, ` +\n        `${sqlStr(save.receiptFileId)}, now(), ` +\n        `${row}, 'bot' from bookings b where b.sheet_row = ${row} ` +\n        'on conflict (sheet_row) do update set booking_id = excluded.booking_id, ' +\n        'amount = excluded.amount, method = excluded.method, ' +\n        'currency = excluded.currency, ' +\n        'receipt_file_id = coalesce(excluded.receipt_file_id, payments.receipt_file_id), ' +\n        'paid_at = excluded.paid_at;';\n    }\n  }\n} else if (flow === 'expense') {\n  sql =\n    'insert into expenses (sheet_row, expense_ref, item, amount, apartment_id, ' +\n    'apartment_name, notes, payment_method, responsible, receipt_file_id, spent_at, ' +\n    'source) values (' +\n    `${row}, ${sqlStr(plain(F['الرقم']))}, ${sqlStr(F['البند'])}, ${sqlNum(F['المبلغ'])}, ` +\n    // Resolved in SQL rather than here: the bot offers the apartment list from\n    // the same الإتاحة tab the registry is seeded from, so the name matches. If\n    // it ever does not, the reference is simply NULL and the name still records\n    // what was chosen.\n    `(select id from apartments where name = ${sqlStr(F['الشقة'])}), ` +\n    `${sqlStr(F['الشقة'])}, ${sqlStr(F['ملاحظات'])}, ${sqlStr(F['طريقة الدفع'])}, ` +\n    `${sqlStr(F['اسم المسئول'])}, ${sqlStr(save.receiptFileId)}, ` +\n    `${sqlStr(F['تاريخ'])}::timestamptz, 'bot') ` +\n    'on conflict (sheet_row) do update set expense_ref = excluded.expense_ref, ' +\n    'item = excluded.item, amount = excluded.amount, ' +\n    'apartment_id = excluded.apartment_id, ' +\n    'apartment_name = excluded.apartment_name, notes = excluded.notes, ' +\n    'payment_method = excluded.payment_method, responsible = excluded.responsible, ' +\n    'receipt_file_id = excluded.receipt_file_id, spent_at = excluded.spent_at;';\n}\n\nif (!sql) return [];\nreturn [{ json: { sheet_row: row, flow, sql } }];\n"
+      },
+      "position": [
+        3056,
+        448
+      ],
+      "id": "build-shadow-write"
+    },
+    {
+      "name": "Shadow Write",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "position": [
+        3296,
+        448
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "alwaysOutputData": true,
+      "id": "shadow-write"
+    },
+    {
+      "name": "Read Booking Id",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=select sheet_row as row_number, id::text as \"معرف النظام\" from bookings where sheet_row = {{ $('Build Shadow Write').first().json.sheet_row }} and {{ ['booking','edit','cancel'].includes($('Build Shadow Write').first().json.flow) }};",
+        "options": {}
+      },
+      "position": [
+        3536,
+        448
+      ],
+      "id": "read-booking-id",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "name": "Write Booking Id",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "إدخال الحجوزات"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [
+            "row_number"
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "position": [
+        3776,
+        448
+      ],
+      "id": "write-booking-id",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "name": "Build Snapshot SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "jsCode": "/**\n * Snapshot the spreadsheet into `sheet_snapshot` — the \"Build Snapshot SQL\" node.\n *\n * Runs on the daily schedule branch, reusing the two reads the reports already\n * do. Emits one statement: replace the snapshot wholesale, inside a transaction,\n * so the reconcile that follows can never see a half-loaded table.\n *\n * The snapshot records what the SHEET currently shows — evaluated numbers, not\n * formulas. `reconcile_bookings` then compares that against `bookings_live`,\n * whose effective_* columns reproduce the same arithmetic from the database\n * side. Any difference is a real one.\n */\n\nconst rows = $input.all().map(i => i.json);\n\n// Which rows are open-ended, from the FORMULA read. Not used to change what is\n// stored — the snapshot is deliberately \"what the sheet says\" — but a row whose\n// عدد الليالي is a formula has an evaluated night count that the database models\n// as NULL + open_ended, and bookings_live turns that back into the same number.\nconst openByRow = {};\nfor (const i of $('Read Report Formulas').all()) {\n  const j = i.json || {};\n  openByRow[String(j.row_number)] =\n    String(j['عدد الليالي'] === undefined ? '' : j['عدد الليالي']).trim().startsWith('=');\n}\n\nfunction s(v) {\n  if (v === undefined || v === null || v === '') return 'NULL';\n  return `'${String(v).replace(/^'/, '').replace(/'/g, \"''\")}'`;\n}\n\nfunction n(v) {\n  if (v === undefined || v === null || v === '') return 'NULL';\n  const x = Number(String(v).replace(/,/g, ''));\n  return Number.isFinite(x) ? String(x) : 'NULL';\n}\n\nconst values = [];\nfor (const j of rows) {\n  const name = String(j['اسم المقيم'] || '').trim();\n  if (!name) continue;                     // formula-only tail rows\n  const row = Number(j.row_number);\n  if (!row) continue;\n  // Column U — the booking's database id, written by the bot and by\n  // reindex.py. This is what lets the reconcile key on the BOOKING instead of\n  // the row it happens to occupy: inserting a row renumbers everything beneath\n  // it, and keying on sheet_row reported forty of those as differences once.\n  // Blank on a row nobody has stamped yet, and the reconcile falls back to\n  // sheet_row for those.\n  values.push(\n    `(${row}, ${s(name)}, ${s(j['اسم الشقة'])}, ${s(j['رقم الغرفة'])}, ` +\n    `${s(j['تاريخ البداية'])}::date, ${n(j['عدد الليالي'])}, ` +\n    `${n(j['اجمالي سعر الحجز'])}, ${n(j['اجمالي ما تم دفعه'])}, ` +\n    `${s(j['طريقة الدفع'])}, ${s(j['ملاحظات'])}, ${n(j['معرف النظام'])})`\n  );\n}\n\nif (!values.length) return [];             // never blank the snapshot on a bad read\n\nconst sql =\n  'begin; delete from sheet_snapshot; ' +\n  'insert into sheet_snapshot (sheet_row, guest_name, apartment_name, room_number, ' +\n  'arrival, nights, total, paid, payment_method, notes, booking_id) values ' +\n  values.join(', ') + '; commit;';\n\nreturn [{ json: { rows: values.length, open_rows: Object.values(openByRow).filter(Boolean).length, sql } }];\n"
+      },
+      "position": [
+        -240,
+        1040
+      ],
+      "id": "build-snapshot-sql"
+    },
+    {
+      "name": "Build Reconcile Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "jsCode": "/**\n * Turn the reconcile query into the morning message — \"Build Reconcile Message\".\n *\n * This is the report that earns the flip. It answers one question: does the\n * database still agree with the spreadsheet?\n *\n * It posts even when everything matches. A report that only appears when\n * something is wrong is indistinguishable from a report that has quietly stopped\n * running, and the whole point of the trust period is knowing the difference.\n */\n\nconst CFG = $('Report Config').first().json;\nconst CHAT_ID = CFG.REPORT_GROUP_CHAT_ID;\n\n// \"Read Discrepancies\" returns nothing at all when the two agree; n8n then hands\n// this node a single empty item rather than an empty list.\nconst rows = $input.all()\n  .map(i => i.json)\n  .filter(j => j && j.sheet_row !== undefined && j.sheet_row !== null);\n\nconst checked = (() => {\n  try { return Number($('Build Snapshot SQL').first().json.rows) || 0; } catch (e) { return 0; }\n})();\n\nconst MAX_LINES = 20;\n\nfunction esc(v) {\n  return String(v === undefined || v === null ? '' : v).replace(/([_*[\\]`])/g, '\\\\$1');\n}\n\nfunction show(v) {\n  if (v === undefined || v === null || v === '') return '—';\n  // Postgres hands dates back as ISO timestamps, and the UTC shift makes them\n  // read a day early. Only the date part is meaningful here.\n  const iso = /^(\\d{4}-\\d{2}-\\d{2})T/.exec(String(v));\n  return esc(iso ? iso[1] : v);\n}\n\n/** Only the fields that actually differ, so the line says what is wrong. */\nfunction diffs(r) {\n  const pairs = [\n    ['الاسم', r.sheet_guest, r.db_guest],\n    ['الشقة', r.sheet_apt, r.db_apt],\n    ['الغرفة', r.sheet_room, r.db_room],\n    ['البداية', r.sheet_arrival, r.db_arrival],\n    ['الليالي', r.sheet_nights, r.db_nights],\n    ['الاجمالي', r.sheet_total, r.db_total],\n    ['المدفوع', r.sheet_paid, r.db_paid],\n  ];\n  return pairs\n    .filter(([, a, b]) => String(a === null || a === undefined ? '' : a) !==\n                          String(b === null || b === undefined ? '' : b))\n    .map(([label, a, b]) => `${label}: ${show(a)} ≠ ${show(b)}`)\n    .join('، ');\n}\n\nlet text;\nif (!rows.length) {\n  text = `✅ *مطابقة* — ${checked} حجز، لا فروق بين الشيت وقاعدة البيانات.`;\n} else {\n  const missingDb = rows.filter(r => r.problem === 'missing in db');\n  const missingSheet = rows.filter(r => r.problem === 'missing in sheet');\n  const differs = rows.filter(r => r.problem === 'differs');\n\n  const parts = [`⚠️ *فروق بين الشيت وقاعدة البيانات* — ${rows.length} من ${checked}`, ''];\n\n  if (missingDb.length) {\n    parts.push(`❌ *في الشيت وغير موجود في قاعدة البيانات* (${missingDb.length})`);\n    parts.push(...missingDb.slice(0, MAX_LINES).map(\n      r => `• صف ${r.sheet_row}: ${show(r.sheet_guest)}`));\n    parts.push('');\n  }\n  if (missingSheet.length) {\n    parts.push(`❌ *في قاعدة البيانات وغير موجود في الشيت* (${missingSheet.length})`);\n    parts.push(...missingSheet.slice(0, MAX_LINES).map(\n      r => `• صف ${r.sheet_row}: ${show(r.db_guest)}`));\n    parts.push('');\n  }\n  if (differs.length) {\n    parts.push(`✏️ *قيم مختلفة* (${differs.length})`);\n    parts.push(...differs.slice(0, MAX_LINES).map(\n      r => `• صف ${r.sheet_row} ${show(r.sheet_guest || r.db_guest)} — ${diffs(r)}`));\n  }\n  if (rows.length > MAX_LINES) {\n    // esc() this too: the view name contains an underscore, which Telegram reads\n    // as the start of an italic run and then rejects the whole message with a\n    // 400. Escaping only the dynamic values is not enough — the literals count.\n    parts.push('', `… وغيرها. الفروق كاملة في ${esc('reconcile_bookings')}.`);\n  }\n  text = parts.join('\\n').trim();\n}\n\nreturn [{ json: { chat_id: CHAT_ID, text, parse_mode: 'Markdown' } }];\n"
+      },
+      "position": [
+        480,
+        1040
+      ],
+      "id": "build-reconcile-message"
+    },
+    {
+      "name": "Write Snapshot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "position": [
+        0,
+        1040
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "id": "write-snapshot"
+    },
+    {
+      "name": "Read Discrepancies",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select * from reconcile_bookings order by sheet_row;",
+        "options": {}
+      },
+      "position": [
+        240,
+        1040
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "id": "read-discrepancies"
+    },
+    {
+      "name": "Read Unmirrored Bookings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "parameters": {
+        "operation": "executeQuery",
+        "options": {},
+        "query": "-- Bookings the database has and the spreadsheet does not.\n--\n-- Everything the web UI creates lands here: it writes Postgres directly, so\n-- until something appends a row the booking is invisible to the sheet, to the\n-- 1,606 formulas in the other nine tabs, and to the daily report.\n--\n-- Column names are the sheet's own headers, so the Google Sheets node maps them\n-- by name; `booking_id` carries the id through for the update that follows and\n-- matches no header, so it is ignored on the way in.\n--\n-- `mirrored_at is null` is the guard against appending the same booking every\n-- morning. An append does not report which row it landed on, so the timestamp is\n-- the marker rather than sheet_row, and reindex.py learns the real row from\n-- column U on its next pass.\n--\n-- Formulas use INDIRECT(\"I\"&ROW()) rather than the I{row} the bot writes, for\n-- the same reason: nothing here knows the row number yet, and ROW() does.\nselect\n  b.id                                             as booking_id,\n  -- The row to write, computed here rather than appended.\n  --\n  -- Google's append writes a FULL-WIDTH row, blanking every column the mapping\n  -- does not mention — which would wipe the per-row formulas in N نسبة البرنامج,\n  -- P المتبقي, R تاريخ الإدخال and S صافي الدخل on the row it lands on. (K\n  -- survives an append because it is an array formula; the others are not.)\n  -- Updating a known row touches only the mapped columns, which is why the\n  -- bot's own booking writes have never damaged them.\n  (select coalesce(max(x.sheet_row), 1) from bookings x)\n    + row_number() over (order by b.id)            as row_number,\n  coalesce(nullif(b.booking_ref, ''), '')          as \"بوكنج ID\",\n  case when b.guest_ref is null or b.guest_ref = '' then ''\n       else '''' || b.guest_ref end                as \"ID\",\n  coalesce(b.guest_name, '')                       as \"اسم المقيم\",\n  coalesce(b.booking_type, '')                     as \"نوع الحجز\",\n  case when b.phone is null or b.phone = '' then ''\n       else '''' || b.phone end                    as \"رقم الهاتف\",\n  coalesce(b.apartment_name, '')                   as \"اسم الشقة\",\n  coalesce(b.room_number, '')                      as \"رقم الغرفة\",\n  case when b.open_ended then '=TODAY()-INDIRECT(\"J\"&ROW())'\n       else coalesce(b.nights::text, '') end       as \"عدد الليالي\",\n  coalesce(to_char(b.arrival, 'YYYY-MM-DD'), '')   as \"تاريخ البداية\",\n  case when b.open_ended and b.nightly_rate is not null\n         then '=' || trim(to_char(b.nightly_rate, 'FM999999999.##'))\n              || '*INDIRECT(\"I\"&ROW())'\n       else coalesce(trim(to_char(b.total, 'FM999999999.##')), '') end\n                                                   as \"اجمالي سعر الحجز\",\n  coalesce(trim(to_char(b.paid, 'FM999999999.##')), '') as \"اجمالي ما تم دفعه\",\n  coalesce(b.payment_method, '')                   as \"طريقة الدفع\",\n  coalesce(b.notes, '')                            as \"ملاحظات\",\n  b.id::text                                       as \"معرف النظام\"\nfrom bookings b\nwhere b.sheet_row is null\n  and b.mirrored_at is null\n  and b.cancelled_at is null\n  -- The sheet has one paid cell, and \"650 EGP + 40 USD\" is not a number that\n  -- fits in it. Left for a human, listed by mixed_currency_bookings.\n  and not exists (\n    select 1 from payments p\n    where p.booking_id = b.id\n    group by p.booking_id having count(distinct p.currency) > 1\n  )\norder by b.id;\n"
+      },
+      "position": [
+        720,
+        1200
+      ],
+      "id": "read-unmirrored-bookings",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "name": "Append Mirror Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "إدخال الحجوزات"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [
+            "row_number"
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "position": [
+        960,
+        1200
+      ],
+      "id": "append-mirror-row",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "name": "Mark Mirrored",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "parameters": {
+        "operation": "executeQuery",
+        "options": {},
+        "query": "update bookings set mirrored_at = now(), sheet_row = {{ $json.row_number }} where id = {{ $json.booking_id }};"
+      },
+      "position": [
+        1200,
+        1200
+      ],
+      "id": "mark-mirrored",
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Load Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Session": {
+      "main": [
+        [
+          {
+            "node": "Needs Bookings?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Bookings?": {
+      "main": [
+        [
+          {
+            "node": "Read Bookings For Edit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Needs Locations?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Bookings For Edit": {
+      "main": [
+        [
+          {
+            "node": "Needs Locations?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Locations?": {
+      "main": [
+        [
+          {
+            "node": "Read Locations",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Brain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Locations": {
+      "main": [
+        [
+          {
+            "node": "Brain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Brain": {
+      "main": [
+        [
+          {
+            "node": "Has Callback?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Has Reply?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save Session",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Has Save?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Callback?": {
+      "main": [
+        [
+          {
+            "node": "Answer Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Reply?": {
+      "main": [
+        [
+          {
+            "node": "Send Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Save?": {
+      "main": [
+        [
+          {
+            "node": "Route Save",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Save": {
+      "main": [
+        [
+          {
+            "node": "Read Booking Key",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read Expense Key",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Edit Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Edit Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Booking Key": {
+      "main": [
+        [
+          {
+            "node": "Build Booking Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Booking Row": {
+      "main": [
+        [
+          {
+            "node": "Write Booking Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Expense Key": {
+      "main": [
+        [
+          {
+            "node": "Build Expense Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Expense Row": {
+      "main": [
+        [
+          {
+            "node": "Write Expense Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Edit Row": {
+      "main": [
+        [
+          {
+            "node": "Write Edit Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Booking Row": {
+      "main": [
+        [
+          {
+            "node": "Has Group?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Save Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Expense Row": {
+      "main": [
+        [
+          {
+            "node": "Has Group?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Save Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Edit Row": {
+      "main": [
+        [
+          {
+            "node": "Has Group?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Save Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Group?": {
+      "main": [
+        [
+          {
+            "node": "Has Receipt?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Saved No Group",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Receipt?": {
+      "main": [
+        [
+          {
+            "node": "Post Receipt To Group",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Post To Group",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post To Group": {
+      "main": [
+        [
+          {
+            "node": "Send Saved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Receipt To Group": {
+      "main": [
+        [
+          {
+            "node": "Send Saved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Saved": {
+      "main": [
+        [
+          {
+            "node": "Clear Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Saved No Group": {
+      "main": [
+        [
+          {
+            "node": "Clear Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Session": {
+      "main": [
+        [
+          {
+            "node": "Should Format Row?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Shadow Write",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Format Row?": {
+      "main": [
+        [
+          {
+            "node": "Format Cancelled Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Schedule": {
+      "main": [
+        [
+          {
+            "node": "Report Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Config": {
+      "main": [
+        [
+          {
+            "node": "Read Report Formulas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Report Formulas": {
+      "main": [
+        [
+          {
+            "node": "Read Report Values",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Report Values": {
+      "main": [
+        [
+          {
+            "node": "Build Reports",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Snapshot SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Reports": {
+      "main": [
+        [
+          {
+            "node": "Send Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Shadow Write": {
+      "main": [
+        [
+          {
+            "node": "Shadow Write",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shadow Write": {
+      "main": [
+        [
+          {
+            "node": "Read Booking Id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Booking Id": {
+      "main": [
+        [
+          {
+            "node": "Write Booking Id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Snapshot SQL": {
+      "main": [
+        [
+          {
+            "node": "Write Snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Snapshot": {
+      "main": [
+        [
+          {
+            "node": "Read Discrepancies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Discrepancies": {
+      "main": [
+        [
+          {
+            "node": "Build Reconcile Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Reconcile Message": {
+      "main": [
+        [
+          {
+            "node": "Send Report",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read Unmirrored Bookings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Unmirrored Bookings": {
+      "main": [
+        [
+          {
+            "node": "Append Mirror Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Mirror Row": {
+      "main": [
+        [
+          {
+            "node": "Mark Mirrored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Africa/Cairo"
+  },
+  "pinData": {}
+}

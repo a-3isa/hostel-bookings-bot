@@ -8,6 +8,15 @@ idempotent — every step checks the live graph first, so re-running is a no-op.
 
     python booking_bot/deploy_graph.py            # apply to the draft
     python booking_bot/deploy_graph.py --publish  # apply, then activate
+    python booking_bot/deploy_graph.py --offline  # merge into the file instead
+
+`--offline` exists because the MCP endpoint is not always reachable — a middlebox
+is terminating its TLS at the time of writing. It applies exactly the same
+operations to `bookings-bot.workflow.json` on disk and writes
+`bookings-bot.full.workflow.json`, which is the whole bot in one file: import
+that by hand and there is nothing left for this script to do. Credentials are
+NOT written into it — they are bound in the n8n UI after the import, and the
+list of what to bind is printed.
 
 What it sets up:
 
@@ -44,6 +53,12 @@ REPORT_GROUP_CHAT_ID = "-5057362381"
 
 SHEETS_CRED = ("googleSheetsOAuth2Api", "plB4FVxraemXQcRt", "Google Sheets account")
 TELEGRAM_CRED = ("telegramApi", "bjQrxjNH2WgrghIQ", "Telegram account")
+
+# The file `build_workflow.py` writes, and the merged one this script writes when
+# it cannot reach n8n. Kept apart deliberately: regenerating the graph must not
+# silently drop the twenty nodes added here.
+OFFLINE_IN = os.path.join(HERE, "bookings-bot.workflow.json")
+OFFLINE_OUT = os.path.join(HERE, "bookings-bot.full.workflow.json")
 
 # States whose turn draws an apartment keyboard, and so needs the registry.
 LOCATION_STATES = ["PHONE", "EXP_AMOUNT", "EDIT_MENU"]
@@ -85,21 +100,71 @@ def read_source(name):
         return fh.read()
 
 
+def apply_offline(wf, ops):
+    """Run the operations against a workflow held in memory.
+
+    The same four verbs the MCP endpoint understands, so the file this produces
+    and the graph a successful `--publish` produces are the same graph. Anything
+    else in `ops` is a verb this has not been taught and is refused loudly rather
+    than skipped: a silently dropped operation is a node that quietly does not
+    exist in the imported bot.
+    """
+    nodes = {n["name"]: n for n in wf["nodes"]}
+    conns = wf.setdefault("connections", {})
+    for op in ops:
+        kind = op["type"]
+        if kind == "addNode":
+            node = dict(op["node"])
+            node.setdefault("id", node["name"].lower().replace(" ", "-").replace("?", ""))
+            wf["nodes"].append(node)
+            nodes[node["name"]] = node
+        elif kind == "addConnection":
+            main = conns.setdefault(op["source"], {}).setdefault("main", [])
+            while len(main) <= op["sourceIndex"]:
+                main.append([])
+            wired = {c["node"] for c in main[op["sourceIndex"]]}
+            if op["target"] not in wired:
+                main[op["sourceIndex"]].append({"node": op["target"], "type": "main",
+                                                "index": op.get("targetIndex", 0)})
+        elif kind == "updateNodeParameters":
+            nodes[op["nodeName"]]["parameters"].update(op["parameters"])
+        elif kind == "setNodeSettings":
+            nodes[op["nodeName"]].update(op["settings"])
+        else:
+            raise SystemExit(f"--offline cannot apply {kind!r}")
+    return wf
+
+
 def main():
-    # Picks the credential that can reach this workflow, not merely one that
-    # authenticates — see push_brain.select_server.
-    pb.require_workflow_id()
-    pb.select_server()
-    wf = json.loads(pb.call_tool("get_workflow_details",
-                                 {"workflowId": pb.WORKFLOW_ID}))["workflow"]
+    # Applying the same operations to the file instead of the endpoint, for when
+    # the endpoint cannot be reached. Nothing about the graph changes.
+    offline = "--offline" in sys.argv
+    offline_creds = []
+
+    if offline:
+        with open(OFFLINE_IN, encoding="utf-8") as fh:
+            wf = json.load(fh)
+        # No credential ids offline: they are bound in the UI after the import,
+        # and inventing an id here would produce a node that silently fails to
+        # authenticate rather than one n8n asks you to fix.
+        pg = {"id": None, "name": "Supabase Postgres"}
+        print(f"offline: {os.path.basename(OFFLINE_IN)}, {len(wf['nodes'])} nodes")
+    else:
+        # Picks the credential that can reach this workflow, not merely one that
+        # authenticates — see push_brain.select_server.
+        pb.require_workflow_id()
+        pb.select_server()
+        wf = json.loads(pb.call_tool("get_workflow_details",
+                                     {"workflowId": pb.WORKFLOW_ID}))["workflow"]
+        # Fetched once and shared: since Phase 4b the two reads are Postgres
+        # nodes too, not just the shadow write.
+        pg = next((c for c in json.loads(
+            pb.call_tool("list_credentials", {"limit": 100}))["data"]
+            if c["type"] == "postgres"), None)
+        print(f"live: {len(wf['nodes'])} nodes")
+
     have = {n["name"] for n in wf["nodes"]}
     conns = wf.get("connections", {})
-    print(f"live: {len(have)} nodes")
-
-    # Fetched once and shared: since Phase 4b the two reads are Postgres nodes
-    # too, not just the shadow write.
-    pg = next((c for c in json.loads(pb.call_tool("list_credentials", {"limit": 100}))["data"]
-               if c["type"] == "postgres"), None)
 
     ops = []
     creds = []
@@ -112,8 +177,12 @@ def main():
         ops.append({"type": "addNode", "node": node})
         if cred:
             key, cid, cname = cred
-            creds.append({"type": "setNodeCredential", "nodeName": name,
-                          "credentialKey": key, "credentialId": cid, "credentialName": cname})
+            if offline:
+                offline_creds.append((name, key, cname))
+            else:
+                creds.append({"type": "setNodeCredential", "nodeName": name,
+                              "credentialKey": key, "credentialId": cid,
+                              "credentialName": cname})
 
     def connect(src, tgt, index=0):
         existing = [c["node"] for br in conns.get(src, {}).get("main", [])[index:index + 1]
@@ -510,6 +579,21 @@ def main():
     ops.extend(creds)          # credentials bind after their node exists
     if not ops:
         print("nothing to do")
+        return
+
+    if offline:
+        apply_offline(wf, ops)
+        blob = json.dumps(wf, ensure_ascii=False, indent=2)
+        with open(OFFLINE_OUT, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(blob + "\n")
+        print(f"\napplied {len(ops)} operations to the file")
+        print(f"wrote {os.path.basename(OFFLINE_OUT)}: {len(wf['nodes'])} nodes,"
+              f" {len(blob) // 1024} KB")
+        if offline_creds:
+            print("\ncredentials to bind in the UI, on top of the ones the base"
+                  " file already needs:")
+            for name, key, cname in offline_creds:
+                print(f"  {name:24} {key} ({cname})")
         return
 
     print(f"\napplying {len(ops)} operations…")
