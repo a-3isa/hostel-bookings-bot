@@ -63,9 +63,16 @@ def brain_flows():
 
 
 def load():
-    if not os.path.exists(WF_PATH):
-        sys.exit(f"{WF_PATH} does not exist — run build_workflow.py first")
-    with open(WF_PATH, encoding="utf-8") as fh:
+    """The generated graph, or whichever file was named on the command line.
+
+    `deploy_graph.py --offline` writes a second file with its twenty nodes
+    merged in, and that is the one that gets imported by hand — so it has to be
+    checkable by the same rules, not taken on trust because it was generated.
+    """
+    path = next((a for a in sys.argv[1:] if not a.startswith("-")), WF_PATH)
+    if not os.path.exists(path):
+        sys.exit(f"{path} does not exist — run build_workflow.py first")
+    with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
