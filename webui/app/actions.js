@@ -4,8 +4,7 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { COOKIE, sessionToken, signedIn } from '../lib/auth';
-import { one, pgPool, q, tx } from '../lib/db';
-import { checkRow, insertPaymentRow, sheetsConfigured } from '../lib/sheets';
+import { one, q, tx } from '../lib/db';
 import { bool, integer, number, text } from '../lib/fmt';
 
 // Everything the dashboard writes is marked so it can be told apart later. The
@@ -186,21 +185,20 @@ export async function setCancelled(id, cancelled) {
 // without anyone deciding to. The booking page shows both figures side by side
 // and says so when they disagree.
 
-// A second payment in a different method is the one thing the sheet cannot hold
-// on a single line — one paid cell, one method cell. What people do by hand is
-// insert a row underneath carrying the extra amount and its method, and that is
-// all this does.
+// Records the payment and NOTHING else. It used to insert a sheet row here, and
+// a follower `bookings` row to own it; both are gone.
+//
+// Two reasons. The follower-booking model was retired by the collapse — a second
+// payment is a LINE, not a guest — and, more importantly, a row per payment is
+// not the rule any more: a payment in a method the booking already has joins
+// that method's line and its cell simply grows. Only `supabase/mirror.py`
+// knows every line a booking occupies, so it is the only thing that may decide.
 //
 // The booking's own method cell (O) is left exactly as it was, in the sheet and
 // in the database: formulas on the sheet read those values, and `متعدد` is not
 // one of the words they know. It is a dashboard label only — the table derives
 // it from the number of payment rows, and the real methods stay where the
 // formulas expect them.
-//
-// The sheet write only happens when column U proves the row is this booking. If
-// it cannot, the payment is still recorded in Postgres and the page says the
-// sheet was left alone — a wrong row number here would insert a line in the
-// middle of someone else's booking.
 export async function addPayment(bookingId, formData) {
   await requireAuth();
   const amount = number(formData, 'amount');
@@ -210,89 +208,18 @@ export async function addPayment(bookingId, formData) {
   const currency = text(formData, 'currency');
   const paidAt = text(formData, 'paid_at');
 
-  const booking = await one(
-    'select id, sheet_row, guest_name, payment_method from bookings where id = $1',
-    [bookingId],
-  );
+  const booking = await one('select id from bookings where id = $1', [bookingId]);
   if (!booking) redirect('/bookings');
 
-  const existing = await one(
-    'select count(*)::int as n from payments where booking_id = $1', [bookingId],
+  await q(
+    `insert into payments (booking_id, amount, method, currency, paid_at, source)
+     values ($1,$2,$3,coalesce($4,'EGP'),coalesce($5::timestamptz, now()),'bot')`,
+    [bookingId, amount, method, currency, paidAt],
   );
-
-  const row = booking.sheet_row === null ? null : Number(booking.sheet_row);
-  const wantsRow = existing.n >= 1;
-  let verdict = { ok: false, reason: row === null ? 'no-row' : 'sheets-config' };
-
-  if (wantsRow && row !== null && sheetsConfigured()) {
-    try {
-      verdict = await checkRow(row, bookingId);
-    } catch (err) {
-      console.error('sheet check failed', err);
-      verdict = { ok: false, reason: 'sheets-error' };
-    }
-  }
-
-  const client = await pgPool().connect();
-  let outcome = wantsRow ? `line=${verdict.ok ? 'added' : verdict.reason}` : 'saved=1';
-  try {
-    await client.query('begin');
-
-    if (!wantsRow || !verdict.ok) {
-      // First payment, or no provable row: just record it.
-      await client.query(
-        `insert into payments (booking_id, amount, method, currency, paid_at, source)
-         values ($1,$2,$3,coalesce($4,'EGP'),coalesce($5::timestamptz, now()),'bot')`,
-        [bookingId, amount, method, currency, paidAt],
-      );
-    } else {
-      // Inserting a sheet row pushes everything below it DOWN by one. Renumber
-      // through negative values first: `sheet_row` is UNIQUE and not deferrable,
-      // so a single incrementing UPDATE would collide with a row it has not
-      // reached yet.
-      for (const table of ['bookings', 'payments']) {
-        await client.query(
-          `update ${table} set sheet_row = -(sheet_row + 1) where sheet_row > $1`, [row],
-        );
-        await client.query(`update ${table} set sheet_row = -sheet_row where sheet_row < 0`);
-      }
-
-      // The continuation line is a real sheet row, so it is a real `bookings`
-      // row too, pointed at its parent. That is the shape the backfill found in
-      // the live data and the shape the reconcile compares against.
-      const follower = (await client.query(
-        `insert into bookings (guest_name, paid, payment_method, sheet_row, merged_into,
-                               created_by, source)
-         values ($1,$2,$3,$4,$5,$6,'bot') returning id`,
-        [booking.guest_name, amount, method, row + 1, bookingId, WEB],
-      )).rows[0];
-
-      await client.query(
-        `insert into payments (booking_id, amount, method, currency, paid_at, sheet_row, source)
-         values ($1,$2,$3,coalesce($4,'EGP'),coalesce($5::timestamptz, now()),$6,'bot')`,
-        [bookingId, amount, method, currency, paidAt, row + 1],
-      );
-
-      await insertPaymentRow(row, {
-        guestName: booking.guest_name,
-        amount,
-        method,
-        bookingId: follower.id,
-      });
-    }
-
-    await client.query('commit');
-  } catch (err) {
-    await client.query('rollback');
-    console.error('addPayment failed', err);
-    outcome = 'line=sheets-error';
-  } finally {
-    client.release();
-  }
 
   revalidatePath('/bookings');
   revalidatePath(`/bookings/${bookingId}`);
-  redirect(`/bookings/${bookingId}?${outcome}`);
+  redirect(`/bookings/${bookingId}?saved=1`);
 }
 
 export async function deletePayment(bookingId, paymentId) {
