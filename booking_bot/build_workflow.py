@@ -107,8 +107,8 @@ POSTGRES_CRED = ("postgres", "REPLACE_ME", "Supabase Postgres")
 # next expense was written straight over it. A row is occupied if ANY of its
 # typed columns holds something, and the builders now take the last such row
 # rather than counting.
-BOOKING_KEY_RANGE = "A2:J2000"
-EXPENSE_KEY_RANGE = "A2:H2000"
+BOOKING_KEY_RANGE = "A1:J2000"
+EXPENSE_KEY_RANGE = "A1:H2000"
 
 # States whose turn needs a lookup before the Brain runs. Kept identical to
 # deploy_graph.py, which rewrites the same two gates — see BOOKING_STATES and
@@ -188,6 +188,45 @@ def flag_condition(expr, cid):
              "operator": {"type": "boolean", "operation": "true", "singleValue": True}}
         ],
         "combinator": "and",
+    }
+
+
+def values_get(tab_expr, rng):
+    """Read a range through the Sheets API itself, not through the Sheets node.
+
+    Where the next row goes is arithmetic on the sheet's own row numbers, and
+    the node does not give those away honestly: it maps rows into items, decides
+    for itself which row is the header, and numbers what is left from its own
+    view of the range. Counting those items put a booking on top of the last row
+    of both tabs — reported 2026-08-15, after `row_number` had already been
+    tried and was one short for the same reason.
+
+    `values.length` has no such ambiguity. The API returns rows from row 1 with
+    trailing empty ones trimmed and interior blanks preserved, so its length IS
+    the last occupied row and the next row is one below. That is what the Python
+    bot did before any of this, and it never landed on an occupied row.
+    """
+    return {
+        "method": "GET",
+        # The tab name is Arabic with spaces, so it has to be encoded, and it
+        # comes from Config rather than being frozen here — the same value the
+        # writer uses, so the two cannot drift onto different tabs.
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/"
+               f"{SHEET_ID}/values/{{{{ encodeURIComponent($('Config').first()"
+               f".json.{tab_expr} + '!{rng}') }}}}",
+        # Same note as Format Cancelled Row: this binding cannot be set over the
+        # API, only in the editor or by importing the JSON.
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": True,
+        "queryParameters": {"parameters": [
+            {"name": "majorDimension", "value": "ROWS"},
+            # Formulas evaluate to '' on empty rows either way; what matters is
+            # that a row holding only a formula still counts as occupied, and
+            # UNFORMATTED_VALUE keeps numbers as numbers for the eye.
+            {"name": "valueRenderOption", "value": "UNFORMATTED_VALUE"},
+        ]},
+        "options": {},
     }
 
 
@@ -469,8 +508,8 @@ def build():
 
     # booking: find the last row from the key column, then write only the input
     # columns onto row_number.
-    g.node("Read Booking Key", "n8n-nodes-base.googleSheets", 4.7,
-           sheets_read(BOOKINGS_TAB, BOOKING_KEY_RANGE), (1560, 480),
+    g.node("Read Booking Key", "n8n-nodes-base.httpRequest", 4.2,
+           values_get("BOOKINGS_TAB", BOOKING_KEY_RANGE), (1560, 480),
            cred=SHEETS_CRED, alwaysOutputData=True)
     g.node("Build Booking Row", "n8n-nodes-base.code", 2,
            {"jsCode": read_source("build_booking_row.js")}, (1760, 480))
@@ -478,8 +517,8 @@ def build():
            sheets_update(BOOKINGS_TAB), (1960, 480), cred=SHEETS_CRED)
 
     # expense: the same shape against the other tab and its own key column.
-    g.node("Read Expense Key", "n8n-nodes-base.googleSheets", 4.7,
-           sheets_read(EXPENSE_TAB, EXPENSE_KEY_RANGE), (1560, 660),
+    g.node("Read Expense Key", "n8n-nodes-base.httpRequest", 4.2,
+           values_get("EXPENSE_TAB", EXPENSE_KEY_RANGE), (1560, 660),
            cred=SHEETS_CRED, alwaysOutputData=True)
     g.node("Build Expense Row", "n8n-nodes-base.code", 2,
            {"jsCode": read_source("build_expense_row.js")}, (1760, 660))

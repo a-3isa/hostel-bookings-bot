@@ -40,12 +40,60 @@ function target(fn, save, items) {
 /** A row as the Sheets node returns it: the sheet's own row_number, plus cells. */
 const row = (n, cells) => ({ json: { row_number: n, ...cells } });
 
+/**
+ * The Sheets API response, which is what the reads produce now.
+ *
+ * `values` starts at row 1 and the API trims only the empty tail, so its length
+ * is the last occupied row. `lastRow` here is that row number; the helper fills
+ * the array so the two agree.
+ */
+const api = (lastRow, { blanks = [] } = {}) => [{
+  json: {
+    range: 'tab!A1:J2000',
+    majorDimension: 'ROWS',
+    values: Array.from({ length: lastRow },
+      (_, i) => (blanks.includes(i + 1) ? [] : ['x'])),
+  },
+}];
+
 let failures = 0;
 function check(label, got, want) {
   if (got === want) console.log(`  ok   ${label}`);
   else { failures++; console.log(`  FAIL ${label} → got ${got}, want ${want}`); }
 }
 function section(n) { console.log(`\n${n}`); }
+
+section('the live sheet, as it stood on 2026-08-15');
+{
+  // Measured against the real spreadsheet: إدخال الحجوزات ends at row 77 and
+  // مصروفات عامة at row 26. Both were being written ON, not below.
+  check('a booking goes to 78, not onto 77', target(bookingFn, BOOKING_SAVE, api(77)), 78);
+  check('an expense goes to 27, not onto 26', target(expenseFn, EXPENSE_SAVE, api(26)), 27);
+}
+
+section('the second incident: writing onto the last occupied row');
+{
+  // n8n numbers rows from its own view of the range, so max(row_number) + 1 was
+  // one short and every save landed on the last row. The API's `values` has no
+  // such opinion: length IS the last occupied row.
+  check('expense: the row after the last one', target(expenseFn, EXPENSE_SAVE, api(19)), 20);
+  check('booking: the row after the last one', target(bookingFn, BOOKING_SAVE, api(9)), 10);
+}
+{
+  // The API keeps interior blanks as empty arrays, so a hole in the middle does
+  // not shorten the answer.
+  check('a hole in the middle changes nothing',
+    target(expenseFn, EXPENSE_SAVE, api(19, { blanks: [4, 5] })), 20);
+}
+{
+  // An empty tab: the API omits `values` entirely rather than sending [].
+  const empty = [{ json: { range: 'tab!A1:H2000', majorDimension: 'ROWS' } }];
+  check('an untouched tab starts at row 1', target(expenseFn, EXPENSE_SAVE, empty), 1);
+}
+{
+  const one = api(1);   // the header alone
+  check('a tab with only headers writes row 2', target(expenseFn, EXPENSE_SAVE, one), 2);
+}
 
 section('the incident: a hand-typed row the old count could not see');
 {
