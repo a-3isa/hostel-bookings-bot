@@ -1,0 +1,166 @@
+"""
+Push named nodes from the generated workflow file into the live n8n workflow.
+
+`push_brain.py` syncs the Brain and the Config lists; `deploy_graph.py` creates
+the twenty nodes of its own branch. Neither owns the nodes that
+`build_workflow.py` generates, so when a fix lands in the repo and the workflow
+is already running, there was no way to move it across short of re-importing all
+54 nodes and rebinding 31 credentials by hand. That is what this is for.
+
+    python sync_nodes.py                    # what differs, pushes nothing
+    python sync_nodes.py --diff             # every differing node, not just the default set
+    python sync_nodes.py --apply            # update the draft
+    python sync_nodes.py --apply --publish  # update, then activate
+    python sync_nodes.py --apply "Route Save" "Answer Callback"
+
+With no names it syncs DEFAULT_NODES — the four that carry the row calculation
+of 2026-08-15, two of which change node TYPE and so cannot be fixed by editing
+fields in the UI.
+
+Nodes it will not touch without being named outright (NEVER_DEFAULT):
+
+  * Config holds BOT_TOKEN, the sheet gid and the real group chat ids. The
+    committed file has placeholders in all of them, and pushing it would take
+    the bot off the air.
+  * Brain belongs to push_brain.py, which reads brain.js rather than the
+    workflow file.
+  * The Sheets writers carry a `columns.schema` that n8n fills in from the live
+    tab. The generated file has none, and pushing it would drop what the node
+    learned about the sheet.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import push_brain as pb   # same directory; reuses its JSON-RPC plumbing
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SOURCE = os.path.join(HERE, "bookings-bot.full.workflow.json")
+
+# The row calculation: two reads that become HTTP calls against the Sheets API,
+# and the two builders that read `values.length` off the answer.
+DEFAULT_NODES = ["Read Booking Key", "Read Expense Key",
+                 "Build Booking Row", "Build Expense Row"]
+
+NEVER_DEFAULT = {"Config", "Brain", "Write Booking Row", "Write Booking Id"}
+
+
+def load_source():
+    with open(SOURCE, encoding="utf-8") as fh:
+        wf = json.load(fh)
+    return {n["name"]: n for n in wf["nodes"]}
+
+
+def differs(live, want):
+    return (live["type"] != want["type"]
+            or live.get("typeVersion") != want.get("typeVersion")
+            or live.get("parameters") != want.get("parameters"))
+
+
+def edges(conns, name):
+    """Every connection touching `name`, as (source, sourceIndex, target)."""
+    out = []
+    for src, byType in conns.items():
+        for branches in (byType.get("main") or [],):
+            for i, branch in enumerate(branches or []):
+                for c in branch or []:
+                    if src == name or c["node"] == name:
+                        out.append((src, i, c["node"], c.get("index", 0)))
+    return out
+
+
+def main():
+    apply_ = "--apply" in sys.argv
+    names = [a for a in sys.argv[1:] if not a.startswith("--")]
+
+    pb.require_workflow_id()
+    pb.select_server()
+    wf = json.loads(pb.call_tool("get_workflow_details",
+                                 {"workflowId": pb.WORKFLOW_ID}))["workflow"]
+    live = {n["name"]: n for n in wf["nodes"]}
+    conns = wf.get("connections", {})
+    source = load_source()
+    print(f"live: {wf['name']} — active={wf['active']} nodes={len(live)}")
+
+    if "--diff" in sys.argv:
+        for name, want in source.items():
+            if name in live and differs(live[name], want):
+                mark = "TYPE" if live[name]["type"] != want["type"] else "params"
+                note = "  (not synced unless named)" if name in NEVER_DEFAULT else ""
+                print(f"  {mark:6} {name}{note}")
+        return
+
+    if not names:
+        names = DEFAULT_NODES
+    missing = [n for n in names if n not in source or n not in live]
+    if missing:
+        raise SystemExit("not in both the file and the workflow: " + ", ".join(missing))
+
+    # Credentials are bound in the UI and the committed file cannot know their
+    # ids, so it carries REPLACE_ME. Resolve by type against the live instance.
+    by_type = {}
+    for c in json.loads(pb.call_tool("list_credentials", {"limit": 100}))["data"]:
+        by_type.setdefault(c["type"], c)
+
+    ops = []
+    for name in names:
+        want, have = source[name], live[name]
+        if not differs(have, want):
+            print(f"  same   {name}")
+            continue
+
+        if have["type"] != want["type"] or have.get("typeVersion") != want.get("typeVersion"):
+            # A node's type cannot be edited in place. Remove it, add it back
+            # under the same name, and restore every connection it had —
+            # position included, so the canvas does not rearrange itself.
+            print(f"  TYPE   {name}: {have['type']} -> {want['type']}")
+            wires = edges(conns, name)
+            ops.append({"type": "removeNode", "nodeName": name})
+            node = {"name": name, "type": want["type"],
+                    "typeVersion": want["typeVersion"],
+                    "parameters": want["parameters"],
+                    "position": have.get("position") or want.get("position")}
+            ops.append({"type": "addNode", "node": node})
+            for src, idx, tgt, tidx in wires:
+                ops.append({"type": "addConnection", "source": src, "target": tgt,
+                            "sourceIndex": idx, "targetIndex": tidx})
+            for key in (want.get("credentials") or {}):
+                cred = by_type.get(key)
+                if not cred:
+                    raise SystemExit(f"{name} needs a {key} credential and this "
+                                     "account has none")
+                ops.append({"type": "setNodeCredential", "nodeName": name,
+                            "credentialKey": key, "credentialId": cred["id"],
+                            "credentialName": cred["name"]})
+            settings = {k: want[k] for k in ("alwaysOutputData", "executeOnce",
+                                             "retryOnFail", "onError")
+                        if k in want}
+            if settings:
+                ops.append({"type": "setNodeSettings", "nodeName": name,
+                            "settings": settings})
+        else:
+            keys = [k for k in set(want["parameters"]) | set(have.get("parameters") or {})
+                    if want["parameters"].get(k) != (have.get("parameters") or {}).get(k)]
+            print(f"  params {name}: {', '.join(sorted(keys))}")
+            ops.append({"type": "updateNodeParameters", "nodeName": name,
+                        "parameters": want["parameters"], "replace": True})
+
+    if not ops:
+        print("nothing to do")
+        return
+    if not apply_:
+        print(f"\n{len(ops)} operations. Re-run with --apply to push them.")
+        return
+
+    print(pb.call_tool("update_workflow", {
+        "workflowId": pb.WORKFLOW_ID, "operations": ops,
+        "versionName": "Row calculation reads the Sheets API",
+    }))
+    if "--publish" in sys.argv:
+        print(pb.call_tool("publish_workflow", {"workflowId": pb.WORKFLOW_ID}))
+
+
+if __name__ == "__main__":
+    main()
