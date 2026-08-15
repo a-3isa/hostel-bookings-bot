@@ -14,13 +14,24 @@
  * The order matters. The line is written first because it is the row that may
  * have just been created empty; if the booking row update failed on its own,
  * the money would still be on the sheet.
+ *
+ * معرف النظام is deliberately NOT among the columns emitted here. "Write Line
+ * Id" writes it afterwards with one API call, because putting it through the
+ * Sheets node is what made this branch slow: measured 2026-08-15, the node
+ * writing this row with U took 31,363 ms and the same node writing A–Q without
+ * it takes under a second. The id still reaches the sheet — that node reads it
+ * straight off the Brain — it just no longer sits between the user and their ✅.
  */
 
 const save = $('Brain').first().json.save;
 const items = [];
 
+/** Column U, written by its own node. See the note above. */
+const ID_COL = 'معرف النظام';
+
 const line = { row_number: save.row };
 for (const k of Object.keys(save.fields || {})) {
+  if (k === ID_COL) continue;
   const v = save.fields[k];
   // '=TODAY()-J{r}' on an open-ended stay: the line counts its own nights from
   // its own row, so {r} is this row and not the booking's.
