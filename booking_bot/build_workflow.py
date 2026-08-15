@@ -299,6 +299,26 @@ def sheets_update(tab):
     }
 
 
+def telegram_body(path):
+    """sendMessage with a body the Brain built, at `save.…` on the Brain's item.
+
+    The Telegram node cannot express these: its inlineKeyboard is a fixed
+    collection, so the number of rows and buttons is set when the graph is
+    generated, and the saved card has one row or two depending on whether the
+    save left anything to undo. Send Reply has been an HTTP node since the
+    beginning for the same reason — the calendar and the room grid vary too.
+    """
+    return {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot"
+               "{{ $('Config').first().json.BOT_TOKEN }}/sendMessage",
+        "sendBody": True,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Brain').first().json." + path + ") }}",
+        "options": {},
+    }
+
+
 def telegram_send(text_expr, chat_expr):
     return {
         "chatId": chat_expr,
@@ -707,14 +727,16 @@ def build():
            telegram_send("={{ $('Brain').first().json.save.groupText }}",
                          "={{ $('Brain').first().json.save.groupChatId }}"),
            (2560, 540), cred=TELEGRAM_CRED)
-    g.node("Send Saved", "n8n-nodes-base.telegram", 1.2,
-           telegram_send("={{ $('Brain').first().json.save.savedText }}",
-                         "={{ $('Brain').first().json.chatId }}"),
-           (2560, 540), cred=TELEGRAM_CRED)
-    g.node("Send Saved No Group", "n8n-nodes-base.telegram", 1.2,
-           telegram_send("={{ $('Brain').first().json.save.savedNoGroupText }}",
-                         "={{ $('Brain').first().json.chatId }}"),
-           (2360, 780), cred=TELEGRAM_CRED)
+    # HTTP, not Telegram nodes, for the reason Send Reply always has been: the
+    # Telegram node's inlineKeyboard is a fixed collection, so the number of rows
+    # is decided here at design time. The saved card carries ↩️ تراجع only when
+    # the save left something to undo, so it has one row or two. The Brain emits
+    # the whole sendMessage body — savedBody / savedNoGroupBody — the same way it
+    # emits `reply`.
+    g.node("Send Saved", "n8n-nodes-base.httpRequest", 4.2,
+           telegram_body("save.savedBody"), (2560, 540))
+    g.node("Send Saved No Group", "n8n-nodes-base.httpRequest", 4.2,
+           telegram_body("save.savedNoGroupBody"), (2360, 780))
 
     # The write itself is the thing that can fail — a revoked Sheets token, a
     # renamed tab. onError keeps the run alive so the user is told, instead of

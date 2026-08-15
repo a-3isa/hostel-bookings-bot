@@ -164,9 +164,9 @@ const S = {
     '👤 المسئول: {actor}\n' +
     '🕐 التاريخ: {date}\n' +
     '📎 الإيصال: {receipt}',
-  exp_saved: '✅ تم حفظ المصروف.\nأرسل /start من جديد.',
+  exp_saved: '✅ تم حفظ المصروف.',
   exp_saved_no_group:
-    '✅ تم حفظ المصروف.\n⚠️ تعذّر الإرسال للجروب (تأكد من إضافة البوت).\nأرسل /start من جديد.',
+    '✅ تم حفظ المصروف.\n⚠️ تعذّر الإرسال للجروب (تأكد من إضافة البوت).',
 
   ask_booking_id: '🔖 أدخل رقم البوكينج (إن وجد) أو اضغط تخطي:',
   btn_skip: 'تخطي',
@@ -266,8 +266,8 @@ const S = {
   edit_departure_line: '📅 تاريخ المغادرة: {departure}',
   btn_delete_booking: '🗑️ إلغاء الحجز',
   edit_no_changes: 'لم يتم تغيير أي شيء. أرسل /start من جديد.',
-  edit_saved: '✅ تم حفظ التعديلات.\nأرسل /start من جديد.',
-  edit_saved_no_group: '✅ تم حفظ التعديلات.\n⚠️ تعذّر الإرسال للجروب.\nأرسل /start من جديد.',
+  edit_saved: '✅ تم حفظ التعديلات.',
+  edit_saved_no_group: '✅ تم حفظ التعديلات.\n⚠️ تعذّر الإرسال للجروب.',
   edit_group_msg:
     '✏️ *تعديل حجز*\n\n' +
     '👤 المقيم: {name}\n' +
@@ -275,8 +275,8 @@ const S = {
     '{changes}\n\n' +
     '👤 بواسطة: {actor}',
   del_confirm: '⚠️ تأكيد إلغاء الحجز التالي؟\n\n{summary}',
-  del_saved: '✅ تم إلغاء الحجز.\nأرسل /start من جديد.',
-  del_saved_no_group: '✅ تم إلغاء الحجز.\n⚠️ تعذّر الإرسال للجروب.\nأرسل /start من جديد.',
+  del_saved: '✅ تم إلغاء الحجز.',
+  del_saved_no_group: '✅ تم إلغاء الحجز.\n⚠️ تعذّر الإرسال للجروب.',
   del_group_msg:
     '🗑️ *إلغاء حجز*\n\n' +
     '👤 المقيم: {name}\n' +
@@ -292,8 +292,8 @@ const S = {
   paid_ask_amount: '💵 أدخل المبلغ المدفوع (المدفوع حالياً: {current}):',
   paid_ask_receipt: '📎 أرسل صورة إيصال التحويل:',
   paid_receipt_error: '❌ لا بد من إرسال صورة الإيصال:',
-  paid_saved: '✅ تم تسجيل الدفعة.\nأرسل /start من جديد.',
-  paid_saved_no_group: '✅ تم تسجيل الدفعة.\n⚠️ تعذّر الإرسال للجروب.\nأرسل /start من جديد.',
+  paid_saved: '✅ تم تسجيل الدفعة.',
+  paid_saved_no_group: '✅ تم تسجيل الدفعة.\n⚠️ تعذّر الإرسال للجروب.',
   paid_group_msg:
     '💵 *دفعة جديدة*\n\n' +
     '👤 المقيم: {name}\n' +
@@ -319,8 +319,8 @@ const S = {
   undo_not_supported:
     'التراجع متاح للتعديلات والدفعات فقط.\nلإلغاء حجز جديد استخدم *تعديل حجز* ← 🗑️ إلغاء الحجز.',
   undo_confirm: '↩️ *تراجع عن آخر تعديل؟*\n\n{changes}',
-  undo_saved: '✅ تم التراجع.\nأرسل /start من جديد.',
-  undo_saved_no_group: '✅ تم التراجع.\n⚠️ تعذّر الإرسال للجروب.\nأرسل /start من جديد.',
+  undo_saved: '✅ تم التراجع.',
+  undo_saved_no_group: '✅ تم التراجع.\n⚠️ تعذّر الإرسال للجروب.',
   undo_group_msg:
     '↩️ *تراجع عن تعديل*\n\n' +
     '👤 المقيم: {name}\n' +
@@ -338,12 +338,26 @@ const S = {
     '   🔻 التداخل: {overlap_from} ← {overlap_to}{nights_part}',
   conflict_id_part: ' — ID {private_id}',
   conflict_nights_part: ' ({nights} ليلة)',
+  // Not the same thing as a conflict. A conflict is two guests in one room; this
+  // is the SAME guest, room and date already on the sheet — almost always the
+  // same booking entered twice. On 2026-08-15 that happened 45 minutes apart and
+  // produced bookings 1015 and 1019, identical down to the 1,420 كاش payment.
+  dup_warning:
+    '⚠️ *حجز مشابه موجود بالفعل* ({count}):\n{list}\n' +
+    'لو ده نفس الحجز، اضغط إلغاء.',
+  dup_line: '• صف {row} — {name}{id_part}\n   🛏️ {arrival} — {apartment} / {room}',
+  btn_confirm_dup: '⚠️ احفظ حجز جديد رغم التشابه',
+  // On the saved card. These replaced "أرسل /start من جديد" — a receptionist with
+  // a phone in one hand and a guest in front of them should not have to type a
+  // command to do the obvious next thing.
+  btn_undo_last: '↩️ تراجع',
+  btn_new_booking: '➕ حجز جديد',
   btn_confirm_anyway: '⚠️ احفظ رغم التعارض',
   btn_confirm: '✅ حفظ',
   btn_cancel: '❌ إلغاء',
-  saved: '✅ تم حفظ الحجز.\nأرسل /start لإدخال حجز جديد.',
+  saved: '✅ تم حفظ الحجز.',
   saved_no_group:
-    '✅ تم حفظ الحجز.\n⚠️ تعذّر الإرسال للجروب (تأكد من إضافة البوت للجروب).\nأرسل /start لإدخال حجز جديد.',
+    '✅ تم حفظ الحجز.\n⚠️ تعذّر الإرسال للجروب (تأكد من إضافة البوت للجروب).',
   cancelled: 'تم الإلغاء. أرسل /start للبدء من جديد.',
   error: '⚠️ حدث خطأ أثناء الحفظ. حاول مجدداً.',
   infinity_label: '∞ مفتوح',
@@ -726,6 +740,51 @@ function findConflicts(apartment, room, arrival, nights, isOpen, skipRow) {
   return hits;
 }
 
+/** Names compare as people read them: collapsed spaces, no case, no tatweel. */
+function sameName(a, b) {
+  const norm = (s) => String(s || '')
+    .replace(/ـ/g, '')            // ـ, which changes nothing but the width
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const na = norm(a);
+  return na !== '' && na === norm(b);
+}
+
+/**
+ * Rows that look like THIS booking already being on the sheet.
+ *
+ * Same guest, same apartment, same room, same arrival. `saveLocked` cannot see
+ * these: it swallows a second tap inside one session for a minute, and the two
+ * saves of ابو الحسن on 2026-08-15 were 45 minutes and two sessions apart. The
+ * sheet is the only thing that remembers across both.
+ *
+ * A warning, never a block — the same rule findConflicts follows. Two guests
+ * really can share a name, and a receptionist standing in front of one knows
+ * things the sheet does not. It does make them say so.
+ */
+function findDuplicates(guest, apartment, room, arrival, skipRow) {
+  const hits = [];
+  for (const x of bookingRows()) {
+    const j = x.json;
+    if (skipRow && x.row === skipRow) continue;
+    if (String(j['ملاحظات'] || '').indexOf(t('del_note')) !== -1) continue;
+    if (!sameName(j['اسم المقيم'], guest)) continue;
+    if (String(j['اسم الشقة'] || '').trim() !== String(apartment).trim()) continue;
+    if (String(j['رقم الغرفة'] || '').trim() !== String(room).trim()) continue;
+    if (String(j['تاريخ البداية'] || '').trim() !== String(arrival).trim()) continue;
+    hits.push({
+      row: x.row,
+      name: j['اسم المقيم'] || t('empty'),
+      privateId: plainId(j['ID']),
+      apartment: j['اسم الشقة'] || t('empty'),
+      room: j['رقم الغرفة'] || t('empty'),
+      arrival: String(j['تاريخ البداية'] || '').trim(),
+    });
+  }
+  return hits;
+}
+
 // ─── Output builder ───────────────────────────────────────────────────────────
 
 const out = {
@@ -870,11 +929,38 @@ function showConfirm() {
         .join('\n'),
     });
   }
+  // Shown on the turn that draws the confirmation, because that is the turn the
+  // booking rows are already loaded for — the availability check needs them, so
+  // this costs no extra query. It is also the right moment: before the save, not
+  // after it.
+  const dups = findDuplicates(d.name, d.apartment, d.room, d.arrival_date);
+  d.duplicate = dups.length > 0;
+  if (d.duplicate) {
+    body += '\n\n' + t('dup_warning', {
+      count: dups.length,
+      list: dups
+        .map(x => t('dup_line', {
+          row: x.row,
+          name: mdEscape(x.name),
+          id_part: x.privateId ? t('conflict_id_part', { private_id: mdEscape(x.privateId) }) : '',
+          arrival: x.arrival,
+          apartment: mdEscape(x.apartment),
+          room: mdEscape(String(x.room)),
+        }))
+        .join('\n'),
+    });
+  }
   reply(body, {
     inline_keyboard: [
-      // A conflict does not block the save — a receptionist standing in front of
-      // a guest knows things the sheet does not. It does make them say so.
-      [{ text: d.conflict ? t('btn_confirm_anyway') : t('btn_confirm'), callback_data: 'save' }],
+      // Neither a conflict nor a duplicate blocks the save — a receptionist
+      // standing in front of a guest knows things the sheet does not. Both make
+      // them say so, and the duplicate is named first because it is the one that
+      // is usually a mistake rather than a judgement call.
+      [{
+        text: d.duplicate ? t('btn_confirm_dup')
+          : d.conflict ? t('btn_confirm_anyway') : t('btn_confirm'),
+        callback_data: 'save',
+      }],
       [{ text: t('btn_cancel'), callback_data: 'cancel' }],
     ],
   }, true);
@@ -1364,7 +1450,19 @@ function startPaid() { reply(t('paid_ask_id')); setState('EDIT_FIND', { paidOnly
 
 // ─── Entry points: /start and /cancel ─────────────────────────────────────────
 
-if (text === '/start' || (text || '').startsWith('/start@')) {
+// The buttons on the saved card stand in for the two commands a receptionist
+// would otherwise type. They are rewritten to the commands rather than handled
+// separately, so /start and /undo keep exactly one implementation each — the
+// undo window, the expiry message and the "cannot undo an append" case included.
+//
+// The session is already ended by the time this card is on screen, so these
+// arrive with no state, which is precisely the shape both commands expect.
+const asCommand = cbData === 'go_start' ? '/start'
+  : cbData === 'go_undo' ? '/undo'
+  : null;
+const cmd = asCommand || text;
+
+if (cmd === '/start' || (cmd || '').startsWith('/start@')) {
   endSession();
   if (isAdmin) {
     reply(t('choose_action'), {
@@ -1400,7 +1498,7 @@ if (text === '/cancel' || (text || '').startsWith('/cancel@')) {
 // row, so the record survives the write that produced it. Undo restores those
 // columns and nothing else.
 
-if (text === '/undo' || (text || '').startsWith('/undo@')) {
+if (cmd === '/undo' || (cmd || '').startsWith('/undo@')) {
   let parked = {};
   try { parked = JSON.parse(loadedRow.data || '{}'); } catch (e) { parked = {}; }
   const rec = parked.lastWrite;
@@ -2153,6 +2251,37 @@ switch (state) {
     };
     break;
   }
+}
+
+// ─── The saved card ───────────────────────────────────────────────────────────
+//
+// Every flow above sets `savedText` and `savedNoGroupText` as bare strings. Here
+// they become complete sendMessage bodies with buttons on them, in one place
+// rather than in six.
+//
+// The buttons replace "أرسل /start من جديد", which asked a receptionist holding a
+// phone in one hand to type a command to do the single most likely next thing.
+// ↩️ تراجع is offered only when this save left something to undo: an appended
+// row has no pre-image, /undo answers `undo_not_supported` for it, and a button
+// that always says no is worse than no button.
+//
+// "Send Saved" and "Send Saved No Group" read these instead of a plain string,
+// which is also why they are HTTP nodes now — the Telegram node's inlineKeyboard
+// is a fixed collection, so the number of rows is decided at design time, and
+// this varies. Same reason "Send Reply" has always been an HTTP node.
+if (out.hasSave && out.save) {
+  const buttons = [];
+  if (out.save.undo) {
+    buttons.push([{ text: t('btn_undo_last'), callback_data: 'go_undo' }]);
+  }
+  buttons.push([{ text: t('btn_new_booking'), callback_data: 'go_start' }]);
+  const card = (body) => ({
+    chat_id: chatId,
+    text: body,
+    reply_markup: { inline_keyboard: buttons },
+  });
+  out.save.savedBody = card(out.save.savedText);
+  out.save.savedNoGroupBody = card(out.save.savedNoGroupText);
 }
 
 // On a save the session is deliberately kept until the write succeeds, so a
