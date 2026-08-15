@@ -584,13 +584,24 @@ def build():
             "combinator": "and"},
         "options": {},
     }, (2360, 660))
+    # `file`, not `photo`. The Telegram node names this property `file` for
+    # every send-a-thing operation — sendPhoto, sendDocument, sendVideo — and an
+    # unrecognised property is simply not sent, so Telegram answered "Bad
+    # Request: there is no photo in the request" and the whole execution
+    # stopped. Reported live on 2026-08-15: attaching a receipt meant the save
+    # never finished.
+    #
+    # `resource` is explicit for the same reason: the parameter only exists
+    # under resource=message, and leaving it to a default is how this class of
+    # mistake goes unnoticed.
     g.node("Post Receipt To Group", "n8n-nodes-base.telegram", 1.2, {
+        "resource": "message",
         "operation": "sendPhoto",
         "chatId": "={{ $('Brain').first().json.save.groupChatId }}",
         "binaryData": False,
         # A Telegram file_id, re-sent rather than re-uploaded: the photo is
         # already on Telegram's servers, this bot never holds the bytes.
-        "photo": "={{ $('Brain').first().json.save.receiptFileId }}",
+        "file": "={{ $('Brain').first().json.save.receiptFileId }}",
         "additionalFields": {
             "caption": "={{ $('Brain').first().json.save.groupText }}",
             "parse_mode": "Markdown",
@@ -632,6 +643,20 @@ def build():
     g.connect("Has Receipt?", "Post To Group", index=1)
     g.connect("Post To Group", "Send Saved")
     g.connect("Post Receipt To Group", "Send Saved")
+
+    # The row is already written by the time these run. Telling the group is the
+    # least important thing left, and it must not be able to undo the rest: an
+    # error here stops the execution, and with it "تم الحفظ", the session clear
+    # and the Postgres write — so the user sees a save that never confirmed and
+    # tries again, and the database quietly falls behind the sheet.
+    #
+    # Observed on 2026-08-15 with a receipt photo: sendPhoto was sent no photo,
+    # Telegram refused it, and the whole turn died at the last step with the
+    # booking already on the sheet. The parameter is fixed above; this makes the
+    # failure survivable whatever causes it next.
+    for poster in ("Post To Group", "Post Receipt To Group"):
+        node = next(n for n in g.nodes if n["name"] == poster)
+        node["onError"] = "continueRegularOutput"
 
     # ── The conversation ends ────────────────────────────────────────────────
     #
