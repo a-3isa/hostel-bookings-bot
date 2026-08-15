@@ -163,6 +163,28 @@ def main():
                     f"{node['name']}: Sheets operation {op!r} — this writes empty "
                     "strings into the formula columns (K, N, P, R, S, T)")
 
+    # 7. Telegram send-a-file operations carry the file in `file`.
+    #
+    #    The property is NOT called `photo`, `document` or `video` — the node
+    #    names all of them `file`, and n8n silently drops a property it does not
+    #    recognise. The request then reaches Telegram with nothing attached and
+    #    comes back "Bad Request: there is no photo in the request", which is
+    #    what happened on 2026-08-15 and took the rest of the turn with it.
+    FILE_OPS = {"sendPhoto", "sendDocument", "sendVideo", "sendAudio",
+                "sendAnimation", "sendSticker"}
+    for node in wf["nodes"]:
+        if not node["type"].endswith("telegram"):
+            continue
+        params = node.get("parameters", {})
+        if params.get("operation") not in FILE_OPS:
+            continue
+        if params.get("binaryData"):
+            continue
+        if not params.get("file"):
+            problems.append(
+                f"{node['name']}: {params['operation']} has no 'file' parameter"
+                " — the file id belongs in `file`, and any other name is dropped")
+
     print(f"{wf['name']}: {len(nodes)} nodes, {len(conns)} with outgoing connections")
     if problems:
         print(f"\n{len(problems)} problem(s):")

@@ -1014,10 +1014,11 @@
         780
       ],
       "parameters": {
+        "resource": "message",
         "operation": "sendPhoto",
         "chatId": "={{ $('Brain').first().json.save.groupChatId }}",
         "binaryData": false,
-        "photo": "={{ $('Brain').first().json.save.receiptFileId }}",
+        "file": "={{ $('Brain').first().json.save.receiptFileId }}",
         "additionalFields": {
           "caption": "={{ $('Brain').first().json.save.groupText }}",
           "parse_mode": "Markdown",
@@ -1029,7 +1030,8 @@
           "id": "REPLACE_ME",
           "name": "Telegram account"
         }
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "id": "post-to-group",
@@ -1053,7 +1055,8 @@
           "id": "REPLACE_ME",
           "name": "Telegram account"
         }
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "id": "send-saved",
