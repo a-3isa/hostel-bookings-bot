@@ -230,7 +230,8 @@ def values_get(tab_expr, rng):
     }
 
 
-def values_put_id(tab_expr):
+def values_put_id(tab_expr, row_expr="$json.row_number",
+                  id_expr="$json['معرف النظام']"):
     """Write column U for one row, through the Sheets API itself.
 
     Measured on 2026-08-15, in the same execution against the same sheet and the
@@ -251,7 +252,7 @@ def values_put_id(tab_expr):
         "method": "PUT",
         "url": "=https://sheets.googleapis.com/v4/spreadsheets/"
                f"{SHEET_ID}/values/{{{{ encodeURIComponent($('Config').first()"
-               f".json.{tab_expr} + '!U' + $json.row_number) }}}}",
+               f".json.{tab_expr} + '!U' + {row_expr}) }}}}",
         # Same binding note as values_get: settable in the editor or by import,
         # never over the API.
         "authentication": "predefinedCredentialType",
@@ -262,7 +263,7 @@ def values_put_id(tab_expr):
         ]},
         "sendBody": True,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ values: [[ $json['معرف النظام'] ]] }) }}",
+        "jsonBody": "={{ JSON.stringify({ values: [[ " + id_expr + " ]] }) }}",
         "options": {},
     }
 
@@ -613,6 +614,17 @@ def build():
            {"jsCode": read_source("build_line_rows.js")}, (1960, 1020))
     g.node("Write Line Rows", "n8n-nodes-base.googleSheets", 4.7,
            sheets_update(BOOKINGS_TAB), (2160, 1020), cred=SHEETS_CRED)
+    # The line's own id, in its own request. Build Line Rows leaves معرف النظام
+    # out of the row it emits, so the value comes from the Brain rather than
+    # from the item — and `executeOnce` because that node emits two items when
+    # the booking's row changed too, and both would write the same cell.
+    g.node("Write Line Id", "n8n-nodes-base.httpRequest", 4.2,
+           values_put_id("BOOKINGS_TAB",
+                         row_expr="$('Brain').first().json.save.row",
+                         id_expr="$('Brain').first().json.save.fields['معرف النظام']"),
+           (2360, 1020), cred=SHEETS_CRED,
+           executeOnce=True, onError="continueRegularOutput",
+           retryOnFail=True, maxTries=2)
 
     g.connect("Route Save", "Read Booking Key", index=0)
     g.connect("Route Save", "Read Expense Key", index=1)
@@ -720,18 +732,46 @@ def build():
         node = next(n for n in g.nodes if n["name"] == writer)
         node["onError"] = "continueErrorOutput"
 
-    g.connect("Has Group?", "Has Receipt?", index=0)
+    # Wired here, after the loop above, and not beside the node itself: n8n runs
+    # the branches of one output in the order they were connected, and "Has
+    # Group?" has to be first. The id is worth one request but it is worth less
+    # than the receptionist's ✅, and reindex.py fills in a missing U anyway.
+    g.connect("Write Line Rows", "Write Line Id")
+
+    # The person waiting is told first, and the group second.
+    #
+    # It used to be the other way round: the row was written, then the group was
+    # posted, and only then did the receptionist get their ✅ — so they waited
+    # out a Telegram round trip to a chat they are not looking at. Measured at
+    # 303 ms and 860 ms on 2026-08-15.
+    #
+    # This is why `saved`, `exp_saved`, `del_saved`, `edit_saved`, `paid_saved`
+    # and `undo_saved` no longer say "وإرساله للجروب". Under the old order that
+    # clause was already unverified — the posters continue on error, so the ✅
+    # went out whether or not the post landed — but at least the attempt had
+    # been made. Sending it first would have made the bot assert something it
+    # had not yet tried. The `_no_group` texts still carry their ⚠️, which is
+    # the real distinction: no group is configured at all.
+    #
+    # Clear Session is wired before Has Receipt? deliberately. n8n runs the
+    # branches of one output in order, and the session must be cleared before a
+    # group post can hold it open — a stale session is what the next message
+    # would load.
+    g.connect("Has Group?", "Send Saved", index=0)
     g.connect("Has Group?", "Send Saved No Group", index=1)
+    g.connect("Send Saved", "Clear Session")
+    g.connect("Send Saved", "Has Receipt?")
     g.connect("Has Receipt?", "Post Receipt To Group", index=0)
     g.connect("Has Receipt?", "Post To Group", index=1)
-    g.connect("Post To Group", "Send Saved")
-    g.connect("Post Receipt To Group", "Send Saved")
 
-    # The row is already written by the time these run. Telling the group is the
-    # least important thing left, and it must not be able to undo the rest: an
-    # error here stops the execution, and with it "تم الحفظ", the session clear
-    # and the Postgres write — so the user sees a save that never confirmed and
-    # tries again, and the database quietly falls behind the sheet.
+    # The row is written, the user has their ✅ and the session is cleared before
+    # either of these runs, so a failure here can no longer take any of that with
+    # it. That is the point of posting to the group last.
+    #
+    # onError stays all the same. These are the end of the branch now, but the
+    # Postgres mirror hangs off Clear Session, and an execution that dies here
+    # would still be recorded as failed — which is a false alarm about a save
+    # that succeeded, and the kind of thing that gets a working bot restarted.
     #
     # Observed on 2026-08-15 with a receipt photo: sendPhoto was sent no photo,
     # Telegram refused it, and the whole turn died at the last step with the
@@ -766,7 +806,8 @@ def build():
                     " || null, lastAppend: ['booking','expense']"
                     ".includes($('Brain').first().json.save.flow) })] }}"},
     }, (2760, 660), cred=POSTGRES_CRED)
-    g.connect("Send Saved", "Clear Session")
+    # Send Saved's own edge is wired where the reply order is decided, so that
+    # it lands before the group post rather than after it.
     g.connect("Send Saved No Group", "Clear Session")
 
     # ── A cancelled row is marked in the sheet itself ────────────────────────
