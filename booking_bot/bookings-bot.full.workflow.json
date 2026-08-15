@@ -346,7 +346,9 @@
         "resource": "callback",
         "operation": "answerQuery",
         "queryId": "={{ $json.callbackQueryId }}",
-        "additionalFields": {}
+        "additionalFields": {
+          "text": "⏳ جاري الحفظ..."
+        }
       },
       "credentials": {
         "telegramApi": {
@@ -1423,28 +1425,25 @@
     },
     {
       "name": "Write Booking Id",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.7,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "parameters": {
-        "operation": "update",
-        "documentId": {
-          "__rl": true,
-          "mode": "id",
-          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
+        "method": "PUT",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.BOOKINGS_TAB + '!U' + $json.row_number) }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "valueInputOption",
+              "value": "RAW"
+            }
+          ]
         },
-        "sheetName": {
-          "__rl": true,
-          "mode": "name",
-          "value": "إدخال الحجوزات"
-        },
-        "columns": {
-          "mappingMode": "autoMapInputData",
-          "matchingColumns": [
-            "row_number"
-          ],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": true
-        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ values: [[ $json['معرف النظام'] ]] }) }}",
         "options": {}
       },
       "position": [

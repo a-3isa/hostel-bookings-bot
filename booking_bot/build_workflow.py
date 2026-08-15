@@ -230,6 +230,43 @@ def values_get(tab_expr, rng):
     }
 
 
+def values_put_id(tab_expr):
+    """Write column U for one row, through the Sheets API itself.
+
+    Measured on 2026-08-15, in the same execution against the same sheet and the
+    same row: the Sheets node writing columns A–Q took 721 ms, and the same node
+    writing nothing but `معرف النظام` took 24,606 ms. `Write Line Rows`, which
+    also carries that column, took 31,363 ms. Every slow write in the log is a
+    write that touches U; no write that avoids it is slow.
+
+    The node has to discover where `معرف النظام` lives before it can put
+    anything there, and U sits past the block of columns the tab's header
+    describes. This does not discover anything: the row is known, the column is
+    known, and the range names both. 24 s becomes one request.
+
+    RAW, not USER_ENTERED: an id is an id. USER_ENTERED would let a value that
+    happens to start with `=` or `+` be parsed as a formula.
+    """
+    return {
+        "method": "PUT",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/"
+               f"{SHEET_ID}/values/{{{{ encodeURIComponent($('Config').first()"
+               f".json.{tab_expr} + '!U' + $json.row_number) }}}}",
+        # Same binding note as values_get: settable in the editor or by import,
+        # never over the API.
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": True,
+        "queryParameters": {"parameters": [
+            {"name": "valueInputOption", "value": "RAW"},
+        ]},
+        "sendBody": True,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ values: [[ $json['معرف النظام'] ]] }) }}",
+        "options": {},
+    }
+
+
 def sheets_read(tab, rng):
     return {
         "documentId": {"__rl": True, "mode": "id", "value": SHEET_ID},
@@ -412,11 +449,18 @@ def build():
     g.node("Has Callback?", "n8n-nodes-base.if", 2.3,
            {"conditions": flag_condition("={{ $json.hasCallback }}", "has-callback"),
             "options": {}}, (1160, 120))
+    # The `text` is not decoration. A save takes seconds — 2.5 for a booking and
+    # far longer for a payment line — and until the ✅ arrives the only feedback
+    # a receptionist gets is the button's spinner stopping, which is
+    # indistinguishable from the bot having ignored them. Telegram shows this
+    # string as a toast the moment the callback is answered, ~360 ms in, so the
+    # wait reads as "working" rather than "broken". It costs nothing: the node
+    # already runs, and this is one more field on the request it already sends.
     g.node("Answer Callback", "n8n-nodes-base.telegram", 1.2, {
         "resource": "callback",
         "operation": "answerQuery",
         "queryId": "={{ $json.callbackQueryId }}",
-        "additionalFields": {},
+        "additionalFields": {"text": "⏳ جاري الحفظ..."},
     }, (1360, 120), cred=TELEGRAM_CRED)
 
     # Send Reply is the one HTTP Request node in the graph and cannot become a

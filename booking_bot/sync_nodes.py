@@ -39,12 +39,15 @@ import push_brain as pb   # same directory; reuses its JSON-RPC plumbing
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOURCE = os.path.join(HERE, "bookings-bot.full.workflow.json")
 
-# The row calculation: two reads that become HTTP calls against the Sheets API,
-# and the two builders that read `values.length` off the answer.
-DEFAULT_NODES = ["Read Booking Key", "Read Expense Key",
-                 "Build Booking Row", "Build Expense Row"]
+# The column-U write, which cost 24.6 s through the Sheets node and becomes one
+# HTTP PUT, and the callback answer that now tells the user it is working.
+DEFAULT_NODES = ["Write Booking Id", "Answer Callback"]
 
-NEVER_DEFAULT = {"Config", "Brain", "Write Booking Row", "Write Booking Id"}
+# `Write Booking Id` is NOT here any more. It was, for the reason `Write Booking
+# Row` still is — a Sheets writer carries a `columns.schema` that n8n learned
+# from the live tab and the generated file does not have. As an httpRequest it
+# has no schema to lose, so the reason expired with the node type.
+NEVER_DEFAULT = {"Config", "Brain", "Write Booking Row"}
 
 
 def load_source():
@@ -134,8 +137,12 @@ def main():
                 ops.append({"type": "setNodeCredential", "nodeName": name,
                             "credentialKey": key, "credentialId": cred["id"],
                             "credentialName": cred["name"]})
+            # maxTries and waitBetweenTries belong here too: retryOnFail without
+            # them silently reverts to n8n's default count, so a node the file
+            # says retries twice would retry three times on the instance.
             settings = {k: want[k] for k in ("alwaysOutputData", "executeOnce",
-                                             "retryOnFail", "onError")
+                                             "retryOnFail", "maxTries",
+                                             "waitBetweenTries", "onError")
                         if k in want}
             if settings:
                 ops.append({"type": "setNodeSettings", "nodeName": name,
