@@ -42,29 +42,66 @@ Note that `--check`'s probe cannot tell "wrong account" from "MCP disabled" —
 both arrive as an `isError` from `get_workflow_details` and both print as
 `no access to this workflow`. That is what made this take a day.
 
-### Four fixes are committed and NOT in the running workflow
+### Of the four fixes, only the row calculation is still missing
 
-Every one of them was found in production on 2026-08-15:
+Read against the live workflow on 2026-08-15, node by node
+(`sync_nodes.py --diff`). Three of the four are already in it — they were
+applied by hand during the import and nobody wrote that down:
 
-1. **The row calculation** (`313e101`). The bot wrote over the LAST row of both
-   tabs — an expense landed on row 19 of مصروفات عامة, on top of a hand-typed
-   `غغ 99`, whose `الرقم ٩٩٩٩٩` survives because column H is never written.
-   Both key reads are HTTP nodes against the Sheets API now: `values.length` is
-   the last occupied row, with none of n8n's opinions about numbering. **This
-   one changes two node TYPES, so it cannot be applied by editing fields.**
-2. **The receipt photo** (`aa4b36e`). The Telegram node calls that parameter
-   `file`, not `photo`; the request reached Telegram with nothing attached and
-   the error killed the turn *after* the row was written — so the user saw a
-   save that never confirmed. Both group posters now continue on error.
-3. **Payment lines** (`653b449`). A payment in a method the booking's row does
-   not carry gets its own row instead of overwriting طريقة الدفع.
-4. **Session in Postgres** (`2ea7855`) and the Save-Session-first ordering
-   (`22b26e6`).
+1. **The row calculation** (`313e101`) — **STILL MISSING, and the only one that
+   matters.** The bot writes over the LAST row of both tabs; an expense landed
+   on row 19 of مصروفات عامة, on top of a hand-typed `غغ 99`, whose
+   `الرقم ٩٩٩٩٩` survives only because column H is never written. Live still has
+   `Read Booking Key` and `Read Expense Key` as `googleSheets` nodes reading
+   `A2:J2000` / `A2:H2000`, and the two builders still take
+   `max(row_number) + 1`. **It changes two node TYPES, so it cannot be applied
+   by editing fields in the UI.**
+2. **The receipt photo** (`aa4b36e`) — already live. `Post Receipt To Group`
+   has `file`, not `photo`, and both group posters are on
+   `continueRegularOutput`.
+3. **Payment lines** (`653b449`) — already live. `Needs Row Insert?`,
+   `Insert Payment Line` and `Build Line Rows` all match the repo exactly.
+4. **Session in Postgres** (`2ea7855`, `22b26e6`) — already live. All three
+   session nodes are `n8n-nodes-base.postgres` and Save-Session runs first.
 
-Applying them: re-import
-[`bookings-bot.full.workflow.json`](../booking_bot/bookings-bot.full.workflow.json)
-(54 nodes) and rebind 31 credentials, or follow the node-by-node list in
-[`n8n-manual-import.md`](n8n-manual-import.md).
+Applying number 1: [`sync_nodes.py`](../booking_bot/sync_nodes.py), which pushes
+named nodes from the generated file into the running workflow — including a type
+change, which it does as remove + add + rewire, restoring the node's position,
+its credential and `alwaysOutputData`.
+
+```
+python booking_bot/sync_nodes.py            # 14 operations, pushes nothing
+python booking_bot/sync_nodes.py --apply --publish
+```
+
+Roll back from n8n's version history: the version before this is
+`9490e20a-1483-4de7-849e-992df469f163`.
+
+### What the diff turns up that is NOT a bug
+
+Nine other nodes read as different and every one of them should be left alone.
+Worth writing down, because each looks alarming:
+
+- **`Config`** holds the real `BOT_TOKEN`, `BOOKINGS_SHEET_GID` (`2123885264`)
+  and the true group chat ids. The committed file has placeholders in all of
+  them. Pushing it takes the bot off the air.
+- **`Write Booking Row` / `Write Booking Id`** carry a `columns.schema` n8n
+  filled in from the live tab — 3,900 characters the generated file does not
+  have and should not.
+- **`Shadow Write`, `Write Snapshot`, `Read Booking Id`** appear to have lost
+  the `=` that marks an expression, which would make each one execute its SQL as
+  literal text. They have not: execution 263 shows `Shadow Write` succeeding and
+  `Read Booking Id` returning `{"row_number": 77, "معرف النظام": "1016"}`. The
+  MCP read simply does not echo the prefix for that field. Check an execution
+  before believing this one.
+- **`Answer Callback`** (`operation`), **`Route Save`** (`outputKey` labels),
+  **`Report Schedule`** (`field: days`) and **`Post Receipt To Group`**
+  (`resource`, `binaryData`, `appendAttribution`) differ only where n8n omits a
+  value equal to the default.
+
+`sync_nodes.py` keeps `Config`, `Brain` and the two Sheets writers out of any
+default run for exactly these reasons; they sync only when named on the command
+line.
 
 ### Also outstanding
 
