@@ -2,21 +2,45 @@
 
 ## START HERE (2026-08-15) — live in a new n8n, four fixes unpublished
 
-The bot is **running** in a rebuilt instance: workflow `g1Y3uMXgYnlJCvb8` on
+The bot is **running** in a rebuilt instance: workflow `hzMYegbL3yifl7KN` on
 `superfoxxy.dpdns.org`, imported by hand, credentials bound, and taking real
 bookings and expenses. The TLS interception that blocked the scripts is gone.
 
-**What blocks the scripts now is permission, not the network:**
+**The token was never the problem. The workflow id was.**
+
+`g1Y3uMXgYnlJCvb8` — written into `booking_bot/.workflow_id` and repeated
+through this document — is not a workflow id at all. It is the id of the
+**personal project** that owns the workflow, which `list_credentials` reports as
+the `homeProject` of all three credentials. `get_workflow_details` on a project
+id answers "not found or you don't have permission", and that sentence was read
+as an account problem for a day.
+
+The token in `~/.claude.json` (ending `XUC1mstQ`) belongs to the owning account
+and always did:
 
 ```
-python booking_bot/push_brain.py --check
-  ending XUC1mstQ: no access to this workflow
-  no bearer:       HTTP 401
+python booking_bot/push_brain.py --check   # with .workflow_id moved aside
+  reachable:   https://superfoxxy.dpdns.org/mcp-server/http
+  bearer:      yes, ending XUC1mstQ
+  workflows:   1
+    hzMYegbL3yifl7KN  Bookings Bot (Telegram - Google Sheets)  active=True
 ```
 
-The token in `~/.claude.json` belongs to an account that cannot see that
-workflow. A token from the account that OWNS it is the one thing needed before
-`deploy_graph.py --publish` / `push_brain.py --publish` can run.
+**What blocks the scripts now is one per-workflow flag.** The workflow reports
+`availableInMCP: false`, and every MCP tool that names it refuses:
+
+```
+Workflow is not available in MCP. Enable MCP access from the workflow card in
+the workflows list, or from the workflow settings.
+```
+
+That toggle is a click in the n8n UI and cannot be set through the API. Flip it
+on `hzMYegbL3yifl7KN`, and `deploy_graph.py --publish` / `push_brain.py --publish`
+can run. `.workflow_id` now holds the real id.
+
+Note that `--check`'s probe cannot tell "wrong account" from "MCP disabled" —
+both arrive as an `isError` from `get_workflow_details` and both print as
+`no access to this workflow`. That is what made this take a day.
 
 ### Four fixes are committed and NOT in the running workflow
 

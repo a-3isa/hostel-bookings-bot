@@ -142,6 +142,15 @@ def rpc(method, params=None):
     return out.get("result", {})
 
 
+def server_said(res):
+    """The text of a tools/call error, flattened to one ASCII-safe line."""
+    parts = [c.get("text", "") for c in (res.get("content") or [])
+             if isinstance(c, dict)]
+    said = " ".join(" ".join(parts).split())
+    said = said.encode("ascii", "replace").decode("ascii")
+    return said or "(no message)"
+
+
 def select_server():
     """Pick the credential that can actually reach THIS workflow.
 
@@ -176,6 +185,12 @@ def select_server():
                 why = "cannot list workflows"
             if not res.get("isError"):
                 return
+            # Say what the server said. Every refusal used to print as "no
+            # access to this workflow", so a workflow with MCP switched off, a
+            # deleted workflow and a wrong account were one message -- and on
+            # 2026-08-15 an id that was really a *project* id read as all three
+            # for a day. The server distinguishes them; pass that through.
+            why = f"{why}: {server_said(res)}"
         except urllib.error.HTTPError as exc:
             why = f"HTTP {exc.code}"
         except urllib.error.URLError as exc:
@@ -194,9 +209,13 @@ def select_server():
     raise SystemExit(
         f"no n8n server in ~/.claude.json can reach {want}:\n"
         + "\n".join(tried)
-        + "\n\nEither the server needs an MCP access token from the n8n account "
-          "that owns it, or booking_bot/.workflow_id names a workflow that no "
-          "longer exists — clear it to probe for any workflow instead.")
+        + "\n\nRead what the server said above before assuming a token problem:\n"
+          "  'not available in MCP' -- the account is fine; the workflow's own\n"
+          "      MCP toggle is off. Turn it on from the workflow card in n8n.\n"
+          "  'not found or you don't have permission' -- wrong account, deleted\n"
+          "      workflow, or an id that is not a workflow id at all (a project\n"
+          "      id answers exactly this). Clear booking_bot/.workflow_id to\n"
+          "      probe for any workflow and see what this token can reach.")
 
 
 def require_workflow_id():
