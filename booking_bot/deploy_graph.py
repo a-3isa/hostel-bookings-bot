@@ -40,6 +40,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import push_brain as pb   # same directory; reuses its JSON-RPC plumbing
+import build_workflow as bw   # the node parameter shapes, defined once
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -164,6 +165,9 @@ def main():
         print(f"live: {len(wf['nodes'])} nodes")
 
     have = {n["name"] for n in wf["nodes"]}
+    # Node TYPE, not just presence: a node whose type changed has to be replaced
+    # rather than reconfigured, and "it exists" is not enough to tell.
+    have_type = {n["name"]: n["type"] for n in wf["nodes"]}
     conns = wf.get("connections", {})
 
     ops = []
@@ -424,18 +428,19 @@ def main():
                                        "options": {}}})
             print("  ~ Read Booking Id query")
 
+        # An HTTP PUT on U{row}, not the Sheets node — see values_put_id in
+        # build_workflow.py for the 721 ms / 24,606 ms measurement that decided
+        # it. The node is replaced rather than reconfigured, since a type cannot
+        # be edited in place.
         if "Write Booking Id" not in have:
-            add_node("Write Booking Id", "n8n-nodes-base.googleSheets", 4.7,
-                     {"operation": "update",
-                      "documentId": {"__rl": True, "mode": "id", "value": SHEET_ID},
-                      "sheetName": {"__rl": True, "mode": "name", "value": BOOKINGS_TAB},
-                      "columns": {"mappingMode": "autoMapInputData",
-                                  "matchingColumns": ["row_number"],
-                                  "attemptToConvertTypes": False,
-                                  "convertFieldsToString": True},
-                      "options": {}},
-                     [3776, 448], cred=SHEETS_CRED)
+            add_node("Write Booking Id", "n8n-nodes-base.httpRequest", 4.2,
+                     bw.values_put_id("BOOKINGS_TAB"), [3776, 448], cred=SHEETS_CRED)
             print("  + Write Booking Id")
+        elif have_type.get("Write Booking Id") != "n8n-nodes-base.httpRequest":
+            ops.append({"type": "removeNode", "nodeName": "Write Booking Id"})
+            add_node("Write Booking Id", "n8n-nodes-base.httpRequest", 4.2,
+                     bw.values_put_id("BOOKINGS_TAB"), [3776, 448], cred=SHEETS_CRED)
+            print("  ~ Write Booking Id -> httpRequest")
 
         connect("Shadow Write", "Read Booking Id")
         connect("Read Booking Id", "Write Booking Id")

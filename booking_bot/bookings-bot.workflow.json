@@ -346,7 +346,9 @@
         "resource": "callback",
         "operation": "answerQuery",
         "queryId": "={{ $json.callbackQueryId }}",
-        "additionalFields": {}
+        "additionalFields": {
+          "text": "⏳ جاري الحفظ..."
+        }
       },
       "credentials": {
         "telegramApi": {
