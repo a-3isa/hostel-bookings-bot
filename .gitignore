@@ -17,3 +17,8 @@ bot_err.txt
 
 # The rebuilt workflow's id, which is per-instance and not a repo fact.
 booking_bot/.workflow_id
+
+# Snapshots from supabase/backup.py. Never committable: workflow.json carries
+# BOT_TOKEN in its Config node, and the sheet and database carry guests' names
+# and phone numbers.
+backups/
