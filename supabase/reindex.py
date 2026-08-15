@@ -140,6 +140,20 @@ def main():
         for row, bid, seq in unrecorded[:10]:
             print(f"    row {row}: U says {bid}-{seq}, booking {bid} has no line {seq}")
         print(f"  in db, not found in the sheet:  {len(vanished)}")
+        # Named, unlike the count alone this used to print. Nothing here acts on
+        # them — see above — but "two bookings are in the database and not in the
+        # sheet" is not something a person can check without knowing WHICH two,
+        # and the answer decides whether they are duplicates to delete or rows
+        # somebody removed by mistake.
+        for bid, r in vanished[:10]:
+            cur.execute("select guest_name, apartment_name, arrival, total, paid,"
+                        " source, created_at from bookings where id = %s;", (bid,))
+            g = cur.fetchone()
+            if g:
+                print(f"    booking {bid}: db row {r} — {g[0]}, {g[1]}, "
+                      f"{g[2]}, total {g[3]}, paid {g[4]}, {g[5]} {g[6]:%Y-%m-%d %H:%M}")
+            else:
+                print(f"    booking {bid}: db row {r}")
 
         if not apply:
             print("\ndry run — pass --apply to write")
