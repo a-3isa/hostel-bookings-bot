@@ -103,10 +103,39 @@ Worth writing down, because each looks alarming:
 default run for exactly these reasons; they sync only when named on the command
 line.
 
-### Also outstanding
+### The database was resynced to the sheet on 2026-08-15
 
-- Rows 20–26 of مصروفات عامة are hand-typed and not in Postgres yet:
-  `reindex.py --apply` then `backfill.py --apply --reconcile`.
+`reconcile: 0 discrepancies`, 75 bookings and 25 expenses, nothing in Postgres
+that the sheet does not have. Getting there took `reindex.py --apply` (10
+bookings re-pointed by column U — a row had been deleted by hand, shifting
+booking 571 and everything below up one) and then `backfill.py --apply`, which
+also brought in expenses 20–26 for the first time.
+
+Four rows were deleted afterwards, none of them recoverable by the scripts and
+all of them left by the broken row calculation or by testing:
+
+- **booking 1015** — ابو الحسن, written twice by the bot (12:52 and 13:37) with
+  different `client_ref`s. Identical guest, apartment, arrival, nights, total.
+  Its payment 207 was the same 1,420 كاش as payment 209 on the survivor.
+- **booking 570** — سامي, 3,890, whose row was deleted from the sheet by hand.
+- **expense 236** — بيبيي, 3.00, a bot test at 13:41 on a row the sheet ends
+  before.
+- **`booking_lines` 4 + `payments` 210** — a 500 انستاباي payment line claiming
+  `sheet_row = 81` when the sheet ends at 79. Confirmed as a test whose sheet
+  row was deleted. This one is the row calculation writing into empty space, and
+  it is the reason to deploy the fix before the next save.
+
+**Still outstanding:**
+
+- **Row 19 of مصروفات عامة carries a stale `expense_ref`.** The row now reads
+  `على شاكر لصالح سيف / 4,400` but column H still says `٩٩٩٩٩`, left over from
+  the hand-typed row the bot wrote over — column H is never written, so the old
+  reference survived onto somebody else's expense. Fix it in the SHEET; a
+  backfill only re-imports whatever is there.
+- **Three bookings whose `paid` exceeds the payments recorded for them:** 16
+  حسام (5,000 vs 1,500), 18 سعد الخنادي (10,500 vs 7,500), 478 حمدي (1,500 vs
+  750). Older than any of this and not a sheet-row problem — the sheet's paid
+  column includes money the payments table never got.
 - The bot token is legible in a screenshot from 2026-08-15 — revoke and replace.
 
 ## The 2026-08-14 rebuild, for context
