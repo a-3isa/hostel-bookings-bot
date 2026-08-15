@@ -601,31 +601,31 @@
     {
       "id": "read-booking-key",
       "name": "Read Booking Key",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.7,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         1560,
         480
       ],
       "parameters": {
-        "documentId": {
-          "__rl": true,
-          "mode": "id",
-          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
-        },
-        "sheetName": {
-          "__rl": true,
-          "mode": "name",
-          "value": "إدخال الحجوزات"
-        },
-        "options": {
-          "dataLocationOnSheet": {
-            "values": {
-              "rangeDefinition": "specifyRangeA1",
-              "range": "A2:J2000"
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.BOOKINGS_TAB + '!A1:J2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "UNFORMATTED_VALUE"
             }
-          }
-        }
+          ]
+        },
+        "options": {}
       },
       "alwaysOutputData": true,
       "credentials": {
@@ -645,7 +645,7 @@
         480
       ],
       "parameters": {
-        "jsCode": "/**\n * Turns the Brain's named save.fields into one flat row for the Google Sheets\n * `update` node, and works out which row to write.\n *\n * The read is A2:J2000: every column up to تاريخ البداية, all of them typed.\n * It stops at J on purpose — K, N, P, R, S and T carry fill-down formulas that\n * evaluate to '' on empty rows, and a blank row that answers '' would be read\n * as occupied and push every write to the bottom of the sheet.\n *\n * It used to read C اسم المقيم alone and COUNT what came back. On 2026-08-14\n * that wrote an expense over a hand-typed row on the other tab, for the exact\n * reason it could here too: a row whose key column is empty is a row the count\n * cannot see, and the next save lands on top of it.\n */\n\nconst save = $('Brain').first().json.save;\n\n// alwaysOutputData is on for the read, so an empty sheet arrives as a single\n// blank item. `row_number` is the sheet's own row and is always present, so a\n// row is \"occupied\" only if something OTHER than that has a value.\nconst rows = $input.all().filter((i) => {\n  if (!i.json) return false;\n  return Object.keys(i.json).some(\n    (k) => k !== 'row_number' && i.json[k] !== '' && i.json[k] != null,\n  );\n});\n\n// The LAST occupied row, not how many there are.\nconst numbered = rows\n  .map((i) => Number(i.json.row_number))\n  .filter((n) => Number.isFinite(n));\nconst r = numbered.length ? Math.max(...numbered) + 1 : rows.length + 2;\n\n// The sheet's own calculated columns. Never written, on any path: a value —\n// even '' — replaces the formula with a dead number, and the Dashboard and the\n// per-property tabs all read them. A hard filter, not a convention.\nconst FORMULA_COLS = [\n  'تاريخ المغادرة',   // K = J + I\n  'نسبة البرنامج',    // N\n  'المتبقي',          // P = L - M\n  'تاريخ الإدخال',    // R\n  'صافي الدخل',       // S = L - N\n  'آخر تعديل',        // T\n];\n\nconst out = { row_number: r };\nfor (const k of Object.keys(save.fields)) {\n  if (FORMULA_COLS.indexOf(k) !== -1) continue;\n  const v = save.fields[k];\n  // e.g. the open-ended nights cell '=TODAY()-J{r}'\n  out[k] = typeof v === 'string' ? v.replace(/\\{r\\}/g, String(r)) : v;\n}\n\nreturn [{ json: out }];\n"
+        "jsCode": "/**\n * Turns the Brain's named save.fields into one flat row for the Google Sheets\n * `update` node, and works out which row to write.\n *\n * The row comes from the Sheets API's own `values` array — A1:J2000, read by\n * \"Read Booking Key\". Its length IS the last occupied row: the API trims\n * trailing empty rows, keeps interior blanks as empty arrays, and counts from\n * row 1. So the next free row is one below it, and nothing here has to guess\n * what n8n considered a header or how it numbered what it returned.\n *\n * Both earlier attempts got that wrong in the same place. Counting the items a\n * Sheets node returned wrote an expense over a hand-typed row on 2026-08-14 —\n * that row's key column was empty, so the count never saw it. Taking\n * max(row_number) + 1 instead was one short, because the node numbers rows from\n * its own view of the range and not the sheet's: it wrote over the last row of\n * both tabs, reported 2026-08-15.\n *\n * The range stops at J deliberately. K, N, P, R, S and T carry fill-down\n * formulas that evaluate to '' far below the data, and a row answering '' would\n * count as occupied — every write would land at the bottom of the sheet.\n */\n\nconst save = $('Brain').first().json.save;\n\n/** The first free row, from whichever shape the read produced. */\nfunction nextRow() {\n  const items = $input.all();\n  const head = items.length ? items[0].json : null;\n\n  // The Sheets API response. `values` is absent entirely on an empty tab.\n  if (head && Object.prototype.hasOwnProperty.call(head, 'range')) {\n    return (Array.isArray(head.values) ? head.values.length : 0) + 1;\n  }\n\n  // Fallback: a Sheets node's items, one per row. Only reachable if the read is\n  // swapped back; kept so a half-applied deploy appends below the data rather\n  // than into the middle of it.\n  const rows = items.filter((i) => {\n    if (!i.json) return false;\n    return Object.keys(i.json).some(\n      (k) => k !== 'row_number' && i.json[k] !== '' && i.json[k] != null,\n    );\n  });\n  const numbered = rows\n    .map((i) => Number(i.json.row_number))\n    .filter((n) => Number.isFinite(n));\n  return numbered.length ? Math.max(...numbered) + 1 : rows.length + 2;\n}\n\nconst r = nextRow();\n\n// The sheet's own calculated columns. Never written, on any path: a value —\n// even '' — replaces the formula with a dead number, and the Dashboard and the\n// per-property tabs all read them. A hard filter, not a convention.\nconst FORMULA_COLS = [\n  'تاريخ المغادرة',   // K = J + I\n  'نسبة البرنامج',    // N\n  'المتبقي',          // P = L - M\n  'تاريخ الإدخال',    // R\n  'صافي الدخل',       // S = L - N\n  'آخر تعديل',        // T\n];\n\nconst out = { row_number: r };\nfor (const k of Object.keys(save.fields)) {\n  if (FORMULA_COLS.indexOf(k) !== -1) continue;\n  const v = save.fields[k];\n  // e.g. the open-ended nights cell '=TODAY()-J{r}'\n  out[k] = typeof v === 'string' ? v.replace(/\\{r\\}/g, String(r)) : v;\n}\n\nreturn [{ json: out }];\n"
       }
     },
     {
@@ -689,31 +689,31 @@
     {
       "id": "read-expense-key",
       "name": "Read Expense Key",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.7,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         1560,
         660
       ],
       "parameters": {
-        "documentId": {
-          "__rl": true,
-          "mode": "id",
-          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
-        },
-        "sheetName": {
-          "__rl": true,
-          "mode": "name",
-          "value": "مصروفات عامة"
-        },
-        "options": {
-          "dataLocationOnSheet": {
-            "values": {
-              "rangeDefinition": "specifyRangeA1",
-              "range": "A2:H2000"
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.EXPENSE_TAB + '!A1:H2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "UNFORMATTED_VALUE"
             }
-          }
-        }
+          ]
+        },
+        "options": {}
       },
       "alwaysOutputData": true,
       "credentials": {
@@ -733,7 +733,7 @@
         660
       ],
       "parameters": {
-        "jsCode": "/**\n * Same as Build Booking Row, for the expense tab.\n *\n * The read is A2:H2000 — every hand-typed column, not just B البند. On\n * 2026-08-14 the bot wrote an expense straight over a row somebody had typed by\n * hand, because that row had no البند: the count said seventeen rows, the row\n * was the eighteenth, and the write landed on it. The expense tab has no\n * formula columns, so every column here is evidence that a row is occupied.\n */\n\nconst save = $('Brain').first().json.save;\n\n// alwaysOutputData is on for the read, so an empty sheet arrives as a single\n// blank item. `row_number` is the sheet's own row and is always present, so a\n// row is \"occupied\" only if something OTHER than that has a value.\nconst rows = $input.all().filter((i) => {\n  if (!i.json) return false;\n  return Object.keys(i.json).some(\n    (k) => k !== 'row_number' && i.json[k] !== '' && i.json[k] != null,\n  );\n});\n\n// The LAST occupied row, not how many there are. Counting assumes the rows are\n// contiguous and that every one of them is visible in the range being read;\n// neither is true of a sheet people edit by hand.\nconst numbered = rows\n  .map((i) => Number(i.json.row_number))\n  .filter((n) => Number.isFinite(n));\nconst r = numbered.length ? Math.max(...numbered) + 1 : rows.length + 2;\n\nconst out = { row_number: r };\nfor (const k of Object.keys(save.fields)) {\n  const v = save.fields[k];\n  out[k] = typeof v === 'string' ? v.replace(/\\{r\\}/g, String(r)) : v;\n}\n\nreturn [{ json: out }];\n"
+        "jsCode": "/**\n * Same as Build Booking Row, for the expense tab: A1:H2000, every column of it\n * hand-typed, so any cell in a row makes that row occupied.\n *\n * The row is `values.length + 1` — the Sheets API counts from row 1 and trims\n * only the empty tail, so its length is the last occupied row whatever state\n * the tab is in. See build_booking_row.js for the two ways this was got wrong\n * before, both of which wrote on top of somebody's data.\n */\n\nconst save = $('Brain').first().json.save;\n\nfunction nextRow() {\n  const items = $input.all();\n  const head = items.length ? items[0].json : null;\n\n  if (head && Object.prototype.hasOwnProperty.call(head, 'range')) {\n    return (Array.isArray(head.values) ? head.values.length : 0) + 1;\n  }\n\n  const rows = items.filter((i) => {\n    if (!i.json) return false;\n    return Object.keys(i.json).some(\n      (k) => k !== 'row_number' && i.json[k] !== '' && i.json[k] != null,\n    );\n  });\n  const numbered = rows\n    .map((i) => Number(i.json.row_number))\n    .filter((n) => Number.isFinite(n));\n  return numbered.length ? Math.max(...numbered) + 1 : rows.length + 2;\n}\n\nconst r = nextRow();\n\nconst out = { row_number: r };\nfor (const k of Object.keys(save.fields)) {\n  const v = save.fields[k];\n  out[k] = typeof v === 'string' ? v.replace(/\\{r\\}/g, String(r)) : v;\n}\n\nreturn [{ json: out }];\n"
       }
     },
     {
