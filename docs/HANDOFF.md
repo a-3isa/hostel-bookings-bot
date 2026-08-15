@@ -1,6 +1,54 @@
 # Handoff — where the Supabase migration stands
 
-## START HERE (2026-08-14) — the n8n rebuild
+## START HERE (2026-08-15) — live in a new n8n, four fixes unpublished
+
+The bot is **running** in a rebuilt instance: workflow `g1Y3uMXgYnlJCvb8` on
+`superfoxxy.dpdns.org`, imported by hand, credentials bound, and taking real
+bookings and expenses. The TLS interception that blocked the scripts is gone.
+
+**What blocks the scripts now is permission, not the network:**
+
+```
+python booking_bot/push_brain.py --check
+  ending XUC1mstQ: no access to this workflow
+  no bearer:       HTTP 401
+```
+
+The token in `~/.claude.json` belongs to an account that cannot see that
+workflow. A token from the account that OWNS it is the one thing needed before
+`deploy_graph.py --publish` / `push_brain.py --publish` can run.
+
+### Four fixes are committed and NOT in the running workflow
+
+Every one of them was found in production on 2026-08-15:
+
+1. **The row calculation** (`313e101`). The bot wrote over the LAST row of both
+   tabs — an expense landed on row 19 of مصروفات عامة, on top of a hand-typed
+   `غغ 99`, whose `الرقم ٩٩٩٩٩` survives because column H is never written.
+   Both key reads are HTTP nodes against the Sheets API now: `values.length` is
+   the last occupied row, with none of n8n's opinions about numbering. **This
+   one changes two node TYPES, so it cannot be applied by editing fields.**
+2. **The receipt photo** (`aa4b36e`). The Telegram node calls that parameter
+   `file`, not `photo`; the request reached Telegram with nothing attached and
+   the error killed the turn *after* the row was written — so the user saw a
+   save that never confirmed. Both group posters now continue on error.
+3. **Payment lines** (`653b449`). A payment in a method the booking's row does
+   not carry gets its own row instead of overwriting طريقة الدفع.
+4. **Session in Postgres** (`2ea7855`) and the Save-Session-first ordering
+   (`22b26e6`).
+
+Applying them: re-import
+[`bookings-bot.full.workflow.json`](../booking_bot/bookings-bot.full.workflow.json)
+(54 nodes) and rebind 31 credentials, or follow the node-by-node list in
+[`n8n-manual-import.md`](n8n-manual-import.md).
+
+### Also outstanding
+
+- Rows 20–26 of مصروفات عامة are hand-typed and not in Postgres yet:
+  `reindex.py --apply` then `backfill.py --apply --reconcile`.
+- The bot token is legible in a screenshot from 2026-08-15 — revoke and replace.
+
+## The 2026-08-14 rebuild, for context
 
 **The old n8n instance was destroyed and the workflow with it.** There was no
 export anywhere and the repo could not rebuild it: `build_workflow.py` and
