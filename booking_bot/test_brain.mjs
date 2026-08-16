@@ -229,6 +229,35 @@ r = run(msg('احمد ٢ (J.R.)'));
 check('accepts Arabic-Indic digits and punctuation',
   r.reply.text === '📑 نوع الحجز:', r.reply.text);
 
+section('booking: the ID and the phone accept anything, including nothing');
+r = run(msg('/start'));
+r = run(cb('choice_booking'));
+r = run(cb('bid_skip'));
+check('the ID question offers a skip',
+  r.reply.reply_markup.inline_keyboard[0][0].callback_data === 'pid_skip',
+  JSON.stringify(r.reply.reply_markup));
+r = run(cb('pid_skip'));
+check('skipping the ID asks the name', r.reply.text === '👤 اسم المقيم:', r.reply.text);
+r = run(msg('ابو الحسن'));
+r = run(cb('bt_external'));
+check('the phone question offers a skip',
+  r.reply.reply_markup.inline_keyboard[0][0].callback_data === 'phone_skip',
+  JSON.stringify(r.reply.reply_markup));
+r = run(cb('phone_skip'));
+check('skipping the phone moves on', r.reply.text === '🏠 اختر الشقة والغرفة:', r.reply.text);
+
+section('booking: an ID with letters and Arabic-Indic digits survives');
+r = run(msg('/start'));
+r = run(cb('choice_booking'));
+r = run(cb('bid_skip'));
+r = run(msg('P-٤٥٦/ب'));
+check('a non-numeric ID is accepted', r.reply.text === '👤 اسم المقيم:', r.reply.text);
+r = run(msg('سيف'));
+r = run(cb('bt_external'));
+r = run(msg('+20 ١٠ ١٢٣'));
+check('a phone with Arabic-Indic digits is accepted',
+  r.reply.text === '🏠 اختر الشقة والغرفة:', r.reply.text);
+
 section('booking: manual entry continues');
 r = run(msg('/start'));
 r = run(cb('choice_booking'));
