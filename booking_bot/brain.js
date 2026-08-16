@@ -185,7 +185,7 @@ const S = {
   btn_skip: 'تخطي',
   ask_private_id: '🆔 أدخل الـ ID:',
   ask_name: '👤 اسم المقيم:',
-  name_error: '❌ أحرف ومسافات فقط، 3 أحرف على الأقل. حاول مجدداً:',
+  name_error: '❌ الاسم مطلوب. اكتب اسم المقيم:',
   ask_btype: '📑 نوع الحجز:',
   ask_phone: '📞 رقم الهاتف:',
   ask_apt_room: '🏠 اختر الشقة والغرفة:',
@@ -545,10 +545,24 @@ function num(v) {
 /** Force text storage (preserve leading zeros in phones/IDs) via Sheets' ' marker. */
 function txt(v) { return v ? `'${v}` : v; }
 
+/**
+ * The guest's name, as typed. Anything is a name.
+ *
+ * This used to demand letters and spaces only, three characters minimum, and it
+ * was wrong on every count. Real guests are entered as "احمد ٢", "J.R.", "Ali
+ * (booking.com)", "Bo" — Arabic-Indic digits, punctuation, room numbers,
+ * two-letter names — and every one of them was refused with a message about
+ * letters and spaces while somebody stood at the desk waiting.
+ *
+ * The one thing still refused is nothing at all. اسم المقيم is column C, which
+ * is the key column: it is what tells a read which rows are occupied, precisely
+ * because it never holds a formula. A row saved with an empty name is a row the
+ * sheet cannot see, and the next booking is written on top of it — the same
+ * failure that put an expense over a hand-typed row on 2026-08-14.
+ */
 function validateName(text) {
   const cleaned = String(text).trim();
-  if (cleaned.length < 3) return null;
-  if (!/^[A-Za-z؀-ۿ\s]+$/.test(cleaned)) return null;
+  if (!cleaned) return null;
   return cleaned;
 }
 
