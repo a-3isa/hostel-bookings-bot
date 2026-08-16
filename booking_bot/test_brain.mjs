@@ -211,10 +211,29 @@ check('asks private id', r.reply.text === '🆔 أدخل الـ ID:', r.reply.te
 r = run(msg('A12345'));
 check('asks name', r.reply.text === '👤 اسم المقيم:');
 
+// Anything is a name. Guests really are entered as "احمد ٢", "J.R." and "Bo",
+// and each of those used to be refused with a lecture about letters and spaces.
+r = run(msg('   '));
+check('rejects a blank name', r.reply.text.startsWith('❌ الاسم مطلوب'), r.reply.text);
 r = run(msg('ab'));
-check('rejects a 2-char name', r.reply.text.startsWith('❌ أحرف ومسافات'), r.reply.text);
-r = run(msg('Ahmed 123'));
-check('rejects digits in a name', r.reply.text.startsWith('❌ أحرف ومسافات'));
+check('accepts a 2-char name → asks btype', r.reply.text === '📑 نوع الحجز:', r.reply.text);
+r = run(cb('bt_external'));
+check('btype after short name', r.reply.text === '📞 رقم الهاتف:', r.reply.text);
+
+section('booking: a name with digits and punctuation is still a name');
+r = run(msg('/start'));
+r = run(cb('choice_booking'));
+r = run(cb('bid_skip'));
+r = run(msg('A12345'));
+r = run(msg('احمد ٢ (J.R.)'));
+check('accepts Arabic-Indic digits and punctuation',
+  r.reply.text === '📑 نوع الحجز:', r.reply.text);
+
+section('booking: manual entry continues');
+r = run(msg('/start'));
+r = run(cb('choice_booking'));
+r = run(cb('bid_skip'));
+r = run(msg('A12345'));
 r = run(msg('محمد علي'));
 check('accepts an Arabic name → asks btype', r.reply.text === '📑 نوع الحجز:', r.reply.text);
 check('btype grid has both options', r.reply.reply_markup.inline_keyboard[0].length === 2);
@@ -1124,10 +1143,11 @@ for (const [key, label] of [['cash', 'كاش'], ['instapay', 'انستاباي']
   run(cb('eid_skip', EXPUSER)); run(msg('بند', EXPUSER)); run(msg('100', EXPUSER));
   run(cb('eapt_0', EXPUSER));
   r = run(cb(`epay_${key}`, EXPUSER));
-  if (key !== 'cash') {
-    check(`expense ${key}: asks for a receipt`, r.reply.text.startsWith('📎'), r.reply.text);
-    r = run(cb('ereceipt_skip', EXPUSER));
-  }
+  // Every expense method offers a receipt now, cash included: a transfer keeps
+  // its receipt in the banking app, and cash leaves a paper invoice that is the
+  // only evidence the money left the till.
+  check(`expense ${key}: asks for a receipt`, r.reply.text.startsWith('📎'), r.reply.text);
+  r = run(cb('ereceipt_skip', EXPUSER));
   check(`expense ${key}: reaches notes`, r.reply.text.startsWith('🗒️'), r.reply.text);
   run(cb('enotes_skip', EXPUSER));
   r = run(cb('esave', EXPUSER));
@@ -1449,7 +1469,8 @@ run(msg('E_1', EXPUSER));                       // expense number with an unders
 run(msg('كهرباء 50_60 *عاجل*', EXPUSER));       // free-text item
 run(msg('120', EXPUSER));
 run(cb('eapt_none', EXPUSER));
-run(cb('epay_cash', EXPUSER));                     // كاش → no receipt
+run(cb('epay_cash', EXPUSER));                  // كاش asks for a receipt too now
+run(cb('ereceipt_skip', EXPUSER));
 r = run(msg('راجع الفاتورة_2', EXPUSER));       // free-text notes
 check('expense confirm survives Markdown metacharacters', balanced(r.reply.text), r.reply.text);
 check('the item is escaped, not stripped', r.reply.text.includes('كهرباء 50\\_60 \\*عاجل\\*'),
