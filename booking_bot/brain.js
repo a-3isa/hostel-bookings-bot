@@ -925,7 +925,7 @@ function expVars(dd) {
 
 // ─── Step transitions shared by several states ────────────────────────────────
 
-function askPhone() { reply(t('ask_phone')); setState('PHONE', d); }
+function askPhone() { reply(t('ask_phone'), skipKb('phone_skip')); setState('PHONE', d); }
 function askArrival() {
   const tp = todayParts();
   d.cal_year = tp.y; d.cal_month = tp.m;
@@ -1736,13 +1736,18 @@ switch (state) {
   // ── Booking flow ──────────────────────────────────────────────────────────
   case 'BOOKING_ID':
     d.booking_id = cbData === 'bid_skip' ? '' : (text || '').trim();
-    reply(t('ask_private_id'));
+    reply(t('ask_private_id'), skipKb('pid_skip'));
     setState('PRIVATE_ID', d);
     break;
 
+  // Whatever is typed, and nothing is allowed too. The ID is a passport number,
+  // a national number, a scribble on a form or absent — the column is text and
+  // nothing downstream parses it. بوكنج ID has had a skip since the beginning
+  // and this did not, so a guest with no papers meant typing a space to get
+  // past a question that had no answer.
   case 'PRIVATE_ID':
-    if (cq) break;
-    d.private_id = text.trim();
+    if (cq && cbData !== 'pid_skip') break;
+    d.private_id = cbData === 'pid_skip' ? '' : text.trim();
     reply(t('ask_name'));
     setState('NAME', d);
     break;
@@ -1768,9 +1773,10 @@ switch (state) {
     break;
   }
 
+  // Same: any text, or none. A walk-in with no phone is a real booking.
   case 'PHONE':
-    if (cq) break;
-    d.phone = text.trim();
+    if (cq && cbData !== 'phone_skip') break;
+    d.phone = cbData === 'phone_skip' ? '' : text.trim();
     d.reg = locationRegistry();
     reply(t('ask_apt_room'), aptRoomKb(d.reg));
     setState('APT_ROOM', d);
