@@ -72,6 +72,19 @@ const CASH_KEY = 'cash';
 const UNPAID_KEY = 'unpaid';
 
 /**
+ * The same, for EXPENSES, where cash is included.
+ *
+ * A transfer keeps its own receipt in the banking app, which is why the list
+ * above is what it is. Cash spent on the business does not: what exists is a
+ * paper invoice from the shop, and a photo of it is the only evidence the money
+ * left the till and what it bought. That is worth more here than for a booking,
+ * where cash comes IN across the desk and the sheet's own row is the record.
+ *
+ * Bookings and payments deliberately keep the narrower list.
+ */
+const EXPENSE_RECEIPT_PAYMENT_KEYS = RECEIPT_PAYMENT_KEYS.concat([CASH_KEY]);
+
+/**
  * Resolve a payment from callback data.
  *
  * Accepts the old positional form (`pay_3`) as well as the current key form
@@ -347,11 +360,11 @@ const S = {
     'لو ده نفس الحجز، اضغط إلغاء.',
   dup_line: '• صف {row} — {name}{id_part}\n   🛏️ {arrival} — {apartment} / {room}',
   btn_confirm_dup: '⚠️ احفظ حجز جديد رغم التشابه',
-  // On the saved card. These replaced "أرسل /start من جديد" — a receptionist with
-  // a phone in one hand and a guest in front of them should not have to type a
-  // command to do the obvious next thing.
+  // On the saved card, above the /start menu's own three buttons, which it
+  // reuses. These replaced "أرسل /start من جديد" — a receptionist with a phone in
+  // one hand and a guest in front of them should not have to type a command to
+  // do the obvious next thing.
   btn_undo_last: '↩️ تراجع',
-  btn_new_booking: '➕ حجز جديد',
   btn_confirm_anyway: '⚠️ احفظ رغم التعارض',
   btn_confirm: '✅ حفظ',
   btn_cancel: '❌ إلغاء',
@@ -1457,6 +1470,9 @@ function startPaid() { reply(t('paid_ask_id')); setState('EDIT_FIND', { paidOnly
 //
 // The session is already ended by the time this card is on screen, so these
 // arrive with no state, which is precisely the shape both commands expect.
+// `go_start` is no longer on any card the bot draws — the three menu buttons
+// replaced it — but every card already delivered still carries it, and Telegram
+// keeps those on screen forever. It stays for them.
 const asCommand = cbData === 'go_start' ? '/start'
   : cbData === 'go_undo' ? '/undo'
   : null;
@@ -1514,6 +1530,24 @@ if (cmd === '/undo' || (cmd || '').startsWith('/undo@')) {
       ],
     }, true);
   }
+  return [{ json: out }];
+}
+
+// ─── The saved card's three shortcuts ─────────────────────────────────────────
+//
+// The card carries the same buttons as the /start menu, but by the time it is on
+// screen the session is over — so these arrive with no state and the CHOICE case
+// below never sees them. Dispatch them here, through the very same functions and
+// the very same permission checks, so there is one implementation of each flow
+// and a cashier cannot reach a booking by keeping an old card on screen.
+//
+// This also fixes tapping a menu button from a conversation that has since
+// ended, which used to do nothing at all.
+if (!state && cbData && cbData.indexOf('choice_') === 0) {
+  if (cbData === 'choice_expense') startExpense();
+  else if (cbData === 'choice_paid' && isCashier) startPaid();
+  else if (cbData === 'choice_booking' && isAdmin) startBooking();
+  else if (cbData === 'choice_edit' && isAdmin) startEdit();
   return [{ json: out }];
 }
 
@@ -1620,7 +1654,7 @@ switch (state) {
       : payKeyOf(cbData.slice('epay_'.length));
     d.exp_payment = payLabel(expKey);
     if (!d.exp_payment) break;
-    if (RECEIPT_PAYMENT_KEYS.indexOf(expKey) !== -1) {
+    if (EXPENSE_RECEIPT_PAYMENT_KEYS.indexOf(expKey) !== -1) {
       reply(t('ask_receipt'), skipKb('ereceipt_skip'));
       setState('EXP_RECEIPT', d);
       break;
@@ -2274,7 +2308,19 @@ if (out.hasSave && out.save) {
   if (out.save.undo) {
     buttons.push([{ text: t('btn_undo_last'), callback_data: 'go_undo' }]);
   }
-  buttons.push([{ text: t('btn_new_booking'), callback_data: 'go_start' }]);
+  // The whole menu, not just "new booking". Removing "أرسل /start من جديد" took
+  // away the only route back to the other two flows, so offering one of them
+  // would have made the card a downgrade for anyone whose next job is an
+  // expense. Same buttons, same callback_data and same permission split as the
+  // /start menu — a cashier never sees the booking or edit entries.
+  if (isAdmin) {
+    buttons.push([{ text: t('btn_add_booking'), callback_data: 'choice_booking' }]);
+    buttons.push([{ text: t('btn_add_expense'), callback_data: 'choice_expense' }]);
+    buttons.push([{ text: t('btn_edit_booking'), callback_data: 'choice_edit' }]);
+  } else {
+    buttons.push([{ text: t('btn_add_expense'), callback_data: 'choice_expense' }]);
+    buttons.push([{ text: t('btn_add_paid'), callback_data: 'choice_paid' }]);
+  }
   const card = (body) => ({
     chat_id: chatId,
     text: body,
