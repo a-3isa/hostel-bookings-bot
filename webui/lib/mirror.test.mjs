@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 
 import {
   blockEnd, expensePayload, lineKey, linePayload, planAllocation, primaryPayload,
-  stamp,
+  priceCell, stamp,
 } from './mirror.js';
 
 const CASH = 'كاش';
@@ -261,4 +261,55 @@ test('an expense fills the seven columns the bot owns', () => {
   // H (الرقم) is not among them, deliberately: it is a human reference and a
   // stale one has already been found sitting on somebody else's expense.
   assert.equal('expense_ref' in want, false);
+});
+
+// -- the price cell ---------------------------------------------------------
+//
+// 16 bookings hold a live formula in اجمالي سعر الحجز and 10 of those are
+// open-ended, so the formula is what keeps the bill growing with the stay.
+
+test('a booking priced by a nightly rate keeps its formula', () => {
+  const b = moneyRow({ nightly_rate: 500, total: 8500, effective_total: 8500 });
+  assert.equal(priceCell(b, 10), '=500*I10');
+});
+
+test('the formula is anchored to the row it is on now, not the one it was on', () => {
+  // Rows move. Copying the stored `=500*I10` onto row 14 would price the guest
+  // off somebody else's night count.
+  const b = moneyRow({ nightly_rate: 500, total: 8500, effective_total: 8500 });
+  assert.equal(priceCell(b, 14), '=500*I14');
+});
+
+test('a lump sum written off the rate survives', () => {
+  const b = moneyRow({ nightly_rate: 650, total_adjustment: -2200,
+                       total: 10800, effective_total: 10800 });
+  assert.equal(priceCell(b, 19), '=(650*I19)-2200');
+});
+
+test('a lump sum added to the rate survives', () => {
+  const b = moneyRow({ nightly_rate: 500, total_adjustment: 3500,
+                       total: 10000, effective_total: 10000 });
+  assert.equal(priceCell(b, 17), '=(500*I17)+3500');
+});
+
+test('a price typed by hand beats the formula', () => {
+  // The whole point of comparing against effective_total: once somebody sets a
+  // different number, that is a deliberate override and the rate stops driving
+  // the cell.
+  const b = moneyRow({ nightly_rate: 500, total: 9000, effective_total: 8500 });
+  assert.equal(priceCell(b, 10), '9000');
+});
+
+test('a booking with no rate is just its number', () => {
+  assert.equal(priceCell(moneyRow({ total: 2200 }), 10), '2200');
+});
+
+test('a rate with no effective total falls back to the number', () => {
+  const b = moneyRow({ nightly_rate: 500, total: 8500, effective_total: null });
+  assert.equal(priceCell(b, 10), '8500');
+});
+
+test('a line row has no price at all, rate or no rate', () => {
+  const b = moneyRow({ nightly_rate: 500, total: 8500, effective_total: 8500 });
+  assert.equal(linePayload(b, line(2, INSTA, 11, 1600), 11).total, '');
 });

@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mirror import (LINE_ROW_COLOUR, block_end, line_key, line_payload, open_line,
-                    plan_allocation, primary_payload, shift_rows_down)
+                    plan_allocation, price_cell, primary_payload, shift_rows_down)
 
 
 def booking(method="كاش", currency="EGP", lines=(), unallocated=(), **extra):
@@ -341,3 +341,53 @@ def test_both_payments_of_a_new_line_are_assigned_together():
     assign = next(params for sql, params in cur.sql
                   if sql.startswith("update payments set line_seq"))
     assert assign == (2, [7, 8])
+
+
+# ── the price cell ───────────────────────────────────────────────────────────
+#
+# 16 bookings hold a live formula in اجمالي سعر الحجز and 10 of those are
+# open-ended, so the formula is what keeps the bill growing with the stay.
+# Twinned in webui/lib/mirror.test.mjs.
+
+def test_a_nightly_rate_keeps_its_formula():
+    row = money_row(nightly_rate=500, total=8500, effective_total=8500)
+    assert price_cell(row, 10) == "=500*I10"
+
+
+def test_the_formula_is_anchored_to_the_row_it_is_on_now():
+    """Rows move. `=500*I10` carried onto row 14 prices the guest off somebody
+    else's night count."""
+    row = money_row(nightly_rate=500, total=8500, effective_total=8500)
+    assert price_cell(row, 14) == "=500*I14"
+
+
+def test_a_lump_sum_written_off_the_rate_survives():
+    row = money_row(nightly_rate=650, total_adjustment=-2200,
+                    total=10800, effective_total=10800)
+    assert price_cell(row, 19) == "=(650*I19)-2200"
+
+
+def test_a_lump_sum_added_to_the_rate_survives():
+    row = money_row(nightly_rate=500, total_adjustment=3500,
+                    total=10000, effective_total=10000)
+    assert price_cell(row, 17) == "=(500*I17)+3500"
+
+
+def test_a_price_typed_by_hand_beats_the_formula():
+    """Comparing against effective_total is what makes an override stick."""
+    row = money_row(nightly_rate=500, total=9000, effective_total=8500)
+    assert price_cell(row, 10) == "9000"
+
+
+def test_a_booking_with_no_rate_is_just_its_number():
+    assert price_cell(money_row(total=2200), 10) == "2200"
+
+
+def test_a_rate_with_no_effective_total_falls_back_to_the_number():
+    row = money_row(nightly_rate=500, total=8500, effective_total=None)
+    assert price_cell(row, 10) == "8500"
+
+
+def test_a_line_row_has_no_price_at_all_rate_or_no_rate():
+    row = money_row(nightly_rate=500, total=8500, effective_total=8500)
+    assert line_payload(row, line(2, "انستاباي", 11, amount=1600), 11)["total"] == ""

@@ -32,6 +32,33 @@ export function lineKey(method, currency) {
 
 const keyParts = (key) => JSON.parse(key);
 
+// The price cell, which is not always a number.
+//
+// 16 bookings are priced by a nightly rate and hold a live formula in the
+// sheet — `=500*I10`, or `=(650*I19)-2200` where a lump sum was written off.
+// Ten of them are open-ended, so that formula is what keeps the price growing
+// as the stay does; replacing it with today's number freezes the guest's bill
+// on the day somebody happened to open the dashboard.
+//
+// The formula is rebuilt rather than copied, because it is anchored to a ROW
+// and rows move. It is emitted only while the stored total still agrees with
+// what the formula produces (`effective_total`) — the moment someone types a
+// different price, that number is a deliberate override and it wins.
+export function priceCell(b, sheetRow) {
+  const rate = Number(b.nightly_rate || 0);
+  if (!rate) return money(b.total);
+
+  const effective = b.effective_total;
+  if (effective === null || effective === undefined) return money(b.total);
+  // To the piastre. A rounding difference here is a real one.
+  if (Math.abs(Number(b.total || 0) - Number(effective)) > 0.005) return money(b.total);
+
+  const adj = Number(b.total_adjustment || 0);
+  const rateText = money(rate);
+  if (!adj) return `=${rateText}*I${sheetRow}`;
+  return `=(${rateText}*I${sheetRow})${adj < 0 ? '-' : '+'}${money(Math.abs(adj))}`;
+}
+
 // The cell values this booking should produce.
 export function desired(b, sheetRow) {
   // An open-ended stay is a live formula in the sheet, exactly as the bot
@@ -56,7 +83,7 @@ export function desired(b, sheetRow) {
     room_number: s(b.room_number),
     nights_cell: nightsCell,
     arrival,
-    total: money(b.total),
+    total: priceCell(b, sheetRow),
     paid: money(b.paid),
     // This line's own method, always — never the booking's combined methods.
     // The Dashboard tab and the per-property tabs read the payment column per
