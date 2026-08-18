@@ -18,6 +18,13 @@
 //     line, since row numbers shift whenever anybody inserts a line by hand.
 //   * touch a mixed-currency booking. The sheet has one paid cell and
 //     "650 EGP + 40 USD" is not a number.
+//   * flatten a formula in the two bot-owned columns that can hold one.
+//     supabase/mirror.py reads every row a second time with FORMULA rendering
+//     and skips any cell starting with `=` (sheet_owned_keys). That is a round
+//     trip per save, which this path cannot afford, so it reconstructs the two
+//     instead: عدد الليالي on an open stay is rebuilt as =TODAY()-J<row>, and
+//     اجمالي سعر الحجز by priceCell when the booking is priced by a nightly
+//     rate. K, N, P, R, S and T never appear in WRITE_BLOCKS at all.
 //   * throw. A Sheets outage must not fail the save the user just made; the
 //     database is the record and the mirror is the retry.
 
@@ -38,6 +45,11 @@ const SHAPE = `
     b.id, b.sheet_row, b.booking_ref, b.guest_ref, b.guest_name, b.booking_type,
     b.phone, b.apartment_name, b.room_number, b.arrival, b.nights, b.open_ended,
     b.total, b.paid, b.payment_method, b.notes,
+    -- The parts the price cell is rebuilt from when the sheet holds a formula
+    -- rather than a number. effective_total is what that formula produces
+    -- today, which is how priceCell tells "still the formula" from "somebody
+    -- typed a price".
+    b.nightly_rate, b.total_adjustment, b.effective_total,
     (select count(distinct p.currency) > 1
        from payments p where p.booking_id = b.id) as mixed_currency,
     (select coalesce(jsonb_agg(jsonb_build_object(
@@ -58,7 +70,7 @@ const SHAPE = `
     (select p.currency from payments p
       where p.booking_id = b.id and p.line_seq = 1
       order by p.id limit 1) as primary_currency
-  from bookings b
+  from bookings_live b
   where b.id = $1
 `;
 

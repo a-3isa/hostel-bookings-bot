@@ -80,6 +80,10 @@ select
   b.id, b.sheet_row, b.booking_ref, b.guest_ref, b.guest_name, b.booking_type,
   b.phone, b.apartment_name, b.room_number, b.arrival, b.nights, b.open_ended,
   b.total, b.paid, b.payment_method, b.notes, b.mirror_payload,
+  -- What price_cell rebuilds the formula from. effective_total is what that
+  -- formula produces today, which is how it tells "still the formula" from
+  -- "somebody typed a price".
+  b.nightly_rate, b.total_adjustment, b.effective_total,
   -- Deliberately NOT the booking's combined methods.
   --
   -- The mirror briefly wrote "انستاباي + فودافون كاش" into one cell, on the
@@ -127,7 +131,10 @@ select
   (select p.currency from payments p
     where p.booking_id = b.id and p.line_seq = 1
     order by p.id limit 1) as primary_currency
-from bookings b
+-- bookings_live, not bookings: effective_total is what a nightly-rate formula
+-- produces today, and price_cell needs it to tell a live formula from a price
+-- somebody typed over it.
+from bookings_live b
 order by b.sheet_row nulls last, b.id;
 """
 
@@ -142,6 +149,38 @@ def money(v):
         return ""
     f = float(v)
     return str(int(f)) if f == int(f) else str(f)
+
+
+def price_cell(row, sheet_row):
+    """اجمالي سعر الحجز, which is not always a number.
+
+    16 bookings are priced by a nightly rate and hold a live formula in the
+    sheet — `=500*I10`, or `=(650*I19)-2200` where a lump sum was written off.
+    Ten of them are open-ended, so that formula is what keeps the price growing
+    as the stay does, and writing today's number in its place freezes the
+    guest's bill on the day something happened to touch the row.
+
+    Rebuilt rather than copied, because the formula is anchored to a ROW and
+    rows move: `=500*I10` carried onto row 14 prices the guest off somebody
+    else's night count. Emitted only while the stored total still agrees with
+    what the formula produces — once a different number is set, that is a
+    deliberate override and it wins.
+    """
+    rate = row.get("nightly_rate")
+    if not rate:
+        return money(row["total"])
+    effective = row.get("effective_total")
+    if effective is None:
+        return money(row["total"])
+    # To the piastre. A rounding difference here is a real one.
+    if abs(float(row["total"] or 0) - float(effective)) > 0.005:
+        return money(row["total"])
+
+    adj = float(row.get("total_adjustment") or 0)
+    if not adj:
+        return f"={money(rate)}*I{sheet_row}"
+    sign = "-" if adj < 0 else "+"
+    return f"=({money(rate)}*I{sheet_row}){sign}{money(abs(adj))}"
 
 
 def line_payload(row, line, sheet_row):
@@ -326,7 +365,7 @@ def desired(row, sheet_row):
         "room_number": s(row["room_number"]),
         "nights_cell": nights_cell,
         "arrival": "" if row["arrival"] is None else row["arrival"].isoformat(),
-        "total": money(row["total"]),
+        "total": price_cell(row, sheet_row),
         "paid": money(row["paid"]),
         # This line's own method, always. See paid_methods in the query.
         "payment_method": s(row["payment_method"]),
