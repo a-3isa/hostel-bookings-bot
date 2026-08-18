@@ -17,8 +17,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mirror import (block_end, line_key, line_payload, open_line, plan_allocation,
-                    primary_payload, shift_rows_down)
+from mirror import (LINE_ROW_COLOUR, block_end, line_key, line_payload, open_line,
+                    plan_allocation, primary_payload, shift_rows_down)
 
 
 def booking(method="كاش", currency="EGP", lines=(), unallocated=(), **extra):
@@ -187,7 +187,10 @@ def money_row(**over):
 def test_a_line_shows_what_was_paid_in_its_own_method():
     row = money_row()
     want = line_payload(row, line(2, "انستاباي", 11, amount=1600), 11)
-    assert want["total"] == "1600"
+    # اجمالي سعر الحجز stays blank on a line: the price was agreed once and
+    # lives on the booking's own row. A line is a second METHOD, not a second
+    # price — see line_payload.
+    assert want["total"] == ""
     assert want["paid"] == "1600"
     assert want["payment_method"] == "انستاباي"
     assert want["booking_id"] == "413-2"
@@ -197,16 +200,32 @@ def test_a_merged_payment_grows_the_cell_it_landed_in():
     """Two انستاباي payments are one line of 1600, not two rows of 800."""
     row = money_row()
     want = line_payload(row, line(2, "انستاباي", 11, amount=800 + 800), 11)
-    assert want["total"] == "1600"
+    assert want["paid"] == "1600"
+    assert want["total"] == ""
 
 
-def test_the_booking_row_holds_what_the_other_lines_do_not():
+def test_the_booking_row_keeps_the_whole_price():
+    """The agreed total is not reduced by a line; only the paid cell is."""
     row = money_row()
     want = primary_payload(row, [line(2, "انستاباي", 11, amount=1600)], 10)
-    assert want["total"] == "600"
+    assert want["total"] == "2200"
     assert want["paid"] == "600"
-    # ...and the lines still sum to the total the database holds.
+    # ...and the lines still sum to the money the database holds.
     assert float(want["paid"]) + 1600 == float(row["paid"])
+
+
+def test_the_price_column_sums_to_the_booking_once():
+    """L on the booking plus L on every line is the booking's total, not more.
+
+    The whole point of leaving a line's L blank: a 2200 stay paid in two
+    methods must not read as 3800 to anything that totals the column.
+    """
+    row = money_row()
+    ln = line(2, "انستاباي", 11, amount=1600)
+    booking = primary_payload(row, [ln], 10)
+    line_row = line_payload(row, ln, 11)
+    total_column = float(booking["total"]) + float(line_row["total"] or 0)
+    assert total_column == float(row["total"])
 
 
 def test_three_lines_still_sum_back_to_the_booking():
@@ -245,9 +264,13 @@ class FakeCursor:
 class FakeSheet:
     def __init__(self):
         self.inserted = []
+        self.formatted = []
 
     def insert_rows(self, values, row=1, inherit_from_before=False):
         self.inserted.append((row, inherit_from_before))
+
+    def format(self, range_name, fmt):
+        self.formatted.append((range_name, fmt))
 
 
 def test_the_shift_goes_through_negatives_first():
@@ -279,6 +302,20 @@ def test_the_new_row_lands_directly_under_the_block():
                                   "payment_ids": [7]})
     assert at_row == 12
     assert ws.inserted == [(12, True)]           # inheritFromBefore, as by hand
+
+
+def test_the_new_row_is_purple():
+    """inheritFromBefore copies the booking row's fill, so the line is
+    indistinguishable from a booking until this repaints it."""
+    cur = FakeCursor(returns=[(77,)])
+    ws = FakeSheet()
+    row = booking(lines=[line(2, "انستاباي", 11)])
+    open_line(cur, ws, row, {"seq": 3, "method": "فودافون كاش",
+                             "currency": "EGP", "amount": 90,
+                             "payment_ids": [7]})
+    assert ws.formatted == [("A12:U12", {"backgroundColor": LINE_ROW_COLOUR})]
+    # A colour, not a value: nothing extra was written into the row.
+    assert ws.inserted == [(12, True)]
 
 
 def test_the_line_is_recorded_before_its_row_and_claims_it_after_the_shift():

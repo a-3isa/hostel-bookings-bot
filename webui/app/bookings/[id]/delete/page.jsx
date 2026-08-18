@@ -31,9 +31,16 @@ export default async function DeleteBooking({ params, searchParams }) {
        (select count(*)::int from booking_stays where booking_id = $1) as stays,
        (select count(*)::int from booking_audit where booking_id = $1) as audit,
        (select count(*)::int from bookings      where merged_into = $1) as followers,
+       (select count(*)::int from booking_lines where booking_id = $1
+                                                  and sheet_row is not null) as lines,
        (select count(*)::int from bookings      where sheet_row > $2) as rows_below`,
     [bookingId, booking.sheet_row ?? 0],
   );
+
+  // A booking paid in two methods occupies more than one row, and all of them
+  // go — the booking's own and every continuation line under it. Counted here
+  // so the confirmation says how many BEFORE the button is pressed.
+  const sheetRows = sheet.ok ? 1 + counts.lines : 0;
 
   // The same check the POST handler runs, done here so the answer is on screen
   // before anyone presses the button rather than after.
@@ -125,7 +132,9 @@ export default async function DeleteBooking({ params, searchParams }) {
           <li>
             <span>
               {sheet.ok
-                ? 'صف واحد من تبويب «إدخال الحجوزات»'
+                ? (sheetRows === 1
+                    ? 'صف واحد من تبويب «إدخال الحجوزات»'
+                    : `${sheetRows} صفوف من تبويب «إدخال الحجوزات» — صف الحجز و${counts.lines} صف دفعة تحته`)
                 : 'لا شيء من الشيت — الحذف من قاعدة البيانات فقط'}
             </span>
           </li>

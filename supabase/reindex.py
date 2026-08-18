@@ -87,6 +87,14 @@ def main():
     rows = {b["sheet_row"]: b for b in load_bookings(sh)}
     last = max(rows) if rows else 1
     ids = sheet_ids(ws, last)
+    # A continuation line whose stamp column U could not spell. `16-2` reads as
+    # line 2 straight from the cell; row 18 carries a bare `16` because it was
+    # merged into row 17 by hand, and read literally that says booking 16 lives
+    # on row 18 — which would re-point the booking off its own row. load_bookings
+    # recognises the shape and hands back the real sequence, so take its answer.
+    for row, b in rows.items():
+        if b["is_payment_line"] and ids.get(row, (None, None))[1] != b["line_seq"]:
+            ids[row] = (b["id_of"], b["line_seq"])
 
     with psycopg.connect(**connect_args()) as conn, conn.cursor() as cur:
         cur.execute("select id, sheet_row from bookings;")

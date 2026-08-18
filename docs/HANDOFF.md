@@ -125,18 +125,70 @@ all of them left by the broken row calculation or by testing:
   row was deleted. This one is the row calculation writing into empty space, and
   it is the reason to deploy the fix before the next save.
 
-**Still outstanding:**
+**Still outstanding** (revised 2026-08-18 — two of the three are closed):
 
-- **Row 19 of مصروفات عامة carries a stale `expense_ref`.** The row now reads
-  `على شاكر لصالح سيف / 4,400` but column H still says `٩٩٩٩٩`, left over from
-  the hand-typed row the bot wrote over — column H is never written, so the old
-  reference survived onto somebody else's expense. Fix it in the SHEET; a
-  backfill only re-imports whatever is there.
-- **Three bookings whose `paid` exceeds the payments recorded for them:** 16
-  حسام (5,000 vs 1,500), 18 سعد الخنادي (10,500 vs 7,500), 478 حمدي (1,500 vs
-  750). Older than any of this and not a sheet-row problem — the sheet's paid
-  column includes money the payments table never got.
+- ~~Row 19 of مصروفات عامة carries a stale `expense_ref`~~ — **fixed in the
+  sheet by the user.** Column H is blank and the database reads NULL.
+- ~~Three bookings whose `paid` exceeds the payments recorded for them~~ —
+  **closed by `seed_ledger.py`**, which gave 26 bookings a placeholder payment
+  for the difference between the sheet's paid cell and the ledger. `paid_at` is
+  NULL on every one: the date is the thing the sheet never recorded and there
+  is no honest way to guess it. They carry `client_ref = ledger-seed:<id>`.
+- **Booking 32 احمد باسط, the one left.** Its ledger holds 2,000 MORE than the
+  sheet — a payment recorded twice, or a cell somebody lowered. The opposite
+  problem, and seeding anything would bury it.
 - The bot token is legible in a screenshot from 2026-08-15 — revoke and replace.
+  **Still unverified.** A live Telegram token in a screenshot is a working
+  credential for whoever has it; this is the most urgent line on this page.
+
+## 2026-08-18 — the dashboard writes the sheet, and the money rule changed
+
+**A payment in a new method no longer moves the booking's price.** The user
+reversed that half of the 2026-08-14 rule. The booking's own row keeps the whole
+agreed total; the LINE row leaves اجمالي سعر الحجز **blank** and carries only
+its own paid amount. اجمالي ما تم دفعه is still split per row. Between them the
+price column sums to the booking exactly once — the old arrangement made it read
+3,800 for a 2,200 stay. The new row is also filled **purple**, because
+`inheritFromBefore` copies the booking row's own formatting and a line was
+otherwise indistinguishable from a guest.
+
+Applied in all three writers, which now agree: `brain.js` (`commitPaymentLine`),
+`supabase/mirror.py` (`primary_payload` / `line_payload`) and the new
+`webui/lib/mirror.js`. `supabase/test_lines.py` and `webui/lib/mirror.test.mjs`
+are twin suites over the same worked examples, which is what keeps the ports
+from drifting.
+
+**The dashboard publishes to the sheet on save.** It was Postgres-only;
+`webui/lib/publish.js` now writes the booking or expense the user just touched,
+allocates a payment to its line and opens a row when the method is new. It is
+not a second mirror — one record, refuses anything its identity check does not
+confirm, never throws — and `supabase/mirror.py` remains the reconciler.
+
+**The group was told twice about every payment.** `Write Line Rows` emits one
+item per row it wrote, and a payment line is two rows whenever the booking's own
+row changed in the same save, so everything downstream ran twice. `Has Group?`
+now carries `executeOnce`. `Write Line Id` had had that flag for the same reason
+since 2026-08-15 and nobody generalised it.
+
+**Deleting a booking left its payment rows behind in the sheet.**
+`booking_lines` cascades when the booking goes, but the delete route only ever
+removed the booking's OWN row — so مروان's 1,600 انستاباي line would have stayed
+on the tab with nothing in the database describing it. It now takes every row
+the booking occupies, proving each against column U, highest row first, and
+renumbers all three tables that remember a row number rather than two.
+
+**Row 18 of إدخال الحجوزات is حسام's second payment**, merged in by hand. It
+carries a bare `16` rather than `16-2`, which read literally says booking 16
+lives on row 18. `continuation_seq()` in `backfill.py` now recognises the shape —
+money, no guest, no apartment, no room, and an id a named row above already
+holds — so the sheet did not have to be edited to suit the database. The user
+called it an exception that will not recur.
+
+Not run: `mirror.py --apply`. It would convert مروان, محمد and احمد رمضان to the
+new arrangement, and the user chose to leave them and update those prices by
+hand. Note that the dashboard writes L from the database on every save, so a
+hand-edited price holds until the next dashboard action on that booking —
+`backfill.py --apply` after the edit is what makes both sides agree.
 
 ## The 2026-08-14 rebuild, for context
 

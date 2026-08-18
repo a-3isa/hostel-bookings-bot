@@ -152,14 +152,19 @@ def line_payload(row, line, sheet_row):
     and the method are the line's own — and column U, which says which line this
     is: `21-2`, booking 21, line 2.
 
-    The user's rule for the money, in their words: *"اجمالي سعر الحجز will equal
-    the amount paid in each step"*. So the line's total is what was paid in this
-    line's method — the sum of its payments, which is why a second كاش payment
-    changes this cell rather than adding a row.
+    The money is the line's own payments summed, which is why a second كاش
+    payment changes this cell rather than adding a row.
+
+    **اجمالي سعر الحجز is left BLANK on a line row** (ruled 2026-08-18). The
+    booking is worth what was agreed once, and that number stays whole on the
+    booking's own row; a line is a second METHOD of paying it, not a second
+    price. Writing the payment into L here as well would make the column sum to
+    more than the booking — 13,500 for a 10,000 stay — and every formula that
+    totals L reads that. Blank keeps the lines summing back to the booking.
     """
     want = desired(row, sheet_row)
     amount = money(line["amount"])
-    want["total"] = amount
+    want["total"] = ""
     want["paid"] = amount
     want["payment_method"] = s(line["method"])
     want["booking_id"] = f"{row['id']}-{line['seq']}"
@@ -167,23 +172,30 @@ def line_payload(row, line, sheet_row):
 
 
 def primary_payload(row, lines, sheet_row):
-    """The booking's own row, with what its other lines carry taken back out.
+    """The booking's own row, with the money its other lines carry taken out.
 
-    The booking holds 2200 because that is what the stay cost; its first line
-    shows 600 because the other 1600 is on the row below. Subtracting rather
-    than storing the split keeps the two sides reconcilable: the sheet's lines
-    sum back to exactly the number the database holds.
+    **اجمالي سعر الحجز is NOT reduced** (ruled 2026-08-18). The agreed price is
+    a fact about the booking, so it stays whole here and the line rows leave
+    their L blank — see line_payload. Between them the L column still sums to
+    the booking and no formula that totals it is misled.
+
+    اجمالي ما تم دفعه IS reduced, and has to be: the sheet has one paid cell per
+    row and the lines each carry their own. Leaving the full 5,000 here while
+    the line below shows 3,500 would count that payment twice.
     """
     want = desired(row, sheet_row)
     if not lines:
         return want
     spread = sum(float(ln["amount"] or 0) for ln in lines)
-    want["total"] = money(float(row["total"] or 0) - spread)
     want["paid"] = money(float(row["paid"] or 0) - spread)
     return want
 
 
 DEFAULT_CURRENCY = "EGP"
+
+# The fill given to a continuation row when this script opens one. Light enough
+# that the sheet's own black text stays readable on it.
+LINE_ROW_COLOUR = {"red": 0.85, "green": 0.78, "blue": 0.93}
 
 
 def line_key(method, currency):
@@ -287,6 +299,11 @@ def open_line(cur, ws, row, line):
 
     at_row = block_end(row) + 1
     ws.insert_rows([[""]], row=at_row, inherit_from_before=True)
+    # Purple, so a payment line is recognisable as one at a glance (asked for
+    # 2026-08-18). `inheritFromBefore` has just copied the booking row's own
+    # formatting onto it, which is what makes the two indistinguishable
+    # otherwise. Colour only — no value is written here.
+    ws.format(f"A{at_row}:U{at_row}", {"backgroundColor": LINE_ROW_COLOUR})
     shift_rows_down(cur, at_row)
     cur.execute("update booking_lines set sheet_row = %s where id = %s;",
                 (at_row, line_id))

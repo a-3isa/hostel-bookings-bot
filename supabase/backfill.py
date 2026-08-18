@@ -188,6 +188,32 @@ def load_registry(sh):
     return reg
 
 
+def continuation_seq(row, id_of, named_ids, top_seq):
+    """The line sequence of a nameless row, or None if it is not a line at all.
+
+    Most nameless rows are the formula-only tail and are skipped. One shape is
+    not: a row carrying MONEY, naming no guest, no apartment and no room, and
+    repeating in column U the id of a booking a named row above it already
+    holds. That is the same stay paid a second time in another method — طريقة
+    الدفع has room for exactly one — and the sheet shows it on its own row.
+
+    The bot spells such a row `16-2` when it writes one, and parse_sheet_id
+    reads the suffix. Row 18 of إدخال الحجوزات was merged into row 17 by hand
+    on 2026-08-17 and carries a bare `16`, which reads as line 1 and collides
+    with the booking's own row. The sheet is the reference and is not edited to
+    suit the database, so the line is recognised from what the row IS rather
+    than from a suffix nobody typed: the sequence is simply the next one free
+    for that booking.
+    """
+    if not id_of or id_of not in named_ids:
+        return None
+    if cell(row, B["apartment"]) or cell(row, B["room"]):
+        return None
+    if not (cell(row, B["paid"]) or cell(row, B["total"])):
+        return None
+    return top_seq.get(id_of, 1) + 1
+
+
 def load_bookings(sh):
     """Rows keyed by their true sheet row, skipping blanks and formula-only rows."""
     ws = sh.worksheet(BOOKINGS_TAB)
@@ -197,15 +223,26 @@ def load_bookings(sh):
     values = ws.get("A2:U990")
     formulas = ws.get("A2:U990", value_render_option="FORMULA")
     out = []
+    # Ids a NAMED row has already claimed, and the highest line sequence seen
+    # for each so far. Both exist for continuation_seq() below.
+    named_ids = set()
+    top_seq = {}
     for i, row in enumerate(values, start=2):
         name = cell(row, B["guest_name"])
+        id_of, line_seq = parse_sheet_id(cell(row, 20))
         if not name:
-            continue                        # formula-only tail rows
+            seq = continuation_seq(row, id_of, named_ids, top_seq)
+            if seq is None:
+                continue                    # formula-only tail rows
+            line_seq = seq
+        if id_of:
+            if name:
+                named_ids.add(id_of)
+            top_seq[id_of] = max(top_seq.get(id_of, 0), line_seq or 1)
         frow = formulas[i - 2] if i - 2 < len(formulas) else []
         nights_raw = cell(row, B["nights"])
         # A live formula in عدد الليالي is what "open-ended" means in the sheet.
         is_open = str(cell(frow, B["nights"])).startswith("=")
-        id_of, line_seq = parse_sheet_id(cell(row, 20))
         out.append({
             "sheet_row": i,
             "booking_ref": cell(row, B["booking_ref"]),
@@ -330,6 +367,15 @@ def fold_lines(bookings, lines):
             continue        # a line naming no booking; reindex reports it
         base["total"] = add_money(base["total"], ln["total"])
         base["paid"] = add_money(base["paid"], ln["paid"])
+        # A booking priced by a nightly rate recomputes its own total from
+        # rate × nights, so money a LINE brings has to land where that
+        # arithmetic can see it. `total_adjustment` is the lump sum the sheet's
+        # own formula is offset by and `effective_total` is rate × nights plus
+        # it. Folding into `total` alone left booking 16 reading 6,500 — its
+        # =500*I17 — against a sheet whose two lines sum to 10,000.
+        if base["nightly_rate"]:
+            base["total_adjustment"] = add_money(base["total_adjustment"],
+                                                 ln["total"])
     return [out[r] for r in sorted(out)]
 
 
