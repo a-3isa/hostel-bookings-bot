@@ -41,7 +41,7 @@ SOURCE = os.path.join(HERE, "bookings-bot.full.workflow.json")
 
 # The column-U write, which cost 24.6 s through the Sheets node and becomes one
 # HTTP PUT, and the callback answer that now tells the user it is working.
-DEFAULT_NODES = ["Write Booking Id", "Answer Callback"]
+DEFAULT_NODES = ["Write Booking Id", "Answer Callback", "Has Group?"]
 
 # `Write Booking Id` is NOT here any more. It was, for the reason `Write Booking
 # Row` still is — a Sheets writer carries a `columns.schema` that n8n learned
@@ -56,10 +56,33 @@ def load_source():
     return {n["name"]: n for n in wf["nodes"]}
 
 
+# Node SETTINGS, which live beside `parameters` rather than inside it. They are
+# not cosmetic: `executeOnce` is what stops a node running once per item, and
+# `onError` is what keeps a failed group post from taking the whole save with
+# it. Until 2026-08-18 nothing here compared them, so a fix that changed only a
+# setting was invisible to --diff and unreachable by --apply — which is exactly
+# what the `Has Group?` double-post fix was.
+SETTING_KEYS = ("alwaysOutputData", "executeOnce", "retryOnFail", "maxTries",
+                "waitBetweenTries", "onError")
+
+
+def settings_diff(live, want):
+    """Settings the generated file states and the instance does not match.
+
+    Only keys the FILE declares. n8n omits a setting that equals its default,
+    and the UI may have set others on purpose, so a key the file is silent
+    about is the instance's business — the same reasoning that keeps Config and
+    the Sheets writers out of a default run.
+    """
+    return {k: want[k] for k in SETTING_KEYS
+            if k in want and live.get(k) != want[k]}
+
+
 def differs(live, want):
     return (live["type"] != want["type"]
             or live.get("typeVersion") != want.get("typeVersion")
-            or live.get("parameters") != want.get("parameters"))
+            or live.get("parameters") != want.get("parameters")
+            or bool(settings_diff(live, want)))
 
 
 def edges(conns, name):
@@ -90,7 +113,12 @@ def main():
     if "--diff" in sys.argv:
         for name, want in source.items():
             if name in live and differs(live[name], want):
-                mark = "TYPE" if live[name]["type"] != want["type"] else "params"
+                if live[name]["type"] != want["type"]:
+                    mark = "TYPE"
+                elif live[name].get("parameters") != want.get("parameters"):
+                    mark = "params"
+                else:
+                    mark = "set"
                 note = "  (not synced unless named)" if name in NEVER_DEFAULT else ""
                 print(f"  {mark:6} {name}{note}")
         return
@@ -140,19 +168,27 @@ def main():
             # maxTries and waitBetweenTries belong here too: retryOnFail without
             # them silently reverts to n8n's default count, so a node the file
             # says retries twice would retry three times on the instance.
-            settings = {k: want[k] for k in ("alwaysOutputData", "executeOnce",
-                                             "retryOnFail", "maxTries",
-                                             "waitBetweenTries", "onError")
-                        if k in want}
+            settings = {k: want[k] for k in SETTING_KEYS if k in want}
             if settings:
                 ops.append({"type": "setNodeSettings", "nodeName": name,
                             "settings": settings})
         else:
             keys = [k for k in set(want["parameters"]) | set(have.get("parameters") or {})
                     if want["parameters"].get(k) != (have.get("parameters") or {}).get(k)]
-            print(f"  params {name}: {', '.join(sorted(keys))}")
-            ops.append({"type": "updateNodeParameters", "nodeName": name,
-                        "parameters": want["parameters"], "replace": True})
+            if keys:
+                print(f"  params {name}: {', '.join(sorted(keys))}")
+                ops.append({"type": "updateNodeParameters", "nodeName": name,
+                            "parameters": want["parameters"], "replace": True})
+            # Settings on their own, without a type change to carry them. A node
+            # whose only difference is `executeOnce` used to reach this branch,
+            # find no differing parameter, and push an identical parameter block
+            # while the setting that mattered stayed as it was.
+            changed = settings_diff(have, want)
+            if changed:
+                print(f"  set    {name}: "
+                      + ', '.join(f"{k}={v}" for k, v in sorted(changed.items())))
+                ops.append({"type": "setNodeSettings", "nodeName": name,
+                            "settings": changed})
 
     if not ops:
         print("nothing to do")
@@ -163,7 +199,7 @@ def main():
 
     print(pb.call_tool("update_workflow", {
         "workflowId": pb.WORKFLOW_ID, "operations": ops,
-        "versionName": "Row calculation reads the Sheets API",
+        "versionName": "sync_nodes: " + ", ".join(names),
     }))
     if "--publish" in sys.argv:
         print(pb.call_tool("publish_workflow", {"workflowId": pb.WORKFLOW_ID}))

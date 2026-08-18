@@ -1,6 +1,35 @@
 # Handoff — where the Supabase migration stands
 
-## START HERE (2026-08-15) — live in a new n8n, four fixes unpublished
+## START HERE (2026-08-18) — everything in this repo is live
+
+The workflow `hzMYegbL3yifl7KN` on `superfoxxy.dpdns.org` is **current**. The
+endpoint is reachable, the MCP toggle is on, and both scripts run:
+
+```
+python booking_bot/sync_nodes.py --apply --publish   # graph + node settings
+python booking_bot/push_brain.py  --publish          # brain.js
+```
+
+The TLS interception described further down comes and goes — a `handshake
+operation timed out` on one attempt and a clean run minutes later, twice on
+2026-08-18. Retry before concluding anything about tokens or access.
+
+`sync_nodes.py --diff` reports seven nodes still differing and **every one of
+them should be left alone**; they are catalogued under "What the diff turns up
+that is NOT a bug" below. `Brain`, `Read Booking Key`, `Read Expense Key` and
+`Has Group?` are no longer among them.
+
+**`sync_nodes.py` compared only type and parameters until 2026-08-18**, so a fix
+that changed a node SETTING was invisible to `--diff` and unreachable by
+`--apply`. That is what hid the `Has Group?` double-post fix. It now compares
+`executeOnce`, `onError`, `alwaysOutputData` and the retry keys, and pushes them
+on their own with `setNodeSettings` rather than only alongside a type change.
+
+The Vercel dashboard deploys from `webui/` on every push to master.
+
+---
+
+## The 2026-08-15 entry, superseded above
 
 The bot is **running** in a rebuilt instance: workflow `hzMYegbL3yifl7KN` on
 `superfoxxy.dpdns.org`, imported by hand, credentials bound, and taking real
@@ -48,8 +77,11 @@ Read against the live workflow on 2026-08-15, node by node
 (`sync_nodes.py --diff`). Three of the four are already in it — they were
 applied by hand during the import and nobody wrote that down:
 
-1. **The row calculation** (`313e101`) — **STILL MISSING, and the only one that
-   matters.** The bot writes over the LAST row of both tabs; an expense landed
+1. **The row calculation** (`313e101`) — **since applied.** It is live as of
+   2026-08-18: `Read Booking Key` and `Read Expense Key` no longer appear in
+   `sync_nodes.py --diff`. What follows is why it mattered.
+
+   Originally recorded as: The bot writes over the LAST row of both tabs; an expense landed
    on row 19 of مصروفات عامة, on top of a hand-typed `غغ 99`, whose
    `الرقم ٩٩٩٩٩` survives only because column H is never written. Live still has
    `Read Booking Key` and `Read Expense Key` as `googleSheets` nodes reading
