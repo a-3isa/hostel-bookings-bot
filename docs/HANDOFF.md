@@ -166,9 +166,15 @@ all of them left by the broken row calculation or by testing:
   for the difference between the sheet's paid cell and the ledger. `paid_at` is
   NULL on every one: the date is the thing the sheet never recorded and there
   is no honest way to guess it. They carry `client_ref = ledger-seed:<id>`.
-- **Booking 32 احمد باسط, the one left.** Its ledger holds 2,000 MORE than the
-  sheet — a payment recorded twice, or a cell somebody lowered. The opposite
-  problem, and seeding anything would bury it.
+- ~~Booking 32 احمد باسط, the one left~~ — **closed 2026-08-18.** Its ledger
+  held two bot payments recorded two minutes apart on 2026-08-15: 3,130
+  انستاباي at 17:44, which is exactly what the sheet says, and 2,000 فودافون
+  كاش at 17:46, which nothing on the sheet accounts for. Neither carried a
+  receipt. The user ruled the sheet right, so payment 212 was deleted. It is in
+  `backups/20260818T203228Z/database.json` if that is ever revisited.
+
+  **`reconcile_payments` is now empty for the first time.** The sheet's paid
+  column and the payments ledger agree on every booking.
 - The bot token is legible in a screenshot from 2026-08-15 — revoke and replace.
   **Still unverified.** A live Telegram token in a screenshot is a working
   credential for whoever has it; this is the most urgent line on this page.
