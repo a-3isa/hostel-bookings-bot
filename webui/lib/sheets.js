@@ -100,12 +100,12 @@ async function api(path, init = {}) {
   return json;
 }
 
-async function tabId() {
+async function tabId(title = BOOKINGS_TAB) {
   const meta = await api('?fields=sheets(properties(sheetId,title))');
-  const tab = meta.sheets?.find((s) => s.properties.title === BOOKINGS_TAB);
+  const tab = meta.sheets?.find((s) => s.properties.title === title);
   if (!tab) {
     throw new Error(
-      `التبويب "${BOOKINGS_TAB}" غير موجود في هذا الملف — تأكد أن BOOKINGS_SHEET_ID يشير إلى ملف الحجوزات الصحيح.`,
+      `التبويب "${title}" غير موجود في هذا الملف — تأكد أن BOOKINGS_SHEET_ID يشير إلى ملف الحجوزات الصحيح.`,
     );
   }
   return tab.properties.sheetId;
@@ -170,3 +170,216 @@ export async function deleteRow(rowNumber) {
 // booking opens a row, which needs every line the booking occupies to decide.
 // `supabase/mirror.py` is the one writer that knows them, and it inserts the
 // row itself. Nothing in the dashboard writes rows to the bookings tab now.
+
+// ── writing ─────────────────────────────────────────────────────────────────
+//
+// Added 2026-08-18, when the dashboard stopped being a Postgres-only client.
+// Before this, an edit made here reached the sheet only when somebody ran
+// `supabase/mirror.py`, and the nine other tabs went on showing the old number
+// until they did.
+//
+// The rules these writes follow are `supabase/mirror.py`'s, ported in
+// `lib/mirror.js` — same columns, same money, same allocation. The mirror is
+// still the reconciler and still the only thing that repairs a row nobody has
+// written correctly; this is the fast path for the row the user just touched.
+
+// A–T are the sheet's own columns; U is the id the bot stamps. E (الجنسية) is
+// retired and never written, and K, N, P, R, S and T are fill-down formulas
+// that writing — even '' — destroys.
+const WRITE_BLOCKS = [
+  ['A', 'D', ['booking_ref', 'guest_ref', 'guest_name', 'booking_type']],
+  ['F', 'J', ['phone', 'apartment_name', 'room_number', 'nights_cell', 'arrival']],
+  ['L', 'M', ['total', 'paid']],
+  ['O', 'O', ['payment_method']],
+  ['Q', 'Q', ['notes']],
+  ['U', 'U', ['booking_id']],
+];
+
+// Sent with a leading apostrophe so Sheets keeps them as text: a phone with a
+// leading zero, or an id that looks like a number and is not one.
+const TEXT_FORCED = new Set(['booking_ref', 'guest_ref', 'phone']);
+
+// The fill a continuation row gets when this opens one. Must match
+// LINE_ROW_COLOUR in supabase/mirror.py, or the same row is two colours
+// depending on which writer got there first.
+export const LINE_ROW_COLOUR = { red: 0.85, green: 0.78, blue: 0.93 };
+
+const forced = (key, value) => {
+  const v = value === null || value === undefined ? '' : String(value);
+  return TEXT_FORCED.has(key) && v !== '' ? `'${v}` : v;
+};
+
+// Writes the columns the bot owns on one row. `payload` is keyed as
+// lib/mirror.js builds it; a key it does not carry is written as empty, which
+// is what clearing a field in the dashboard has to mean.
+export async function writeRow(rowNumber, payload) {
+  const data = WRITE_BLOCKS.map(([from, to, keys]) => ({
+    range: `${BOOKINGS_TAB}!${from}${rowNumber}:${to}${rowNumber}`,
+    values: [keys.map((k) => forced(k, payload[k]))],
+  }));
+
+  await api('/values:batchUpdate', {
+    method: 'POST',
+    // USER_ENTERED, not RAW: عدد الليالي on an open-ended stay is the live
+    // formula =TODAY()-J<row> and has to arrive as one.
+    body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }),
+  });
+}
+
+// The first row of the bookings tab with no guest name in C — where a booking
+// the dashboard created belongs, since it has no row of its own yet.
+export async function firstFreeRow() {
+  const data = await api(
+    `/values/${encodeURIComponent(`${BOOKINGS_TAB}!${NAME_COLUMN}2:${NAME_COLUMN}5000`)}`,
+  );
+  const names = data.values ?? [];
+  let last = 1;
+  names.forEach((cells, i) => {
+    if (String(cells?.[0] ?? '').trim()) last = i + 2;
+  });
+  return last + 1;
+}
+
+// Opens a row for a continuation line, directly under the booking's block.
+//
+// `inheritFromBefore` carries down the formatting and the filled-down formulas
+// of the row above — K, N, P, R, S and T, which are the sheet's and are never
+// written by us. It also carries the booking row's own fill, which is why the
+// row is repainted purple straight afterwards: a line is money, not a guest,
+// and it should not look like one.
+//
+// Every row below this moves down by one. The CALLER must renumber sheet_row in
+// bookings, payments and booking_lines to match, or the next write puts a
+// guest's money on whoever moved into their number.
+export async function insertLineRow(atRow) {
+  const sheetId = await tabId();
+  await api('/:batchUpdate', {
+    method: 'POST',
+    body: JSON.stringify({
+      requests: [
+        {
+          insertDimension: {
+            // 0-based and end-exclusive, unlike the row numbers everywhere else.
+            range: { sheetId, dimension: 'ROWS', startIndex: atRow - 1, endIndex: atRow },
+            inheritFromBefore: true,
+          },
+        },
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: atRow - 1,
+              endRowIndex: atRow,
+              startColumnIndex: 0,
+              endColumnIndex: 21,          // A–U
+            },
+            cell: { userEnteredFormat: { backgroundColor: LINE_ROW_COLOUR } },
+            fields: 'userEnteredFormat.backgroundColor',
+          },
+        },
+      ],
+    }),
+  });
+}
+
+// ── the expenses tab ────────────────────────────────────────────────────────
+//
+// Wired 2026-08-18. Nothing had ever mirrored expenses: supabase/mirror.py is
+// bookings-only, so an expense entered in the dashboard lived in Postgres and
+// the مصروفات عامة tab never heard about it.
+//
+// The identity problem is different here, and worse. A booking row carries its
+// database id in column U; an expense row carries nothing of the kind. Column H
+// (الرقم) looks like an id and is not one — it is a human reference, the bot has
+// never written it, and a stale ٩٩٩٩٩ was once found sitting on somebody else's
+// expense because of exactly that. So a row is recognised by what it SAYS: the
+// item and the amount this expense had when it was last written. A row that no
+// longer matches is refused and left for a person, the same posture the booking
+// path takes when column U disagrees.
+
+export const EXPENSES_TAB = 'مصروفات عامة';
+
+// A تاريخ | B البند | C المبلغ | D الشقة | E ملاحظات | F طريقة الدفع |
+// G اسم المسئول. H (الرقم) is deliberately absent: it is nobody's to write.
+const EXPENSE_KEYS = ['spent_at', 'item', 'amount', 'apartment_name', 'notes',
+                      'payment_method', 'responsible'];
+
+const ITEM_COLUMN = 'B';
+const AMOUNT_COLUMN = 'C';
+
+const money = (v) => String(v ?? '').replace(/,/g, '').trim();
+
+// What the sheet currently shows in the two cells that identify an expense.
+export async function readExpenseIdentity(rowNumber) {
+  const range = encodeURIComponent(
+    `${EXPENSES_TAB}!${ITEM_COLUMN}${rowNumber}:${AMOUNT_COLUMN}${rowNumber}`);
+  const data = await api(`/values/${range}`);
+  const [item, amount] = data.values?.[0] ?? [];
+  return { item: item ?? null, amount: amount ?? null };
+}
+
+// Refuses unless the row still holds the expense we mean. `was` is what the
+// database believes is written there — for an edit that is the values BEFORE
+// the edit, since the sheet has not been told about the new ones yet.
+export async function checkExpenseRow(rowNumber, was) {
+  if (!Number.isInteger(rowNumber) || rowNumber < 2) {
+    return { ok: false, reason: 'no-row' };
+  }
+  const found = await readExpenseIdentity(rowNumber);
+  if (!found.item && !found.amount) return { ok: false, reason: 'empty', found };
+  if (String(found.item ?? '').trim() !== String(was.item ?? '').trim()) {
+    return { ok: false, reason: 'mismatch', found };
+  }
+  if (money(found.amount) !== money(was.amount)) {
+    return { ok: false, reason: 'mismatch', found };
+  }
+  return { ok: true, found };
+}
+
+export async function writeExpenseRow(rowNumber, payload) {
+  await api('/values:batchUpdate', {
+    method: 'POST',
+    body: JSON.stringify({
+      valueInputOption: 'USER_ENTERED',
+      data: [{
+        range: `${EXPENSES_TAB}!A${rowNumber}:G${rowNumber}`,
+        values: [EXPENSE_KEYS.map((k) => {
+          const v = payload[k];
+          return v === null || v === undefined ? '' : String(v);
+        })],
+      }],
+    }),
+  });
+}
+
+// The first row of the expenses tab with no البند in B.
+export async function firstFreeExpenseRow() {
+  const range = encodeURIComponent(`${EXPENSES_TAB}!${ITEM_COLUMN}2:${ITEM_COLUMN}5000`);
+  const data = await api(`/values/${range}`);
+  const items = data.values ?? [];
+  let last = 1;
+  items.forEach((cells, i) => {
+    if (String(cells?.[0] ?? '').trim()) last = i + 2;
+  });
+  return last + 1;
+}
+
+// Closes the gap, so every row below moves up by one. The CALLER must renumber
+// expenses.sheet_row to match.
+export async function deleteExpenseRow(rowNumber) {
+  await api('/:batchUpdate', {
+    method: 'POST',
+    body: JSON.stringify({
+      requests: [{
+        deleteDimension: {
+          range: {
+            sheetId: await tabId(EXPENSES_TAB),
+            dimension: 'ROWS',
+            startIndex: rowNumber - 1,
+            endIndex: rowNumber,
+          },
+        },
+      }],
+    }),
+  });
+}

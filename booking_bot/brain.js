@@ -1281,13 +1281,19 @@ const LINE_IDENTITY_COLS = [
  *
  * Two shapes, one flow. `insert: true` puts a row under the booking's block
  * first; `insert: false` grows a line that is already there. Either way the
- * booking's own row keeps its method, and only its اجمالي سعر الحجز moves —
- * down by what the line takes, so the lines still sum to the price of the stay.
+ * booking's own row keeps its method.
  *
- * The total is NOT touched when the sheet computes it (`=650*I18`, a nightly
- * rate): that formula is the sheet's statement of what this stay costs per
- * night, and replacing it with a scalar loses the rate. mirror.py leaves the
- * same cells alone for the same reason.
+ * **اجمالي سعر الحجز does not move** (ruled 2026-08-18). The price was agreed
+ * once, it is a fact about the booking, and it stays whole on the booking's own
+ * row; the LINE leaves that cell blank, because a line is a second METHOD of
+ * paying the price and not a second price. Between them the column still sums
+ * to the booking exactly once.
+ *
+ * It used to work the other way: the line carried its own amount in L and the
+ * booking's L was reduced to match. Writing the payment into both made the
+ * column read 3,800 for a 2,200 stay, and every formula that totals it read
+ * that. supabase/mirror.py and webui/lib/mirror.js apply the same rule — see
+ * primary_payload and line_payload in each.
  */
 function commitPaymentLine(dd) {
   const paidCol = 'اجمالي ما تم دفعه';
@@ -1308,17 +1314,16 @@ function commitPaymentLine(dd) {
     fields['عدد الليالي'] = nights === '=OPEN' ? '=TODAY()-J{r}' : (nights || '');
     fields['معرف النظام'] = `${dd.bookingId || ''}-${target.seq}`;
   }
-  fields[totalCol] = lineTotal;
+  // Blank, and written rather than omitted: an inserted row arrives with
+  // `inheritFromBefore`, so it is already carrying a copy of the booking's own
+  // price. Leaving the key out would leave that copy sitting there.
+  fields[totalCol] = '';
   fields[paidCol] = lineTotal;
   fields['طريقة الدفع'] = dd.payMethod;
 
   // Whatever else the admin changed in the same session still belongs to the
-  // booking's own row, alongside the reduced total.
+  // booking's own row. The total is no longer among it — see the note above.
   const bookingFields = Object.assign({}, dd.editNew || {});
-  if (target.kind === 'new' && !dd.totalIsFormula) {
-    const was = parseNum(dd.editOrig ? dd.editOrig[totalCol] : 0) || 0;
-    bookingFields[totalCol] = num(was - added);
-  }
 
   const bookingPaid = parseNum(dd.editOrig ? dd.editOrig[paidCol] : 0) || 0;
   const linesPaid = (Array.isArray(dd.editLines) ? dd.editLines : [])
@@ -1351,8 +1356,8 @@ function commitPaymentLine(dd) {
       at: Date.now(),
       name: dd.editName || '',
       privateId: dd.editPrivateId || '',
-      before: { [totalCol]: num(target.base), [paidCol]: num(target.base) },
-      after: { [totalCol]: lineTotal, [paidCol]: lineTotal },
+      before: { [paidCol]: num(target.base) },
+      after: { [paidCol]: lineTotal },
     },
     payment: {
       added: num(added),

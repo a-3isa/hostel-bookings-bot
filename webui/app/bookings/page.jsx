@@ -77,8 +77,10 @@ export default async function BookingsPage({ searchParams }) {
         <div className="banner good">
           <span className="ico">✓</span>
           <div>
-            تم حذف الحجز من قاعدة البيانات ومن الشيت (الصف {raw.row})، وأُعيد ترقيم
-            صفوف الشيت المخزّنة للحجوزات أسفله.
+            تم حذف الحجز من قاعدة البيانات ومن الشيت{' '}
+            {Number(raw.rows) > 1
+              ? `(${raw.rows} صفوف، من الصف ${raw.row})`
+              : `(الصف ${raw.row})`}، وأُعيد ترقيم صفوف الشيت المخزّنة أسفله.
           </div>
         </div>
       )}

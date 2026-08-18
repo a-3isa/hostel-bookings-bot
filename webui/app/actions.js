@@ -6,6 +6,7 @@ import { revalidatePath } from 'next/cache';
 import { COOKIE, sessionToken, signedIn } from '../lib/auth';
 import { one, q, tx } from '../lib/db';
 import { bool, integer, number, text } from '../lib/fmt';
+import { publishBooking, publishExpense, retireExpenseRow } from '../lib/publish';
 
 // Everything the dashboard writes is marked so it can be told apart later. The
 // `source` check constraint only permits bot/backfill/sheet, so provenance goes
@@ -112,6 +113,12 @@ export async function createBooking(formData) {
      f.notes, WEB],
   );
 
+  // Straight out to the sheet. A booking made here has no row of its own yet,
+  // so this is what seats it — the nine other tabs cannot see it until it has
+  // one. publishBooking never throws: if Sheets is down the booking is still
+  // saved and supabase/mirror.py picks it up.
+  await publishBooking(created.id);
+
   revalidatePath('/');
   revalidatePath('/bookings');
   redirect(`/bookings/${created.id}?saved=1`);
@@ -146,6 +153,8 @@ export async function saveBooking(id, formData) {
     );
   });
 
+  await publishBooking(id);
+
   revalidatePath('/');
   revalidatePath('/bookings');
   redirect(`/bookings/${id}?saved=1`);
@@ -168,6 +177,8 @@ export async function setCancelled(id, cancelled) {
       [id, WEB, JSON.stringify(before), JSON.stringify(after)],
     );
   });
+
+  await publishBooking(id);
 
   revalidatePath('/');
   revalidatePath('/bookings');
@@ -217,6 +228,14 @@ export async function addPayment(bookingId, formData) {
     [bookingId, amount, method, currency, paidAt],
   );
 
+  // This is where a payment reaches the sheet. publishBooking decides which
+  // LINE it joins: a method the booking already has grows that line's cell,
+  // and a method it has not seen opens a new purple row directly under the
+  // booking's block, shifting everything below it down by one. The rule and
+  // the row insert both live in lib/publish.js — the same ones
+  // supabase/mirror.py applies — so the dashboard is not deciding them here.
+  await publishBooking(bookingId);
+
   revalidatePath('/bookings');
   revalidatePath(`/bookings/${bookingId}`);
   redirect(`/bookings/${bookingId}?saved=1`);
@@ -225,6 +244,10 @@ export async function addPayment(bookingId, formData) {
 export async function deletePayment(bookingId, paymentId) {
   await requireAuth();
   await q('delete from payments where id = $1 and booking_id = $2', [paymentId, bookingId]);
+  // The line the payment was on keeps its row; its cell simply shrinks by what
+  // was removed. An emptied line is not torn out of the sheet from here —
+  // deleting a row moves every row beneath it and that is the mirror's call.
+  await publishBooking(bookingId);
   revalidatePath(`/bookings/${bookingId}`);
   redirect(`/bookings/${bookingId}?saved=1`);
 }
@@ -252,13 +275,19 @@ export async function createExpense(formData) {
     ? await one('select name from apartments where id = $1', [f.apartment_id])
     : null;
 
-  await q(
+  const created = await one(
     `insert into expenses (expense_ref, item, amount, apartment_id, apartment_name,
                            notes, payment_method, responsible, spent_at, source)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,coalesce($9::timestamptz, now()),'bot')`,
+     values ($1,$2,$3,$4,$5,$6,$7,$8,coalesce($9::timestamptz, now()),'bot')
+     returning id`,
     [f.expense_ref, f.item, f.amount, f.apartment_id, apartment?.name ?? null,
      f.notes, f.payment_method, f.responsible ?? WEB, f.spent_at],
   );
+
+  // An expense with no row of its own is appended at the bottom of the tab, the
+  // way a person adds one. Nothing below moves, so no stored row number goes
+  // stale.
+  await publishExpense(created.id);
 
   revalidatePath('/expenses');
   redirect('/expenses?saved=1');
@@ -272,6 +301,11 @@ export async function saveExpense(id, formData) {
     ? await one('select name from apartments where id = $1', [f.apartment_id])
     : null;
 
+  // Read BEFORE the update. An expense row carries no id, so the only way to
+  // recognise it in the sheet is by what it still says — and after the update
+  // the database no longer knows what that was.
+  const was = await one('select item, amount from expenses where id = $1', [id]);
+
   await q(
     `update expenses set expense_ref=$2, item=$3, amount=$4, apartment_id=$5,
             apartment_name=$6, notes=$7, payment_method=$8, responsible=$9,
@@ -281,13 +315,20 @@ export async function saveExpense(id, formData) {
      f.notes, f.payment_method, f.responsible, f.spent_at],
   );
 
+  await publishExpense(id, was);
+
   revalidatePath('/expenses');
   redirect('/expenses?saved=1');
 }
 
 export async function deleteExpense(id) {
   await requireAuth();
+  // What the sheet row should still say, captured before the row is gone: it is
+  // both the guard and the only description of it left afterwards.
+  const was = await one(
+    'select sheet_row, item, amount from expenses where id = $1', [id]);
   await q('delete from expenses where id = $1', [id]);
+  if (was) await retireExpenseRow(was.sheet_row, was);
   revalidatePath('/expenses');
   redirect('/expenses?saved=1');
 }

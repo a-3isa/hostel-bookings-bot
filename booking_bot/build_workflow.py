@@ -668,6 +668,19 @@ def build():
     # All three writers converge: tell the group, tell the user, end the
     # conversation. The Brain has already composed every string, including the
     # one for when there is no group to post to.
+    #
+    # `executeOnce`, and this is the whole reason the branch below runs once.
+    # `Write Line Rows` emits ONE ITEM PER ROW it wrote, and a payment line is
+    # two rows whenever the booking's own row changed in the same save. Without
+    # this, n8n ran everything downstream twice: two ✅ cards to the
+    # receptionist and the announcement posted to the group TWICE. Reported
+    # live on 2026-08-18.
+    #
+    # `Write Line Id` already carried its own `executeOnce` for exactly this —
+    # the note there says "that node emits two items" — so the shape was known
+    # and only that one node had been protected from it. This is the general
+    # fix: the save is one event however many cells it took, and everything
+    # after the write is about the event.
     g.node("Has Group?", "n8n-nodes-base.if", 2.3, {
         "conditions": {
             "options": {"caseSensitive": True, "leftValue": "",
@@ -680,7 +693,7 @@ def build():
                              "singleValue": True}}],
             "combinator": "and"},
         "options": {},
-    }, (2160, 660))
+    }, (2160, 660), executeOnce=True)
     # A transfer payment can carry a receipt — the file_id of a photo the user
     # sent earlier in the flow. When there is one the group gets the picture
     # with the announcement as its caption, which is the whole point of asking
