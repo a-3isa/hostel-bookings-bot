@@ -261,7 +261,13 @@ echo <new-id> > booking_bot/.workflow_id         # git-ignored, per-instance
 # create data table `bookings_bot_sessions`:
 #     chat_id (string), state (string), data (string), updated_at (number)
 # fill Config.BOT_TOKEN            — empty on purpose, this repo is committed
-# fill Config.BOOKINGS_SHEET_GID   — optional, only blackens a cancelled row
+# fill Config.BOOKINGS_SHEET_GID   — REQUIRED. It was described here as
+#     optional until 2026-08-21, which was an instruction to create a fault:
+#     `Insert Payment Line` fed it to Number(), and Number('') is 0 — a valid
+#     gid, normally the workbook's FIRST tab. An unset value did not fail, it
+#     inserted a row into the wrong tab. That node refuses a blank now, so a
+#     fresh import can take payments only once this is filled in. Find it in
+#     the sheet's URL (#gid=...).
 python booking_bot/deploy_graph.py --publish     # its own 20 nodes on top
 python booking_bot/push_brain.py   --publish     # brain.js + the Config lists
 ```
