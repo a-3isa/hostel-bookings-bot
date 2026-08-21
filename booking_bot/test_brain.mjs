@@ -826,6 +826,101 @@ check('a nightly-rate total is left to the sheet', r.save.bookingFields === null
   r.save.bookingFields);
 check('the line is still written', r.save.fields['اجمالي ما تم دفعه'] === 700);
 
+// ── Correcting a method that was recorded wrongly ────────────────────────────
+//
+// «تعديل طريقة الدفع» with no money behind it. This is a RELABEL, and it did
+// nothing at all until 2026-08-21: a different method looked like a payment in
+// a method the booking had never used, so the line branch was taken, and with
+// no amount there was nothing to put there. The user was told «لم يتم تغيير أي
+// شيء» and the method stayed wrong.
+resetSession();
+sheetRows = SPLIT;
+run(msg('/start')); run(cb('choice_edit')); run(msg('31313'));
+sheetRows = null;
+run(cb('ef_payment'));
+r = run(cb('xpay_vcash'));
+check('a relabel does not ask for a receipt', r.reply === null || !/إيصال/.test(r.reply.text || ''),
+  r.reply && r.reply.text);
+// A relabel moves no money, so there is no "has the guest left?" question: the
+// flow goes back to the field menu, and تم there commits straight away, the
+// same as any other single-field edit.
+r = run(cb('ef_done'));
+check('a relabel is saved', r.hasSave === true, r.reply && r.reply.text);
+check('it is an ordinary edit, not a payment line', r.save.flow === 'edit', r.save.flow);
+check('it writes the method onto the booking row itself',
+  r.save.fields['طريقة الدفع'] === 'فودافون كاش', r.save.fields);
+check('and moves no money', !('اجمالي ما تم دفعه' in r.save.fields), r.save.fields);
+check('no row is inserted for a relabel', !r.save.insert, r.save.insert);
+
+// ── A refund cannot take more than its own line holds ────────────────────────
+//
+// The below-zero check in EDIT_PAID tests the BOOKING's paid cell, a turn
+// before the method is known. مروان has 600 كاش on his own row and 1,600
+// انستاباي on a line, so a −900 انستاباي refund passed that check (600 − 900 is
+// caught, but −700 was not) while landing on a line that could go negative.
+// The shape that defeats the EDIT_PAID guard: a LOT on the booking's own row
+// and a little on the line. 5,000 كاش means −400 passes the booking-row check
+// (5,000 − 400 ≥ 0) while the money is actually coming off a انستاباي line
+// holding only 300.
+const BIG_ROW_SMALL_LINE = [Object.assign({}, SPLIT[0], {
+  'اجمالي سعر الحجز': 5000, 'اجمالي ما تم دفعه': 5000, 'طريقة الدفع': 'كاش',
+  booking_id: 23,
+  lines: [{ seq: 2, row: 25, method: 'انستاباي', amount: 300 }],
+  block_end: 25,
+})];
+
+r = payOn(BIG_ROW_SMALL_LINE, 'xpay_instapay', -400);
+check('a refund bigger than its own line is refused',
+  r && r.reply && /لا يمكن استرداد أكثر مما دُفع/.test(r.reply.text),
+  r && r.reply && r.reply.text);
+check('and the refusal names the method it checked',
+  r && r.reply && r.reply.text.includes('انستاباي'), r && r.reply && r.reply.text);
+
+r = payOn(BIG_ROW_SMALL_LINE, 'xpay_instapay', -200);   // within the line's 300
+check('a refund within the line is allowed',
+  !(r && r.reply && /لا يمكن استرداد/.test(r.reply.text || '')),
+  r && r.reply && r.reply.text);
+
+// The booking-row guard still does its own job, unchanged. It fires a turn
+// earlier — on the amount itself, before any method is chosen — so this drives
+// the flow by hand rather than through payOn, which would send a method
+// callback into a state that never reached EDIT_PAYMENT.
+resetSession();
+sheetRows = BIG_ROW_SMALL_LINE;
+run(msg('/start')); run(cb('choice_edit')); run(msg('31313'));
+sheetRows = null;
+run(cb('ef_paid'));
+r = run(msg('-6000'));
+check('a refund bigger than the booking row is still refused there',
+  r && r.reply && /المدفوع لا يمكن أن يقل عن صفر/.test(r.reply.text),
+  r && r.reply && r.reply.text);
+
+// ── A retry that would insert a second row is refused ────────────────────────
+//
+// The 60-second lock expires so a real failure can be retried. For a payment
+// line needing a NEW row that is not safe: payTarget is still {kind:'new'} in
+// the session, so the second attempt inserts another row and every stored row
+// number below it goes two out of step with the sheet.
+payOn(SPLIT, 'xpay_vcash', 300);
+run(photo('RCPT9')); run(cb('xleft_no'));
+r = run(cb('xedone'));
+check('the first save goes through', r.hasSave === true, r.reply && r.reply.text);
+check('and it is the insert we mean to guard', r.save.insert === true, r.save.insert);
+
+r = run(cb('xedone'));                     // immediately: swallowed by the lock
+check('an instant second tap is swallowed', r === null || r.hasSave !== true,
+  r && r.hasSave);
+
+// Past the 60-second lock the user is normally let through, because they are
+// retrying a real failure. Not for an insert: the row may already be there and
+// a second one shifts every row beneath it out of step with the database.
+sessionRow.data = JSON.stringify(Object.assign(
+  JSON.parse(sessionRow.data), { savingAt: Date.now() - 5 * 60 * 1000 }));
+r = run(cb('xedone'));
+check('a retry after the lock expires is refused, not repeated',
+  r && r.hasSave !== true && /قد يكون السطر/.test(r.reply.text),
+  r && (r.hasSave === true ? 'SAVED AGAIN' : r.reply && r.reply.text));
+
 // A booking with no طريقة الدفع at all — the first payment fills that cell
 // rather than leaving it blank with a line underneath.
 const NO_METHOD = [Object.assign({}, SPLIT[0], {

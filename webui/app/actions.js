@@ -1,11 +1,13 @@
 'use server';
 
-import { cookies } from 'next/headers';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { COOKIE, sessionToken, signedIn } from '../lib/auth';
 import { one, q, tx } from '../lib/db';
 import { bool, integer, number, text } from '../lib/fmt';
+import { safeNext } from '../lib/nav';
 import { publishBooking, publishExpense, retireExpenseRow } from '../lib/publish';
 
 // Everything the dashboard writes is marked so it can be told apart later. The
@@ -18,14 +20,87 @@ async function requireAuth() {
   if (!(await signedIn())) redirect('/login');
 }
 
+// ── login throttling ────────────────────────────────────────────────────────
+//
+// One shared password, no lockout and no logging meant an attacker could guess
+// online at whatever rate the platform would serve. This is the proportionate
+// answer, and it is important to be honest about what it is NOT:
+//
+// **This is per-instance, in-memory, best-effort.** Vercel runs this as a
+// serverless function; each cold instance starts with an empty Map, instances
+// do not share it, and the platform is free to run several at once and to
+// discard any of them between requests. An attacker who can spread attempts
+// across instances gets more than 8 tries per window. Real rate limiting needs
+// shared state — Upstash, Vercel KV, or a Postgres table — and the brief for
+// this change ruled out both a dependency and a new table.
+//
+// What it does buy, and buys cheaply: a single client hammering one warm
+// instance is stopped after 8 failures in 15 minutes, the common case for a
+// script pointed at the URL. And every failure is now LOGGED, which is the part
+// that survives instance churn — the attempts land in Vercel's runtime logs
+// where a burst is visible even when the counter that saw it is gone.
+const WINDOW_MS = 15 * 60 * 1000;
+const MAX_FAILURES = 8;
+const attempts = new Map();
+
+function noteFailure(who) {
+  const now = Date.now();
+  const recent = (attempts.get(who) ?? []).filter((t) => now - t < WINDOW_MS);
+  recent.push(now);
+  attempts.set(who, recent);
+  // Unbounded growth is the other way this becomes a problem: a distributed
+  // attempt would otherwise put one key per source address in this Map for the
+  // life of the instance.
+  if (attempts.size > 5000) {
+    for (const [key, times] of attempts) {
+      if (times.every((t) => now - t >= WINDOW_MS)) attempts.delete(key);
+    }
+  }
+  return recent.length;
+}
+
+function tooManyFailures(who) {
+  const now = Date.now();
+  const recent = (attempts.get(who) ?? []).filter((t) => now - t < WINDOW_MS);
+  return recent.length >= MAX_FAILURES;
+}
+
+// The client address as the platform reports it. On Vercel `x-forwarded-for` is
+// set by the edge and cannot be spoofed by the caller; off Vercel it can be, so
+// a missing or forged header just shares one bucket rather than escaping the
+// counter entirely.
+async function clientKey() {
+  const h = await headers();
+  const forwarded = h.get('x-forwarded-for') ?? '';
+  return forwarded.split(',')[0].trim() || h.get('x-real-ip') || 'unknown';
+}
+
 export async function login(formData) {
   const password = process.env.DASHBOARD_PASSWORD;
   const given = String(formData.get('password') ?? '');
-  const next = String(formData.get('next') ?? '/') || '/';
+  const next = safeNext(formData.get('next'));
+  const who = await clientKey();
 
-  if (!password || given !== password) {
+  if (tooManyFailures(who)) {
+    console.warn(`login: throttled ${who} — ${MAX_FAILURES}+ failures in ${WINDOW_MS / 60000}m`);
+    redirect(`/login?error=throttled&next=${encodeURIComponent(next)}`);
+  }
+
+  // Constant-time, so the comparison itself does not leak how much of the
+  // password was right. Lengths are hashed first because timingSafeEqual throws
+  // on a length mismatch, which would leak the length instead.
+  const ok = Boolean(password) && timingSafeEqual(
+    createHash('sha256').update(given).digest(),
+    createHash('sha256').update(password).digest(),
+  );
+
+  if (!ok) {
+    const n = noteFailure(who);
+    console.warn(`login: failed attempt ${n}/${MAX_FAILURES} from ${who}`);
     redirect(`/login?error=1&next=${encodeURIComponent(next)}`);
   }
+
+  attempts.delete(who);
 
   const jar = await cookies();
   jar.set(COOKIE, sessionToken(password), {
@@ -35,7 +110,7 @@ export async function login(formData) {
     path: '/',
     maxAge: 60 * 60 * 12,
   });
-  redirect(next.startsWith('/') ? next : '/');
+  redirect(next);
 }
 
 export async function logout() {

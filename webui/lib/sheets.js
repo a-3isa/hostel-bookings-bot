@@ -199,15 +199,53 @@ const WRITE_BLOCKS = [
 // leading zero, or an id that looks like a number and is not one.
 const TEXT_FORCED = new Set(['booking_ref', 'guest_ref', 'phone']);
 
+// ── formulas: two cells may be one, everything else may not ─────────────────
+//
+// These writes go out as USER_ENTERED, and they have to: عدد الليالي on an
+// open-ended stay is the live `=TODAY()-J<row>` and `priceCell` deliberately
+// emits `=500*I10`. But USER_ENTERED applies that rule to EVERY cell, so a
+// guest name, a note or an expense item beginning with `=`, `+`, `-` or `@` is
+// stored as a formula in a tab that holds 1,606 of them. `=IMPORTRANGE(...)`
+// typed into a note would run with the service account's authority, and a
+// guest whose name legitimately starts with `-` corrupts their own cell.
+//
+// So the two cells the mirror MEANS to be formulas are named, and every other
+// value gets a leading apostrophe when it starts with one of those four
+// characters — which is the same mechanism TEXT_FORCED already uses, and it
+// leaves the stored value unchanged. Numbers are untouched: `paid` on a line
+// row is legitimately negative and must stay a number the sheet can sum.
+//
+// `supabase/mirror.py` has the identical gap — same USER_ENTERED, same
+// three-key TEXT_FORCED at mirror.py:72, staged at mirror.py:640-672 — and
+// needs the same guard. NOT changed here: this repo's Python is another
+// worker's file, and the two writers must end up agreeing.
+const FORMULA_CELLS = new Set(['nights_cell', 'total']);
+
+const RISKY = /^[=+\-@]/;
+
+// True when Sheets would read this value as something other than the text it
+// is. A bare number is fine — `-500` has to stay a number — so only a value
+// that is NOT a finite number and starts with a formula character is escaped.
+function neutralise(value) {
+  const v = value === null || value === undefined ? '' : String(value);
+  if (v === '' || !RISKY.test(v)) return v;
+  if (Number.isFinite(Number(v))) return v;
+  return `'${v}`;
+}
+
+// One cell, ready for the API: text-forced, formula-allowed, or neutralised.
+// Exported so `lib/mirror.test.mjs` can pin it alongside the payloads it guards.
+export const safeCell = (key, value, formulaKeys = FORMULA_CELLS) => {
+  const v = value === null || value === undefined ? '' : String(value);
+  if (TEXT_FORCED.has(key)) return v === '' ? '' : `'${v}`;
+  if (formulaKeys.has(key)) return v;
+  return neutralise(v);
+};
+
 // The fill a continuation row gets when this opens one. Must match
 // LINE_ROW_COLOUR in supabase/mirror.py, or the same row is two colours
 // depending on which writer got there first.
 export const LINE_ROW_COLOUR = { red: 0.85, green: 0.78, blue: 0.93 };
-
-const forced = (key, value) => {
-  const v = value === null || value === undefined ? '' : String(value);
-  return TEXT_FORCED.has(key) && v !== '' ? `'${v}` : v;
-};
 
 // Writes the columns the bot owns on one row. `payload` is keyed as
 // lib/mirror.js builds it; a key it does not carry is written as empty, which
@@ -215,13 +253,14 @@ const forced = (key, value) => {
 export async function writeRow(rowNumber, payload) {
   const data = WRITE_BLOCKS.map(([from, to, keys]) => ({
     range: `${BOOKINGS_TAB}!${from}${rowNumber}:${to}${rowNumber}`,
-    values: [keys.map((k) => forced(k, payload[k]))],
+    values: [keys.map((k) => safeCell(k, payload[k]))],
   }));
 
   await api('/values:batchUpdate', {
     method: 'POST',
     // USER_ENTERED, not RAW: عدد الليالي on an open-ended stay is the live
-    // formula =TODAY()-J<row> and has to arrive as one.
+    // formula =TODAY()-J<row> and has to arrive as one. Only `nights_cell` and
+    // `total` are allowed to exercise that — see FORMULA_CELLS above.
     body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }),
   });
 }
@@ -336,6 +375,13 @@ export async function checkExpenseRow(rowNumber, was) {
   return { ok: true, found };
 }
 
+// Nothing on the expenses tab is ever meant to be a formula. `spent_at` still
+// needs USER_ENTERED — `2026-08-15 12:23` has to land as the datetime the
+// column is formatted for, not as text that sorts wrong — and `amount` is a
+// number, so both pass through untouched. البند, الملاحظات and اسم المسئول are
+// free text a person typed and are neutralised.
+const EXPENSE_FORMULA_CELLS = new Set();
+
 export async function writeExpenseRow(rowNumber, payload) {
   await api('/values:batchUpdate', {
     method: 'POST',
@@ -343,10 +389,7 @@ export async function writeExpenseRow(rowNumber, payload) {
       valueInputOption: 'USER_ENTERED',
       data: [{
         range: `${EXPENSES_TAB}!A${rowNumber}:G${rowNumber}`,
-        values: [EXPENSE_KEYS.map((k) => {
-          const v = payload[k];
-          return v === null || v === undefined ? '' : String(v);
-        })],
+        values: [EXPENSE_KEYS.map((k) => safeCell(k, payload[k], EXPENSE_FORMULA_CELLS))],
       }],
     }),
   });

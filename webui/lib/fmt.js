@@ -9,20 +9,47 @@ export function num(value) {
   return Number.isFinite(n) ? money.format(n) : String(value);
 }
 
+// yyyy-mm-dd from a Date's own calendar parts. NOT via toISOString(), which
+// converts to UTC first.
+//
+// `arrival`, `departure` and `from_date` are Postgres `date` columns: no time
+// and no zone. node-postgres parses a bare `2026-08-15` into a JS Date at LOCAL
+// midnight, so under `TZ=Africa/Cairo` toISOString() gives back 2026-08-14 —
+// the page displays the wrong day, the edit form pre-fills the wrong day, and
+// saving writes that shift into the database and out to column J of the sheet,
+// where `=TODAY()-J<row>` turns it into a night of billing.
+//
+// Vercel pins TZ=UTC, so this only ever bit `next dev` — which is exactly the
+// setup that talks to the LIVE sheet from Egypt.
+//
+// `lib/mirror.js` has the same rule as `dateOnly()`, for the value it sends to
+// Sheets; the two must agree, and `supabase/mirror.py` gets it for free from
+// `datetime.date.isoformat()`.
+export function calendarDate(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 export function day(value) {
   if (!value) return '—';
-  const d = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(d.getTime())) return String(value);
-  return d.toISOString().slice(0, 10);
+  return calendarDate(value) ?? String(value);
 }
 
 // A <input type="date"> wants yyyy-mm-dd and nothing else.
 export function dateInput(value) {
   if (!value) return '';
-  const d = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+  return calendarDate(value) ?? '';
 }
 
+// The one helper that deliberately stays on UTC.
+//
+// It formats `expenses.spent_at`, a timestamptz, into the datetime-local input
+// whose value is cast straight back with `$n::timestamptz` — and the sheet's
+// التاريخ column is written by `mirror.stamp()`, which is UTC on purpose and
+// verified against the live tab. Reading in local and writing in UTC would move
+// every expense by the offset on each save.
 export function dateTimeInput(value) {
   if (!value) return '';
   const d = value instanceof Date ? value : new Date(value);

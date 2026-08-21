@@ -32,6 +32,28 @@ export function lineKey(method, currency) {
 
 const keyParts = (key) => JSON.parse(key);
 
+// A calendar date, formatted from its own parts and never through UTC.
+//
+// `bookings.arrival` is a Postgres `date` — no time, no zone — and
+// node-postgres hands it over as a JS Date at LOCAL midnight. `toISOString()`
+// converts that to UTC first, so anywhere east of Greenwich it returns the
+// PREVIOUS day: under `TZ=Africa/Cairo` a 2026-08-15 arrival is written to the
+// sheet as 2026-08-14. Vercel pins TZ=UTC so production has been right by
+// accident; `next dev` run from Egypt against the live sheet is not, and
+// column J is the anchor of `=TODAY()-J<row>` on every open-ended stay, so a
+// day out is a night of billing out.
+//
+// `supabase/mirror.py` calls `row["arrival"].isoformat()` on a `datetime.date`,
+// which has no zone to convert through and is right everywhere. This is the
+// function that makes the two ports agree; keep them agreeing.
+export function dateOnly(value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (!(value instanceof Date)) return String(value).slice(0, 10);
+  if (Number.isNaN(value.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${value.getFullYear()}-${p(value.getMonth() + 1)}-${p(value.getDate())}`;
+}
+
 // The price cell, which is not always a number.
 //
 // 16 bookings are priced by a nightly rate and hold a live formula in the
@@ -67,11 +89,7 @@ export function desired(b, sheetRow) {
     ? `=TODAY()-J${sheetRow}`
     : (b.nights === null || b.nights === undefined ? '' : String(b.nights));
 
-  const arrival = b.arrival
-    ? (b.arrival instanceof Date
-        ? b.arrival.toISOString().slice(0, 10)
-        : String(b.arrival).slice(0, 10))
-    : '';
+  const arrival = dateOnly(b.arrival);
 
   return {
     booking_ref: s(b.booking_ref),

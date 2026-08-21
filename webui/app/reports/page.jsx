@@ -1,6 +1,28 @@
 import { q } from '../../lib/db';
+import { NOT_A_LINE } from '../../lib/filters';
 import { num } from '../../lib/fmt';
 import { Empty, Tile } from '../../components/ui';
+
+// A booking whose payments are in more than one currency. `bookings.paid` is
+// then a sum ACROSS currencies and is denominated in nothing — «650 EGP + 40
+// USD» is the only honest reading, which is what `paid_label` renders and why
+// `schema.sql` has it at all. There are deliberately no exchange rates in this
+// system, so nothing here converts; the affected bookings are counted per row
+// and named in a panel of their own.
+//
+// Same shape and same wording as /dashboard, deliberately: two pages that mark
+// the same fact two different ways is how one of them stops being believed.
+const MIXED = `select booking_id from payments
+                group by booking_id having count(distinct currency) > 1`;
+
+function Mixed({ n }) {
+  if (!n) return null;
+  return (
+    <span className="tag owing" title="يشمل حجزًا مدفوعًا بأكثر من عملة — الرقم جمع بين عملتين">
+      ⚠ {n}
+    </span>
+  );
+}
 
 export const dynamic = 'force-dynamic';
 
@@ -12,50 +34,83 @@ export default async function Reports({ searchParams }) {
   // by every query below so the tables can never disagree about the period.
   const args = [year];
 
-  const [byMonth, byApartment, byMethod, topGuests, [totals], years] = await Promise.all([
-    q(`select to_char(date_trunc('month', b.arrival), 'YYYY-MM') as label,
-              count(*)::int as bookings,
-              coalesce(sum(b.effective_nights), 0)::int as nights,
-              coalesce(sum(b.effective_total), 0) as revenue,
-              coalesce(sum(b.paid), 0) as paid,
-              coalesce(sum(b.effective_remaining), 0) as owing
-         from bookings_live b
-        where b.cancelled_at is null and b.arrival is not null
-          and ($1::text is null or to_char(b.arrival, 'YYYY') = $1)
-        group by 1 order by 1 desc`, args),
-    q(`select coalesce(b.apartment_name, '—') as apartment,
-              count(*)::int as bookings,
-              coalesce(sum(b.effective_nights), 0)::int as nights,
-              coalesce(sum(b.effective_total), 0) as revenue,
-              coalesce(sum(b.paid), 0) as paid,
-              coalesce(sum(b.effective_remaining), 0) as owing
-         from bookings_live b
-        where b.cancelled_at is null
-          and ($1::text is null or to_char(b.arrival, 'YYYY') = $1)
-        group by 1 order by revenue desc`, args),
-    q(`select coalesce(payment_method, 'غير محدد') as method,
-              count(*)::int as n,
-              coalesce(sum(paid), 0) as paid
-         from bookings_live
-        where cancelled_at is null and ($1::text is null or to_char(arrival, 'YYYY') = $1)
-        group by 1 order by paid desc`, args),
-    q(`select id, guest_name, apartment_name, effective_total, paid, effective_remaining
-         from bookings_live
-        where cancelled_at is null and merged_into is null
-          and ($1::text is null or to_char(arrival, 'YYYY') = $1)
-        order by effective_total desc nulls last limit 10`, args),
-    q(`select
-         (select coalesce(sum(effective_total), 0) from bookings_live
-           where cancelled_at is null and ($1::text is null or to_char(arrival, 'YYYY') = $1)) as revenue,
-         (select coalesce(sum(paid), 0) from bookings_live
-           where cancelled_at is null and ($1::text is null or to_char(arrival, 'YYYY') = $1)) as paid,
-         (select coalesce(sum(amount), 0) from expenses
-           where ($1::text is null or to_char(spent_at, 'YYYY') = $1)) as expenses,
-         (select coalesce(sum(effective_nights), 0) from bookings_live
-           where cancelled_at is null and ($1::text is null or to_char(arrival, 'YYYY') = $1)) as nights`, args),
-    q(`select distinct to_char(arrival, 'YYYY') as y from bookings
-        where arrival is not null order by y desc`),
-  ]);
+  // The continuation-line rule, spelled once for every query on this page. It
+  // was applied to أكبر الحجوزات alone, so the top-ten table and the four KPI
+  // tiles above it were answering different questions about the same year.
+  const LINE = NOT_A_LINE('b');
+  const BARE = NOT_A_LINE();
+
+  const [byMonth, byApartment, byMethod, topGuests, [totals], mixedBookings, years] =
+    await Promise.all([
+      q(`with mixed as (${MIXED})
+         select to_char(date_trunc('month', b.arrival), 'YYYY-MM') as label,
+                count(*)::int as bookings,
+                coalesce(sum(b.effective_nights), 0)::int as nights,
+                coalesce(sum(b.effective_total), 0) as revenue,
+                coalesce(sum(b.paid), 0) as paid,
+                coalesce(sum(b.effective_remaining), 0) as owing,
+                count(*) filter (where x.booking_id is not null)::int as mixed
+           from bookings_live b
+           left join mixed x on x.booking_id = b.id
+          where b.cancelled_at is null and ${LINE} and b.arrival is not null
+            and ($1::text is null or to_char(b.arrival, 'YYYY') = $1)
+          group by 1 order by 1 desc`, args),
+      q(`with mixed as (${MIXED})
+         select coalesce(b.apartment_name, '—') as apartment,
+                count(*)::int as bookings,
+                coalesce(sum(b.effective_nights), 0)::int as nights,
+                coalesce(sum(b.effective_total), 0) as revenue,
+                coalesce(sum(b.paid), 0) as paid,
+                coalesce(sum(b.effective_remaining), 0) as owing,
+                count(*) filter (where x.booking_id is not null)::int as mixed
+           from bookings_live b
+           left join mixed x on x.booking_id = b.id
+          where b.cancelled_at is null and ${LINE}
+            and ($1::text is null or to_char(b.arrival, 'YYYY') = $1)
+          group by 1 order by revenue desc`, args),
+      q(`with mixed as (${MIXED})
+         select coalesce(b.payment_method, 'غير محدد') as method,
+                count(*)::int as n,
+                coalesce(sum(b.paid), 0) as paid,
+                count(*) filter (where x.booking_id is not null)::int as mixed
+           from bookings_live b
+           left join mixed x on x.booking_id = b.id
+          where b.cancelled_at is null and ${LINE}
+            and ($1::text is null or to_char(b.arrival, 'YYYY') = $1)
+          group by 1 order by paid desc`, args),
+      q(`select b.id, b.guest_name, b.apartment_name, b.effective_total, b.paid,
+                b.effective_remaining
+           from bookings_live b
+          where b.cancelled_at is null and ${LINE}
+            and ($1::text is null or to_char(b.arrival, 'YYYY') = $1)
+          order by b.effective_total desc nulls last limit 10`, args),
+      q(`select
+           (select coalesce(sum(effective_total), 0) from bookings_live
+             where cancelled_at is null and ${BARE}
+               and ($1::text is null or to_char(arrival, 'YYYY') = $1)) as revenue,
+           (select coalesce(sum(paid), 0) from bookings_live
+             where cancelled_at is null and ${BARE}
+               and ($1::text is null or to_char(arrival, 'YYYY') = $1)) as paid,
+           (select coalesce(sum(amount), 0) from expenses
+             where ($1::text is null or to_char(spent_at, 'YYYY') = $1)) as expenses,
+           (select coalesce(sum(effective_nights), 0) from bookings_live
+             where cancelled_at is null and ${BARE}
+               and ($1::text is null or to_char(arrival, 'YYYY') = $1)) as nights,
+           -- How many of the bookings behind «المحصل» hold money in more than
+           -- one currency. Never converted, only counted and named below.
+           (select count(*)::int from bookings_live b
+             where b.cancelled_at is null and ${LINE}
+               and ($1::text is null or to_char(b.arrival, 'YYYY') = $1)
+               and b.id in (${MIXED})) as mixed`, args),
+      q(`select v.id, v.guest_name, v.paid_label, v.methods,
+                b.apartment_name, b.arrival
+           from mixed_currency_bookings v
+           join bookings b on b.id = v.id
+          where ($1::text is null or to_char(b.arrival, 'YYYY') = $1)
+          order by v.id`, args),
+      q(`select distinct to_char(arrival, 'YYYY') as y from bookings
+          where arrival is not null order by y desc`),
+    ]);
 
   const net = Number(totals.paid) - Number(totals.expenses);
   const collectionRate = Number(totals.revenue) > 0
@@ -80,8 +135,15 @@ export default async function Reports({ searchParams }) {
 
       <div className="kpis">
         <Tile label="إجمالي قيمة الحجوزات" value={num(totals.revenue)} />
-        <Tile label="المحصل" value={num(totals.paid)} tone="paid" progress={collectionRate}
-              sub={`نسبة التحصيل ${Math.round(collectionRate)}%`} />
+        <Tile
+          label="المحصل"
+          value={<>{num(totals.paid)} <Mixed n={totals.mixed} /></>}
+          tone="paid"
+          progress={collectionRate}
+          sub={Number(totals.mixed) > 0
+            ? `نسبة التحصيل ${Math.round(collectionRate)}% · ${totals.mixed} بعملات مختلطة`
+            : `نسبة التحصيل ${Math.round(collectionRate)}%`}
+        />
         <Tile label="المصروفات" value={num(totals.expenses)} tone="owing" />
         <Tile label="الصافي (محصل − مصروف)" value={num(net)} tone={net >= 0 ? 'paid' : 'owing'} />
         <Tile label="إجمالي الليالي" value={num(totals.nights)} />
@@ -108,7 +170,7 @@ export default async function Reports({ searchParams }) {
                   <td className="num">{r.bookings}</td>
                   <td className="num">{r.nights}</td>
                   <td className="num">{num(r.revenue)}</td>
-                  <td className="num">{num(r.paid)}</td>
+                  <td className="num">{num(r.paid)} <Mixed n={r.mixed} /></td>
                   <td className="num">
                     {Number(r.owing) > 0
                       ? <span className="tag owing">{num(r.owing)}</span>
@@ -142,7 +204,7 @@ export default async function Reports({ searchParams }) {
                     <td>{r.apartment}</td>
                     <td className="num">{r.bookings}</td>
                     <td className="num">{r.nights}</td>
-                    <td className="num">{num(r.paid)}</td>
+                    <td className="num">{num(r.paid)} <Mixed n={r.mixed} /></td>
                     <td className="num">{num(r.owing)}</td>
                   </tr>
                 ))}
@@ -167,7 +229,7 @@ export default async function Reports({ searchParams }) {
                   <tr key={r.method}>
                     <td>{r.method}</td>
                     <td className="num">{r.n}</td>
-                    <td className="num">{num(r.paid)}</td>
+                    <td className="num">{num(r.paid)} <Mixed n={r.mixed} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -204,6 +266,48 @@ export default async function Reports({ searchParams }) {
             </tbody>
           </table>
         </div>
+      </div>
+
+      {/* ── Currency, never folded ────────────────────────────────────── */}
+      <div className="panel flush">
+        <h2>
+          حجوزات بعملات مختلطة
+          <span className="count">{mixedBookings.length}</span>
+        </h2>
+        {mixedBookings.length === 0 ? (
+          <Empty>لا يوجد حجز مدفوع بأكثر من عملة في هذه الفترة.</Empty>
+        ) : (
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>الضيف</th>
+                  <th>الشقة</th>
+                  <th>الطرق</th>
+                  <th>المدفوع فعليًا</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mixedBookings.map((r) => (
+                  <tr key={r.id}>
+                    <td className="id">{r.id}</td>
+                    <td><a href={`/bookings/${r.id}`}>{r.guest_name ?? '—'}</a></td>
+                    <td>{r.apartment_name ?? '—'}</td>
+                    <td>{r.methods ?? '—'}</td>
+                    <td>{r.paid_label ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="muted" style={{ padding: '12px 16px 14px' }}>
+          لا توجد أسعار صرف في هذا النظام عن قصد، فلا يُجمع الجنيه مع الدولار.
+          عمود «المحصل» في كل جدول أعلاه يجمعهما لأن خانة الشيت تجمعهما — وكل صف
+          يشمل واحدًا من هذه الحجوزات مُعلَّم بـ ⚠، و«الصافي» و«نسبة التحصيل»
+          يرثان الخلط نفسه.
+        </p>
       </div>
 
       <p className="muted">

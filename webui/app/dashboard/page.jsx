@@ -1,4 +1,5 @@
 import { q } from '../../lib/db';
+import { NOT_A_LINE } from '../../lib/filters';
 import { num } from '../../lib/fmt';
 import { Empty, Tile } from '../../components/ui';
 import { saveDashboardSettings } from '../actions';
@@ -32,6 +33,11 @@ function Mixed({ n }) {
 
 export default async function Dashboard({ searchParams }) {
   const raw = await searchParams;
+
+  // The continuation-line rule, the same one /, /reports and /bookings use —
+  // see NOT_A_LINE in lib/filters.js.
+  const LINE = NOT_A_LINE('b');
+
 
   let data;
   try {
@@ -67,7 +73,7 @@ export default async function Dashboard({ searchParams }) {
                   count(*) filter (where x.booking_id is not null)::int as mixed
              from bookings_live b
              left join mixed x on x.booking_id = b.id
-            where b.cancelled_at is null
+            where b.cancelled_at is null and ${LINE}
             group by 1
          ),
          exp as (
@@ -118,7 +124,7 @@ export default async function Dashboard({ searchParams }) {
                    from bookings_live b
                    join rooms r on r.id = b.room_id
                   where r.apartment_id = a.id and r.active
-                    and b.cancelled_at is null
+                    and b.cancelled_at is null and ${LINE}
                     and b.arrival <= current_date
                     and (b.departure is null or b.departure >= current_date)) as busy
            from apartments a
@@ -144,7 +150,7 @@ export default async function Dashboard({ searchParams }) {
                   count(*) filter (where x.booking_id is not null)::int as mixed
              from bookings_live b
              left join mixed x on x.booking_id = b.id
-            where b.cancelled_at is null
+            where b.cancelled_at is null and ${LINE}
             group by 1
          ),
          moved as (

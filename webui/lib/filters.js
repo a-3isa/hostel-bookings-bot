@@ -1,6 +1,34 @@
 // Everything the bookings table can be sliced by, in one place, so the page,
 // the CSV export and the pager all read the same URL the same way.
 
+// ── the one rule about continuation lines ───────────────────────────────────
+//
+// `bookings` and `bookings_live` are shaped like the SHEET: one row per sheet
+// line, because that is what the daily reconcile compares against. A row with
+// `merged_into` set is a continuation LINE — its guest, apartment and arrival
+// are copies of the booking it continues, and its money is part of that
+// booking's money.
+//
+// So the rule, everywhere: anything that COUNTS bookings, SUMS money or LISTS
+// guests excludes them. Only something deliberately sheet-shaped — the
+// reconcile views in `supabase/schema.sql` — may see them, and `/bookings` may
+// show them on request via `?lines=all`, which is what that filter is for.
+//
+// This was applied in four places out of a dozen: `/` filtered «الحجوزات
+// النشطة» and «المتبقي» but not «المحصل» or the payment-method block, and
+// `/reports` filtered only its top-ten table. Four pages, four answers to the
+// same question about the same money.
+//
+// Checked read-only against the live database on 2026-08-21:
+// `select count(*) from bookings where merged_into is not null` → **0**. The
+// collapse retired the follower-booking model — a second payment is a LINE in
+// `booking_lines` now — so today every one of these clauses is a no-op. They
+// are written anyway: the column, its index and `bookings_live`'s sheet shape
+// all survive, and pages that quietly disagree about a rule are how the totals
+// come out wrong on the day a row does appear again.
+export const NOT_A_LINE = (alias = '') =>
+  `${alias ? `${alias}.` : ''}merged_into is null`;
+
 // Sorting is a whitelist mapped to SQL, never string interpolation of user
 // input.
 //
@@ -63,6 +91,7 @@ export function parseParams(raw = {}) {
     minRemaining: get('min_remaining'),
     // Continuation lines are real sheet rows but not real bookings, so the
     // default view hides them and the total money stops being double counted.
+    // See NOT_A_LINE above — this is the only place the rule is optional.
     lines: get('lines') === 'all' ? 'all' : 'main',
     sort,
     dir: get('dir') === 'asc' ? 'asc' : 'desc',
@@ -81,7 +110,7 @@ export function buildWhere(f) {
     return `$${params.length}`;
   };
 
-  if (f.lines === 'main') clauses.push('b.merged_into is null');
+  if (f.lines === 'main') clauses.push(NOT_A_LINE('b'));
 
   switch (f.status) {
     case 'staying':
