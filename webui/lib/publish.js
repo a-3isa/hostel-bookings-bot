@@ -93,7 +93,13 @@ async function shiftRowsDown(client, atRow) {
 // formatting and fill-down formulas of the row above.
 async function openLine(booking, line) {
   const atRow = blockEnd(booking) + 1;
-  await insertLineRow(atRow);
+  // The Google call goes INSIDE the transaction, and last. If Sheets refuses,
+  // the rollback puts every row number back and nothing has happened anywhere.
+  // The other way round — insert first, then renumber — leaves the sheet one
+  // row longer than the database believes, which silently freezes writes for
+  // every booking below the insert point: each one's stored row is off by one,
+  // so the column-U guard refuses it and mirror.py reads it as a hand edit.
+  // The delete route and retireExpenseRow have always done it this way.
   return tx(async (client) => {
     const created = (await client.query(
       `insert into booking_lines (booking_id, line_seq, method, currency)
@@ -106,8 +112,24 @@ async function openLine(booking, line) {
     await shiftRowsDown(client, atRow);
     await client.query(
       'update booking_lines set sheet_row = $1 where id = $2', [atRow, created.id]);
+    await insertLineRow(atRow);
     return { id: created.id, sheet_row: atRow };
   });
+}
+
+// Records what was just written, the way supabase/mirror.py does after every
+// write of its own.
+//
+// That column is mirror.py's hand-edit protection: if the sheet no longer
+// matches what was last written, a person edited the row and it is reported
+// rather than flattened. Leaving it stale after OUR write means the next
+// mirror run compares the sheet against a payload from before the dashboard
+// touched it, sees a difference, and calls our own change somebody's hand edit
+// — so the row this path failed to finish is exactly the row the reconciler
+// then refuses to repair. Which is the opposite of the arrangement.
+async function remember(table, id, payload) {
+  await q(`update ${table} set mirror_payload = $2, mirrored_at = now() where id = $1`,
+          [id, JSON.stringify(payload)]);
 }
 
 // Appends a booking the dashboard created — it has no row of its own yet, which
@@ -147,17 +169,33 @@ export async function publishBooking(bookingId) {
                 where id = $1`, [booking.id, adopted.method]);
     }
 
+    // Rows this call created. They are blank and unstamped by definition, so
+    // the identity guard would refuse them — and it should, for any row it did
+    // not just make itself.
+    const fresh = new Set();
+
     if (!booking.sheet_row) {
-      // A booking with no row cannot have lines yet, so seat it first and let
-      // any new line be opened underneath on the next pass through.
-      await seatBooking(booking);
+      // A booking the dashboard created has no row yet. It gets the first row
+      // below the last occupied one, which is blank BY DEFINITION — so column
+      // U is empty there and the guard below would refuse it as `unstamped`.
+      // That is why the seated row is recorded as fresh: we claimed it, we
+      // know what is on it, and the very next thing we do is stamp it.
+      //
+      // Until 2026-08-21 it was not, and the guard refused every booking
+      // created here. Worse, `sheet_row` had already been set, which took the
+      // booking out of mirror.py's append path too — so it could not reach the
+      // sheet by either route, permanently and silently.
+      fresh.add(await seatBooking(booking));
       booking = await one(SHAPE, [bookingId]);
+    } else {
+      // Prove the row is this booking's BEFORE opening any line under it.
+      // openLine inserts at blockEnd + 1, and if sheet_row is stale — the one
+      // thing this guard exists to catch — that lands a blank purple row
+      // inside a stranger's block.
+      const guard = await checkRow(booking.sheet_row, booking.id);
+      if (!guard.ok) return { published: false, reason: guard.reason, found: guard.found };
     }
 
-    // Rows this call created. They are blank and unstamped by definition, so
-    // the identity guard below would refuse them — and it should, for any row
-    // it did not just make itself.
-    const fresh = new Set();
     for (const line of opens) {
       const created = await openLine(booking, line);
       fresh.add(created.sheet_row);
@@ -168,11 +206,9 @@ export async function publishBooking(bookingId) {
     if (merges.length || adopted) booking = await one(SHAPE, [bookingId]);
 
     const lines = booking.lines ?? [];
-    const guard = await checkRow(booking.sheet_row, booking.id);
-    if (!guard.ok) return { published: false, reason: guard.reason, found: guard.found };
-
-    await writeRow(booking.sheet_row,
-                   primaryPayload(booking, lines, booking.sheet_row));
+    const bookingPayload = primaryPayload(booking, lines, booking.sheet_row);
+    await writeRow(booking.sheet_row, bookingPayload);
+    await remember('bookings', booking.id, bookingPayload);
 
     for (const line of lines) {
       if (!line.sheet_row) continue;
@@ -182,7 +218,9 @@ export async function publishBooking(bookingId) {
         // a booking's is: the row may be someone else's now.
         if (!lineGuard.ok) continue;
       }
-      await writeRow(line.sheet_row, linePayload(booking, line, line.sheet_row));
+      const payload = linePayload(booking, line, line.sheet_row);
+      await writeRow(line.sheet_row, payload);
+      await remember('booking_lines', line.id, payload);
     }
 
     return { published: true, rows: 1 + lines.length };
