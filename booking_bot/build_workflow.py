@@ -364,11 +364,18 @@ def build():
             {"id": "expense_tab", "name": "EXPENSE_TAB", "value": EXPENSE_TAB,
              "type": "string"},
             {"id": "sheet", "name": "SHEET_ID", "value": SHEET_ID, "type": "string"},
-            # The numeric gid of إدخال الحجوزات, needed only to blacken a
-            # cancelled row. Left EMPTY on purpose and the format step is gated
-            # on it: a wrong gid would not fail, it would silently format a row
-            # of some other tab. Find it in the sheet's URL (#gid=...) and fill
-            # it in, or leave it blank and cancellations simply go unformatted.
+            # The numeric gid of إدخال الحجوزات. TWO nodes need it now, not one:
+            # `Format Cancelled Row`, which is gated on it and simply does
+            # nothing when it is blank, and `Insert Payment Line`, which cannot
+            # be — inserting the row IS the operation. That second node made a
+            # blank gid dangerous rather than merely cosmetic, because
+            # Number('') is 0 and 0 is a real tab, so it refuses a blank
+            # outright as of 2026-08-21.
+            #
+            # Left EMPTY here on purpose, like BOT_TOKEN: this file is
+            # committed and the value is per-spreadsheet. Find it in the
+            # sheet's URL (#gid=...). A bot without it takes bookings and
+            # expenses but refuses a payment in a second method.
             {"id": "gid", "name": "BOOKINGS_SHEET_GID", "value": "", "type": "string"},
             {"id": "token", "name": "BOT_TOKEN", "value": "", "type": "string"},
         ]},

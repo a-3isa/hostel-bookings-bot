@@ -13,9 +13,9 @@ is already running, there was no way to move it across short of re-importing all
     python sync_nodes.py --apply --publish  # update, then activate
     python sync_nodes.py --apply "Route Save" "Answer Callback"
 
-With no names it syncs DEFAULT_NODES — the four that carry the row calculation
-of 2026-08-15, two of which change node TYPE and so cannot be fixed by editing
-fields in the UI.
+With no names it syncs DEFAULT_NODES: whichever nodes carry a fix that has not
+reached the instance yet. It is edited as fixes land and clear — see the note
+beside it for what is in it today and why.
 
 Nodes it will not touch without being named outright (NEVER_DEFAULT):
 
@@ -24,9 +24,15 @@ Nodes it will not touch without being named outright (NEVER_DEFAULT):
     the bot off the air.
   * Brain belongs to push_brain.py, which reads brain.js rather than the
     workflow file.
-  * The Sheets writers carry a `columns.schema` that n8n fills in from the live
-    tab. The generated file has none, and pushing it would drop what the node
-    learned about the sheet.
+  * `Write Booking Row` carries a `columns.schema` that n8n fills in from the
+    live tab — 3,900 characters the generated file does not have. Pushing it
+    would drop what the node learned about the sheet.
+
+    It is the only Sheets writer left. `Write Edit Row` and `Write Expense Row`
+    are the same node type and carry the same learned schema, so naming either
+    on the command line would strip it — they are simply not in NEVER_DEFAULT
+    because nothing has needed to sync them. `Write Line Rows` stopped being a
+    Sheets node on 2026-08-21 and has no schema to lose.
 """
 
 import json

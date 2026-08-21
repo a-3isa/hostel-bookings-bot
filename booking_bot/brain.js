@@ -3,7 +3,8 @@
  *
  * This is the source-of-truth copy of the JS that lives inside the "Brain"
  * Code node of n8n/bookings-bot.workflow.json. Edit here, then paste into the
- * node (or re-run n8n/sync-brain.py to rebuild the workflow JSON).
+ * node — `push_brain.py --publish` pushes this file to the live Brain, and
+ * `build_workflow.py` bakes it into the committed workflow JSON.
  *
  * Port of handlers/booking.py (PTB ConversationHandler) + strings.py.
  * Session state is kept in n8n workflow static data, keyed by chat id.

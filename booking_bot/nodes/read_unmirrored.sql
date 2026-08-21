@@ -9,9 +9,11 @@
 -- matches no header, so it is ignored on the way in.
 --
 -- `mirrored_at is null` is the guard against appending the same booking every
--- morning. An append does not report which row it landed on, so the timestamp is
--- the marker rather than sheet_row, and reindex.py learns the real row from
--- column U on its next pass.
+-- morning. `mirrored_at` is the marker rather than sheet_row because it is what
+-- makes the query idempotent — a booking already published must not be picked
+-- up again tomorrow. The row itself IS computed here (see row_number below) and
+-- written back by `Mark Mirrored`; the older note saying otherwise described an
+-- append this branch stopped doing.
 --
 -- Formulas use INDIRECT("I"&ROW()) rather than the I{row} the bot writes, for
 -- the same reason: nothing here knows the row number yet, and ROW() does.
