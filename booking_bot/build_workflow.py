@@ -621,15 +621,29 @@ def build():
         "specifyBody": "json",
         # startIndex is zero-based and the range is half-open, so inserting AT
         # the new row's index puts one row there and pushes the rest down.
+        # `Number('')` is 0, and 0 is a VALID gid — normally the workbook's
+        # first tab. An unset BOOKINGS_SHEET_GID would therefore not fail: it
+        # would insert a row into a different tab entirely, while the payment
+        # was written onto the bookings tab at a row number that had shifted
+        # for neither of them. `Format Cancelled Row` is gated on this value
+        # for exactly that reason; this node was added later and was not.
+        #
+        # So it refuses instead. A thrown expression fails the node, and the
+        # error output below carries it to the user.
         "jsonBody":
-            "={{ JSON.stringify({ requests: [{ insertDimension: {"
-            " range: { sheetId: Number($('Config').first().json.BOOKINGS_SHEET_GID),"
-            " dimension: 'ROWS',"
+            "={{ (() => { const gid = $('Config').first().json.BOOKINGS_SHEET_GID;"
+            " if (gid === undefined || gid === null || String(gid).trim() === '')"
+            " throw new Error('BOOKINGS_SHEET_GID is not set — refusing to insert"
+            " a row into an unknown tab');"
+            " return JSON.stringify({ requests: [{ insertDimension: {"
+            " range: { sheetId: Number(gid), dimension: 'ROWS',"
             " startIndex: $('Brain').first().json.save.row - 1,"
             " endIndex: $('Brain').first().json.save.row },"
-            " inheritFromBefore: true } }] }) }}",
+            " inheritFromBefore: true } }] }); })() }}",
         "options": {},
-    }, (1760, 1020), cred=SHEETS_CRED)
+        # Without this, a failed insert stopped the whole execution and the user
+        # was left watching a spinner with no message at all.
+    }, (1760, 1020), cred=SHEETS_CRED, onError="continueErrorOutput")
     g.node("Build Line Rows", "n8n-nodes-base.code", 2,
            {"jsCode": read_source("build_line_rows.js")}, (1960, 1020))
     # HTTP, not the Sheets node, and this is the whole reason a payment now
@@ -690,6 +704,8 @@ def build():
     g.connect("Needs Row Insert?", "Insert Payment Line", index=0)
     g.connect("Needs Row Insert?", "Build Line Rows", index=1)
     g.connect("Insert Payment Line", "Build Line Rows")
+    # Output 1 is the failure, same convention as the four row writers.
+    g.connect("Insert Payment Line", "Send Save Error", index=1)
     g.connect("Build Line Rows", "Write Line Rows")
 
     # ── After the write ──────────────────────────────────────────────────────
@@ -775,10 +791,28 @@ def build():
     # the save left something to undo, so it has one row or two. The Brain emits
     # the whole sendMessage body — savedBody / savedNoGroupBody — the same way it
     # emits `reply`.
+    # `continueRegularOutput` on both, and this is not cosmetic: everything that
+    # makes the save DURABLE hangs off Send Saved. The chain is
+    # Write * Row -> Has Group? -> Send Saved -> Clear Session -> Build Shadow
+    # Write -> Shadow Write, so one failed Telegram call — a 429, a transient
+    # network error — used to stop the execution with the row already on the
+    # sheet and NOTHING in Postgres, and the session still open on CONFIRM.
+    # Sixty seconds later the Save button worked again and the booking flow
+    # appended a SECOND row, with a fresh `new:<guest>:<now>` client_ref that
+    # cannot converge with the first.
+    #
+    # That is the recorded incident: booking 1015, ابو الحسن, written twice at
+    # 12:52 and 13:37 with different client_refs, identical in every field.
+    #
+    # The two group posters have carried this flag since 2026-08-15 for the same
+    # reason. The node that tells the USER was the one still able to take the
+    # save down with it.
     g.node("Send Saved", "n8n-nodes-base.httpRequest", 4.2,
-           telegram_body("save.savedBody"), (2560, 540))
+           telegram_body("save.savedBody"), (2560, 540),
+           onError="continueRegularOutput")
     g.node("Send Saved No Group", "n8n-nodes-base.httpRequest", 4.2,
-           telegram_body("save.savedNoGroupBody"), (2360, 780))
+           telegram_body("save.savedNoGroupBody"), (2360, 780),
+           onError="continueRegularOutput")
 
     # The write itself is the thing that can fail — a revoked Sheets token, a
     # renamed tab. onError keeps the run alive so the user is told, instead of
