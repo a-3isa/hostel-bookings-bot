@@ -565,19 +565,32 @@ def main():
                         "parameters": mirror_write})
             print("  ~ Append Mirror Row writes one row, never appends")
 
+        # One query, defined once. The two branches used to disagree: the fresh
+        # install wrote `sheet_row` and the update path did NOT, so every
+        # re-run of this script silently removed it from a node that already
+        # existed.
+        #
+        # That mattered because read_unmirrored.sql picks the target row as
+        # `(select max(sheet_row) from bookings) + row_number()`. Drop the
+        # write-back and the mirrored booking keeps `sheet_row IS NULL`, so the
+        # max never advances — and two bookings mirrored on two different
+        # mornings both aim at max + 1. Day two's update lands on day one's
+        # guest. The `mirrored_at is null` guard stops the SAME booking being
+        # re-appended; it cannot stop two different ones colliding.
+        mark_mirrored = {
+            "operation": "executeQuery", "options": {},
+            "query": "update bookings set mirrored_at = now(),"
+                     " sheet_row = {{ $json.row_number }}"
+                     " where id = {{ $json.booking_id }};",
+        }
         if "Mark Mirrored" not in have:
-            add_node("Mark Mirrored", "n8n-nodes-base.postgres", 2.6,
-                     {"operation": "executeQuery", "options": {},
-                      "query": "update bookings set mirrored_at = now(),"
-                               " sheet_row = {{ $json.row_number }}"
-                               " where id = {{ $json.booking_id }};"},
+            add_node("Mark Mirrored", "n8n-nodes-base.postgres", 2.6, mark_mirrored,
                      [1200, 1200], cred=("postgres", pg["id"], pg["name"]))
             print("  + Mark Mirrored")
         else:
             ops.append({"type": "updateNodeParameters", "nodeName": "Mark Mirrored",
-                        "parameters": {"operation": "executeQuery", "options": {},
-                                       "query": "update bookings set mirrored_at = now()"
-                                                " where id = {{ $json.booking_id }};"}})
+                        "parameters": mark_mirrored})
+            print("  ~ Mark Mirrored writes sheet_row back")
 
         connect("Build Reconcile Message", "Read Unmirrored Bookings")
         connect("Read Unmirrored Bookings", "Append Mirror Row")

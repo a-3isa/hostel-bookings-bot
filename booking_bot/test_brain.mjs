@@ -826,6 +826,42 @@ check('a nightly-rate total is left to the sheet', r.save.bookingFields === null
   r.save.bookingFields);
 check('the line is still written', r.save.fields['اجمالي ما تم دفعه'] === 700);
 
+// ── Editing the total on a nightly-rate booking ──────────────────────────────
+//
+// Sixteen bookings hold `=500*I10` in اجمالي سعر الحجز and ten of those are
+// open-ended, so the formula is what makes the bill grow with the stay. Typing
+// a number replaces it. That is allowed — a typed number is a deliberate
+// override — but it used to be silent: `total_is_formula` was fetched and
+// never read.
+resetSession();
+sheetRows = FORMULA_TOTAL;
+run(msg('/start')); run(cb('choice_edit')); run(msg('31313'));
+sheetRows = null;
+r = run(cb('ef_total'));
+check('a nightly-rate booking warns before the total is retyped',
+  r.reply && /سيلغي المعادلة/.test(r.reply.text), r.reply && r.reply.text);
+
+r = run(msg('4321'));
+r = run(cb('ef_done'));
+check('the override is still allowed', r.hasSave === true, r.reply && r.reply.text);
+check('and it writes the number the user typed',
+  r.save.fields['اجمالي سعر الحجز'] === 4321, r.save.fields);
+check('the group is told the formula is gone',
+  /لن يتحدّث تلقائياً/.test(r.save.groupText), r.save.groupText);
+
+// A booking whose total is an ordinary number gets the plain prompt.
+resetSession();
+sheetRows = SPLIT;
+run(msg('/start')); run(cb('choice_edit')); run(msg('31313'));
+sheetRows = null;
+r = run(cb('ef_total'));
+check('an ordinary total is asked for without a warning',
+  r.reply && !/سيلغي المعادلة/.test(r.reply.text), r.reply && r.reply.text);
+r = run(msg('999'));
+r = run(cb('ef_done'));
+check('and the group message carries no formula notice',
+  !/لن يتحدّث تلقائياً/.test(r.save.groupText), r.save.groupText);
+
 // ── Correcting a method that was recorded wrongly ────────────────────────────
 //
 // «تعديل طريقة الدفع» with no money behind it. This is a RELABEL, and it did

@@ -71,6 +71,48 @@ COLUMNS = [
 # with a leading zero, or an id that looks like a number and is not one.
 TEXT_FORCED = {"booking_ref", "guest_ref", "phone"}
 
+# The two cells this script deliberately writes as FORMULAS: عدد الليالي on an
+# open-ended stay is `=TODAY()-J<row>`, and اجمالي سعر الحجز is `=500*I10` on a
+# booking priced by a nightly rate (see price_cell). Everything else is data.
+FORMULA_CELLS = {"nights_cell", "total"}
+
+# Sheets parses a value beginning with any of these as a formula under
+# USER_ENTERED, which is the option this script must use for the two cells
+# above. Everything else is free text typed by a receptionist about a guest —
+# a note, a name, an apartment — and a note of `=IMPORTRANGE(...)` would become
+# a live formula running with the service account's authority in a workbook of
+# 1,606 other formulas. A guest name legitimately starting with `-` is enough
+# to corrupt a cell on its own.
+FORMULA_LEAD = ("=", "+", "-", "@")
+
+
+def cell_value(key, v):
+    """One cell, as it is safe to send.
+
+    A leading apostrophe is Sheets' own escape: it stores the rest as text and
+    does not display the apostrophe. Numbers are left alone — `primary_payload`
+    legitimately produces a negative paid figure, and quoting it would turn
+    every SUM beneath it into a text concatenation.
+
+    Twinned in webui/lib/sheets.js `safeCell`, which guards the same columns for
+    the dashboard's fast path.
+    """
+    if key in TEXT_FORCED and v:
+        return "'" + str(v)
+    if key in FORMULA_CELLS:
+        return v
+    if isinstance(v, str) and v[:1] in FORMULA_LEAD:
+        # A NUMBER is not a formula, and `-` leads both. `money()` hands back
+        # strings, and `primary_payload` legitimately produces a negative paid
+        # figure when a booking's lines carry more than its own row does.
+        # Quoting that would store it as text and turn every SUM beneath it
+        # into a concatenation — which is a worse bug than the one this guards.
+        try:
+            float(v.replace(",", ""))
+        except ValueError:
+            return "'" + v
+    return v
+
 # The blocks actually sent to the API. E is absent on purpose.
 WRITE_RANGES = [("A", "D"), ("F", "J"), ("L", "M"), ("O", "O"), ("Q", "Q"),
                 ("U", "U")]
@@ -645,17 +687,10 @@ def main():
                     for letter, key in zip(letters, keys):
                         if key in owned:
                             continue
-                        v = payload[key]
-                        if key in TEXT_FORCED and v:
-                            v = "'" + v
-                        batch.append({"range": f"{letter}{target}", "values": [[v]]})
+                        batch.append({"range": f"{letter}{target}",
+                                      "values": [[cell_value(key, payload[key])]]})
                     continue
-                values = []
-                for key in keys:
-                    v = payload[key]
-                    if key in TEXT_FORCED and v:
-                        v = "'" + v
-                    values.append(v)
+                values = [cell_value(key, payload[key]) for key in keys]
                 batch.append({"range": f"{start}{target}:{end}{target}",
                               "values": [values]})
 
