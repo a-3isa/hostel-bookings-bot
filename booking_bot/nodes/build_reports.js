@@ -98,9 +98,35 @@ for (const i of $('Read Report Formulas').all()) {
     String(j['عدد الليالي'] === undefined ? '' : j['عدد الليالي']).trim().startsWith('=');
 }
 
+/**
+ * A continuation LINE, not a guest.
+ *
+ * Column U is `413` on a booking's own row and `413-2` on a row carrying one of
+ * its payments in a second method. Everything identifying the guest is repeated
+ * on that row — name, apartment, arrival, and on an open stay the live
+ * `=TODAY()-J{r}` — so to every loop below it looks like a second booking.
+ *
+ * It cost three wrong reports at once, from 2026-08-18, when the money rule
+ * changed to leave اجمالي سعر الحجز BLANK on a line:
+ *
+ *   - the Saturday debt report. المتبقي is L − M, so a 2,200 stay showing 600
+ *     on its own row and 1,600 on an انستاباي line reads +1,600 owed on the
+ *     booking row and −1,600 on the line. The negative is dropped by the
+ *     `> 0` filter and the positive is reported, so a guest who has paid in
+ *     full is billed for their own second payment and الإجمالي المتبقي is
+ *     inflated by every payment line on the tab.
+ *   - the daily digest, which listed the guest twice under arrivals.
+ *   - long stays, which listed them twice again.
+ *
+ * The booking's own row carries the whole truth about the stay; the line row
+ * carries money that is already counted in it.
+ */
+const LINE_ROW = /^\s*\d+\s*-\s*\d+\s*$/;
+
 const rows = $input.all()
   .map(i => i.json)
   .filter(j => j && String(j['اسم المقيم'] || '').trim())
+  .filter(j => !LINE_ROW.test(String(j['معرف النظام'] || '')))
   // A cancelled booking is still a row; it must not appear as an arrival.
   .filter(j => String(j['ملاحظات'] || '').indexOf('ملغي') === -1);
 
