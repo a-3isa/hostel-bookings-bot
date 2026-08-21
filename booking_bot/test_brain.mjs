@@ -165,20 +165,20 @@ check('unlisted user tapping a button gets nothing', r === null, r);
 
 r = run(msg('/start'));
 check('admin by id gets the full menu', r.reply.text === 'اختر العملية:', r.reply.text);
-check('admin menu has booking, expense and edit',
+check('admin menu has booking, expense, edit and payment',
   r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() ===
-  'choice_booking,choice_expense,choice_edit',
+  'choice_booking,choice_expense,choice_edit,choice_paid',
   r.reply.reply_markup.inline_keyboard);
 
 r = run(msg('/start', ADMIN_BY_NAME));
 check('admin listed by @username also gets the full menu',
-  r.reply.reply_markup.inline_keyboard.length === 3, r.reply.reply_markup.inline_keyboard);
+  r.reply.reply_markup.inline_keyboard.length === 4, r.reply.reply_markup.inline_keyboard);
 
 // The two people who were on the old BOOKING_USER_IDS / EXPENSE_USERNAMES lists.
 // Dropping either would silently lock a working receptionist out of the live bot.
 r = run(msg('/start', { id: 5793725130, first_name: 'Mostafa' }));
 check('the second receptionist kept full access',
-  r.reply.reply_markup.inline_keyboard.length === 3, r.reply.reply_markup.inline_keyboard);
+  r.reply.reply_markup.inline_keyboard.length === 4, r.reply.reply_markup.inline_keyboard);
 r = run(msg('/start', { id: 444, first_name: 'Seif', username: 'seiiffseiif' }));
 check('the old expense user is now a cashier',
   r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() ===
@@ -700,8 +700,12 @@ check('a method this booking has never used needs a row', r.save.insert === true
 check('the row goes directly under the booking block',
   r.save.insertAfter === 3 && r.save.row === 4, [r.save.insertAfter, r.save.row]);
 check('it is line 2', r.save.lineSeq === 2, r.save.lineSeq);
-check('the line carries the amount paid THIS time, as both total and paid',
-  r.save.fields['اجمالي سعر الحجز'] === 900 &&
+// اجمالي سعر الحجز is BLANK on a line (ruled 2026-08-18). The price was
+// agreed once and stays whole on the booking's own row; a line is a second
+// METHOD of paying it, not a second price. Written into both, the column would
+// sum to more than the booking and every formula that totals it reads that.
+check('the line carries what was paid THIS time, and no price of its own',
+  r.save.fields['اجمالي سعر الحجز'] === '' &&
   r.save.fields['اجمالي ما تم دفعه'] === 900, r.save.fields);
 check('and its own method', r.save.fields['طريقة الدفع'] === 'انستاباي');
 check('the guest is repeated so the row reads as theirs',
@@ -713,9 +717,8 @@ check('المتبقي is never written', !('المتبقي' in r.save.fields));
 check('the booking row keeps its own method', !('طريقة الدفع' in r.save.bookingFields));
 check('the booking row keeps its own paid cell',
   !('اجمالي ما تم دفعه' in r.save.bookingFields), r.save.bookingFields);
-check('the booking total drops by what the line took (1200-900)',
-  r.save.bookingFields['اجمالي سعر الحجز'] === 300,
-  r.save.bookingFields['اجمالي سعر الحجز']);
+check('the booking total is NOT reduced by the line',
+  !('اجمالي سعر الحجز' in r.save.bookingFields), r.save.bookingFields);
 check('other edits still land on the booking row',
   r.save.bookingFields['ملاحظات'] === 'دفع الباقي', r.save.bookingFields);
 check('the database is told every row below moved down', r.save.shiftFrom === 4);
@@ -793,9 +796,9 @@ r = run(photo('RCPT1')); r = run(cb('xleft_no')); r = run(cb('xedone'));
 check('a method already on a line joins that line', r.save.flow === 'payment_line');
 check('nothing is inserted for it', r.save.insert === false);
 check('it targets that line\'s row, not the booking\'s', r.save.row === 25, r.save.row);
-check('the line total grows (1600+500)',
+check('the line paid cell grows (1600+500) and its price stays blank',
   r.save.fields['اجمالي ما تم دفعه'] === 2100 &&
-  r.save.fields['اجمالي سعر الحجز'] === 2100, r.save.fields);
+  r.save.fields['اجمالي سعر الحجز'] === '', r.save.fields);
 check('the guest identity is not rewritten on a row that already has it',
   !('اسم المقيم' in r.save.fields), Object.keys(r.save.fields));
 check('the booking total is untouched — no row was taken from it',
@@ -941,9 +944,9 @@ check('a new method gets its own line here too', r.save.flow === 'payment_line',
   r.save.flow);
 check('the row is inserted under the booking block',
   r.save.insert === true && r.save.row === 4, [r.save.insert, r.save.row]);
-check('the line holds what was paid this time',
+check('the line holds what was paid this time, with no price of its own',
   r.save.fields['اجمالي ما تم دفعه'] === 800 &&
-  r.save.fields['اجمالي سعر الحجز'] === 800, r.save.fields);
+  r.save.fields['اجمالي سعر الحجز'] === '', r.save.fields);
 check('the booking row keeps كاش', !('طريقة الدفع' in (r.save.bookingFields || {})));
 check('receipt carried to the save', r.save.receiptFileId === 'PAYFILE99');
 check('group message is the payment notice, not the edit diff',

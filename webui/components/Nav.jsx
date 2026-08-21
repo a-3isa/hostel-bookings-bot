@@ -4,8 +4,10 @@ import { usePathname } from 'next/navigation';
 
 const LINKS = [
   ['/', 'نظرة عامة'],
+  ['/dashboard', 'الداشبورد'],
   ['/bookings', 'الحجوزات'],
   ['/expenses', 'المصروفات'],
+  ['/deposits', 'الإيداعات'],
   ['/reports', 'التقارير'],
   ['/reconcile', 'المطابقة'],
 ];
