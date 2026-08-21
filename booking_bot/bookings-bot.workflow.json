@@ -877,9 +877,10 @@
         "nodeCredentialType": "googleSheetsOAuth2Api",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ requests: [{ insertDimension: { range: { sheetId: Number($('Config').first().json.BOOKINGS_SHEET_GID), dimension: 'ROWS', startIndex: $('Brain').first().json.save.row - 1, endIndex: $('Brain').first().json.save.row }, inheritFromBefore: true } }] }) }}",
+        "jsonBody": "={{ (() => { const gid = $('Config').first().json.BOOKINGS_SHEET_GID; if (gid === undefined || gid === null || String(gid).trim() === '') throw new Error('BOOKINGS_SHEET_GID is not set — refusing to insert a row into an unknown tab'); return JSON.stringify({ requests: [{ insertDimension: { range: { sheetId: Number(gid), dimension: 'ROWS', startIndex: $('Brain').first().json.save.row - 1, endIndex: $('Brain').first().json.save.row }, inheritFromBefore: true } }] }); })() }}",
         "options": {}
       },
+      "onError": "continueErrorOutput",
       "credentials": {
         "googleSheetsOAuth2Api": {
           "id": "REPLACE_ME",
@@ -1105,7 +1106,8 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($('Brain').first().json.save.savedBody) }}",
         "options": {}
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "id": "send-saved-no-group",
@@ -1123,7 +1125,8 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($('Brain').first().json.save.savedNoGroupBody) }}",
         "options": {}
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "id": "send-save-error",
@@ -1511,6 +1514,13 @@
         [
           {
             "node": "Build Line Rows",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Save Error",
             "type": "main",
             "index": 0
           }
