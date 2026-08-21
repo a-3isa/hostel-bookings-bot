@@ -25,7 +25,25 @@ select
   -- survives an append because it is an array formula; the others are not.)
   -- Updating a known row touches only the mapped columns, which is why the
   -- bot's own booking writes have never damaged them.
-  (select coalesce(max(x.sheet_row), 1) from bookings x)
+  --
+  -- The last row is taken across ALL THREE tables that remember one, not from
+  -- `bookings` alone. A continuation line's row lives in `booking_lines`, so a
+  -- booking on row 96 with its انستاباي line on 97 made `max(bookings)` answer
+  -- 96 — and the next mirrored booking would have been written straight over
+  -- row 97, which is somebody's money.
+  --
+  -- This is still the DATABASE's belief about the sheet, not the sheet's own
+  -- last row: a row typed by hand below everything the database knows is
+  -- invisible here. `reindex.py --apply` adopts such a row and is what makes
+  -- the two agree again; run it before trusting this branch after any hand
+  -- editing. The bot's own append asks the sheet directly, which is the
+  -- stronger answer and the one to move to if this ever writes over a row
+  -- again.
+  (select coalesce(max(r.sheet_row), 1) from (
+     select sheet_row from bookings
+     union all select sheet_row from payments
+     union all select sheet_row from booking_lines
+   ) r)
     + row_number() over (order by b.id)            as row_number,
   coalesce(nullif(b.booking_ref, ''), '')          as "بوكنج ID",
   case when b.guest_ref is null or b.guest_ref = '' then ''

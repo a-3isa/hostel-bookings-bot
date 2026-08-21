@@ -17,8 +17,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mirror import (LINE_ROW_COLOUR, block_end, line_key, line_payload, open_line,
-                    plan_allocation, price_cell, primary_payload, shift_rows_down)
+from mirror import (LINE_ROW_COLOUR, block_end, cell_value, line_key, line_payload,
+                    open_line, plan_allocation, price_cell, primary_payload,
+                    shift_rows_down)
 
 
 def booking(method="كاش", currency="EGP", lines=(), unallocated=(), **extra):
@@ -391,3 +392,47 @@ def test_a_rate_with_no_effective_total_falls_back_to_the_number():
 def test_a_line_row_has_no_price_at_all_rate_or_no_rate():
     row = money_row(nightly_rate=500, total=8500, effective_total=8500)
     assert line_payload(row, line(2, "انستاباي", 11, amount=1600), 11)["total"] == ""
+
+
+# ── What is safe to put in a cell ────────────────────────────────────────────
+#
+# Everything goes to Sheets as USER_ENTERED, because two cells must arrive as
+# live formulas. That makes every other cell a formula too if it happens to
+# start with one of four characters. Twinned in webui/lib/mirror.test.mjs.
+
+def test_free_text_that_looks_like_a_formula_is_neutralised():
+    assert cell_value("guest_name", "=IMPORTRANGE(\"a\",\"b\")")         == "'=IMPORTRANGE(\"a\",\"b\")"
+    assert cell_value("notes", "@here") == "'@here"
+
+
+def test_a_guest_name_may_begin_with_a_dash():
+    """The everyday case, and the reason this is not a security curiosity."""
+    assert cell_value("guest_name", "-ahmed") == "'-ahmed"
+
+
+def test_the_two_intentional_formula_cells_still_are_formulas():
+    assert cell_value("nights_cell", "=TODAY()-J10") == "=TODAY()-J10"
+    assert cell_value("total", "=500*I10") == "=500*I10"
+
+
+def test_a_negative_number_stays_a_number():
+    """`-` leads both a formula and a negative amount.
+
+    primary_payload produces a negative paid figure when a booking's lines
+    carry more than its own row does. Quoting it would store text where nine
+    tabs sum a column.
+    """
+    assert cell_value("paid", "-2000") == "-2000"
+    assert cell_value("paid", "-2000.5") == "-2000.5"
+    assert cell_value("total", "1500") == "1500"
+
+
+def test_the_text_forced_three_are_unchanged():
+    assert cell_value("phone", "0100") == "'0100"
+    assert cell_value("guest_ref", "0074") == "'0074"
+
+
+def test_ordinary_values_and_blanks_pass_through():
+    assert cell_value("guest_name", "احمد") == "احمد"
+    assert cell_value("notes", "") == ""
+    assert cell_value("notes", None) is None

@@ -251,6 +251,14 @@ const S = {
   edit_ask_paid_add:
     '💵 أدخل المبلغ المضاف (المدفوع حالياً: {current}):\n' +
     '↩️ للاسترداد أو تصحيح خطأ أدخل رقماً سالباً، مثل ‎-500',
+  total_formula_replaced:
+    '⚠️ السعر كان معادلة (سعر الليلة × عدد الليالي) وأصبح رقماً ثابتاً — '
+    + 'لن يتحدّث تلقائياً بعد الآن.',
+  ask_total_formula:
+    '⚠️ هذا الحجز سعره معادلة في الشيت (سعر الليلة × عدد الليالي)، '
+    + 'ويتحدّث تلقائياً كلما طالت الإقامة.\n'
+    + 'إدخال رقم ثابت سيلغي المعادلة ويثبّت السعر عند هذا الرقم.\n\n'
+    + '💰 أدخل اجمالي سعر الحجز، أو /cancel للتراجع:',
   edit_paid_below_zero: '❌ المدفوع لا يمكن أن يقل عن صفر. المدفوع حالياً: {current}',
   // The same rule, one turn later, for the row the money really lands on — see
   // the note beside lineTotal in EDIT_PAYMENT.
@@ -1501,7 +1509,13 @@ function commitEdit(dd) {
         : '')
       : t('edit_group_msg', {
         name: mdEscape(dd.editName), private_id: mdEscape(dd.editPrivateId),
-        changes: changeLines(dd), actor,
+        // Replacing a nightly-rate formula with a fixed number is the one edit
+        // whose consequence outlives the edit itself — the price stops growing
+        // with the stay — so it is named here rather than left to look like an
+        // ordinary total change.
+        changes: changeLines(dd)
+          + (dd.totalFormulaReplaced ? '\n' + t('total_formula_replaced') : ''),
+        actor,
       }),
     savedText: (dd.paidOnly || dd.paidAdded) ? t('paid_saved') : t('edit_saved'),
     savedNoGroupText: (dd.paidOnly || dd.paidAdded)
@@ -2094,7 +2108,12 @@ switch (state) {
       break;
     }
     switch (cbData) {
-      case 'ef_total':   reply(t('ask_total'));  setState('EDIT_TOTAL', d);   break;
+      // The warning is worth a turn: on one of the sixteen nightly-rate
+      // bookings, typing a number here replaces the sheet's own formula.
+      case 'ef_total':
+        reply(t(d.totalIsFormula ? 'ask_total_formula' : 'ask_total'));
+        setState('EDIT_TOTAL', d);
+        break;
       case 'ef_paid':
         reply(t('edit_ask_paid_add', { current: num(paidSoFar(d)) }));
         setState('EDIT_PAID', d);
@@ -2126,7 +2145,27 @@ switch (state) {
     if (cq) break;
     const v = parseNum(text);
     if (v === null || v < 0) { reply(t('num_error')); break; }
+    /*
+     * On a nightly-rate booking this replaces a live formula with a scalar.
+     *
+     * Sixteen bookings hold `=500*I10` — or `=(650*I19)-2200` where a lump sum
+     * was written off — in اجمالي سعر الحجز, and ten of those are open-ended,
+     * so the formula is what makes the bill grow as the stay does. Writing a
+     * number freezes it on the day it was typed, and nobody notices until the
+     * guest checks out short.
+     *
+     * `total_is_formula` has been fetched by read_bookings_for_edit.sql since
+     * the lines were built, with a comment explaining exactly this, and until
+     * 2026-08-21 nothing read it. supabase/mirror.py avoids the same trap with
+     * sheet_owned_keys and webui/lib/publish.js with priceCell; the bot was the
+     * last writer with no protection at all.
+     *
+     * It is allowed, because a typed number is a deliberate override and there
+     * has to be a way to fix a price. It is no longer silent: the prompt says
+     * what will happen, and the change is flagged where the group can see it.
+     */
     editSet(d, 'اجمالي سعر الحجز', num(v));
+    if (d.totalIsFormula) d.totalFormulaReplaced = true;
     showEditMenu(d);
     break;
   }
