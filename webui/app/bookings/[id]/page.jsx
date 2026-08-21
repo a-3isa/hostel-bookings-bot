@@ -48,7 +48,8 @@ export default async function EditBooking({ params, searchParams }) {
 
       {flags?.saved && (
         <div className="banner good">
-          <span className="ico">✓</span><div>تم الحفظ في Postgres. الشيت لم يتغير.</div>
+          <span className="ico">✓</span>
+          <div>تم الحفظ في Postgres وكُتب إلى الشيت.</div>
         </div>
       )}
       {flags?.error === 'amount' && (
@@ -204,9 +205,11 @@ export default async function EditBooking({ params, searchParams }) {
             </label>
           </div>
           <p className="muted">
-            الدفعة الثانية فأكثر تُدرج سطرًا جديدًا في الشيت أسفل صف الحجز بالمبلغ
-            وطريقة الدفع الجديدة. خانات صف الحجز نفسها لا تتغير، و«متعدد» تظهر في
-            اللوحة فقط لأن معادلات الشيت تقرأ قيم طريقة الدفع الحقيقية.
+            دفعة بطريقة يحملها الحجز بالفعل تُضاف إلى سطرها ويكبر مبلغه. طريقة
+            جديدة تفتح سطرًا بنفسجيًا أسفل صف الحجز بمبلغها وطريقتها، ويبقى
+            «اجمالي سعر الحجز» كاملًا في صف الحجز بينما يُترك فارغًا في السطر
+            الجديد. «متعدد» تظهر في اللوحة فقط لأن معادلات الشيت تقرأ قيم طريقة
+            الدفع الحقيقية.
           </p>
           <p><button type="submit">إضافة دفعة</button></p>
         </form>

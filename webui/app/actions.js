@@ -190,11 +190,24 @@ export async function setCancelled(id, cancelled) {
 
 // ── payments ────────────────────────────────────────────────────────────────
 //
-// Deliberately does NOT touch bookings.paid. That column mirrors the sheet's
-// cumulative paid cell for one sheet line, and the sheet is still authoritative;
-// silently recomputing it from these rows would put the two systems out of step
-// without anyone deciding to. The booking page shows both figures side by side
-// and says so when they disagree.
+// `bookings.paid` IS kept in step here, as of 2026-08-21. It did not used to be,
+// and that was right while the dashboard wrote Postgres and nothing else: the
+// sheet was authoritative, and recomputing its cumulative paid cell from these
+// rows would have put the two systems out of step without anyone deciding to.
+//
+// Since 2026-08-18 this path also writes the sheet, and the arithmetic that
+// does it assumes the invariant the old comment gave up: `bookings.paid` is the
+// booking's WHOLE paid amount, and `primaryPayload` derives the booking row's
+// own cell by SUBTRACTING what its lines carry. Recording a payment without
+// adding it to `paid` made that subtraction take money off a total that never
+// received it — a 2,000 انستاباي payment on a booking with 5,000 كاش would
+// have written 3,000 into the booking's cell and 2,000 onto the line, showing
+// 5,000 where 7,000 had been paid, and re-attributing 2,000 of cash to
+// انستاباي on the per-row method the Dashboard tab reads. With `paid` at 0 it
+// would have written a NEGATIVE number into a column nine tabs sum.
+//
+// Caught by audit before it ran: every payment on this database still carries
+// the bot's `client_ref`, so `addPayment` had never once been used.
 
 // Records the payment and NOTHING else. It used to insert a sheet row here, and
 // a follower `bookings` row to own it; both are gone.
@@ -222,11 +235,19 @@ export async function addPayment(bookingId, formData) {
   const booking = await one('select id from bookings where id = $1', [bookingId]);
   if (!booking) redirect('/bookings');
 
-  await q(
-    `insert into payments (booking_id, amount, method, currency, paid_at, source)
-     values ($1,$2,$3,coalesce($4,'EGP'),coalesce($5::timestamptz, now()),'bot')`,
-    [bookingId, amount, method, currency, paidAt],
-  );
+  await tx(async (client) => {
+    await client.query(
+      `insert into payments (booking_id, amount, method, currency, paid_at, source)
+       values ($1,$2,$3,coalesce($4,'EGP'),coalesce($5::timestamptz, now()),'bot')`,
+      [bookingId, amount, method, currency, paidAt],
+    );
+    // One statement, same transaction: the ledger row and the booking's total
+    // are the same fact recorded twice and must never be recorded apart.
+    await client.query(
+      'update bookings set paid = coalesce(paid, 0) + $2, updated_at = now() where id = $1',
+      [bookingId, amount],
+    );
+  });
 
   // This is where a payment reaches the sheet. publishBooking decides which
   // LINE it joins: a method the booking already has grows that line's cell,
@@ -243,7 +264,20 @@ export async function addPayment(bookingId, formData) {
 
 export async function deletePayment(bookingId, paymentId) {
   await requireAuth();
-  await q('delete from payments where id = $1 and booking_id = $2', [paymentId, bookingId]);
+  await tx(async (client) => {
+    // `returning` so the booking's total is reduced by exactly what was
+    // removed, and only if a row was actually removed — a repeated submit or a
+    // payment id belonging to another booking takes nothing off anything.
+    const gone = (await client.query(
+      'delete from payments where id = $1 and booking_id = $2 returning amount',
+      [paymentId, bookingId],
+    )).rows[0];
+    if (!gone) return;
+    await client.query(
+      'update bookings set paid = coalesce(paid, 0) - $2, updated_at = now() where id = $1',
+      [bookingId, gone.amount],
+    );
+  });
   // The line the payment was on keeps its row; its cell simply shrinks by what
   // was removed. An emptied line is not torn out of the sheet from here —
   // deleting a row moves every row beneath it and that is the mirror's call.

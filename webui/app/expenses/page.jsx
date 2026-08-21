@@ -86,7 +86,7 @@ export default async function Expenses({ searchParams }) {
   return (
     <>
       {raw?.saved && (
-        <div className="banner good"><span className="ico">✓</span><div>تم الحفظ في Postgres. الشيت لم يتغير.</div></div>
+        <div className="banner good"><span className="ico">✓</span><div>تم الحفظ في Postgres وكُتب إلى تبويب «مصروفات عامة».</div></div>
       )}
 
       <div className="kpis">
