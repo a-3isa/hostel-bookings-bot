@@ -254,7 +254,7 @@ export default async function Dashboard({ searchParams }) {
         <span className="ico">ℹ</span>
         <div>
           <strong>هذه الصفحة تحسب من Postgres، لا تنقل من تبويب Dashboard —
-            وأرقامها تختلف عن الشيت عن قصد في موضعين:</strong>
+            وأرقامها تختلف عن الشيت عن قصد في ثلاثة مواضع:</strong>
           <ol style={{ margin: '6px 0 0', paddingInlineStart: 18 }}>
             <li>
               <b>Airbnb مكرر في الشيت</b> (السطران O7 و O9) وكلاهما يعدّ نفس
@@ -265,6 +265,25 @@ export default async function Dashboard({ searchParams }) {
               يجمع 4:16، فالحجوزات غير المدفوعة تُعدّ ثلاث مرات. الشيت يقول
               <b> 95 حجزًا</b> بينما العدد الحقيقي <b>91</b> — وهو ما تعرضه هذه
               الصفحة.
+            </li>
+            {/*
+              The largest difference of the three, and the one anybody comparing
+              the two pages hits first. Verified against live data on
+              2026-08-21: restricted to the seven registered apartments this
+              page reproduces the sheet's expense total to the piastre
+              (33,526.46), so the gap is entirely rows the sheet's SUMIF cannot
+              see — not a modelling difference.
+            */}
+            <li>
+              <b>صفوف بلا شقة لا يراها الشيت.</b> كل أرقام تبويب Dashboard مبنية
+              على <code>SUMIF</code> باسم الشقة، فأي صف خانة الشقة فيه فارغة
+              يسقط من كل الحسابات. اليوم هذا يعني: حجز واحد بلا شقة
+              (<b>3,000</b> دخلًا ومدفوعًا)، مصاريف بلا شقة
+              (<b>6,961</b>)، وسطر الدفعة المدموج يدويًا في الصف 18
+              (<b>3,500</b> فودافون كاش لحسام) الذي تطويه هذه الصفحة داخل حجزه.
+              هذه الصفحة تحتسبها كلها وتُظهر ما لا شقة له تحت
+              <b> «غير محدد»</b>؛ الشيت يتجاهلها بصمت. مقصورةً على الشقق المسجّلة
+              وحدها، أرقام هذه الصفحة تطابق الشيت.
             </li>
           </ol>
           <div className="muted" style={{ marginTop: 6 }}>
