@@ -366,3 +366,100 @@ export async function deleteExpense(id) {
   revalidatePath('/expenses');
   redirect('/expenses?saved=1');
 }
+
+// ── deposits ────────────────────────────────────────────────────────────────
+//
+// A deposit is the business banking its collected cash: money leaves the كاش
+// balance and arrives in the انستاباي one. Nothing is created, nothing is
+// destroyed, and no booking is involved.
+//
+// NEITHER of these calls publishBooking or publishExpense, and that is
+// deliberate rather than an omission. The sheet has no column, no row and no
+// tab that describes a transfer between payment methods; writing one would put
+// a row on إدخال الحجوزات that every SUMIF on the Dashboard tab would then add
+// to somebody's booking income. The user chose database + dashboard only.
+// `/dashboard` is where the movement shows up, as its own column beside the raw
+// figure so the raw one can still be compared against the sheet.
+
+export async function createDeposit(formData) {
+  await requireAuth();
+
+  const amount = number(formData, 'amount');
+  const from = text(formData, 'from_method');
+  const to = text(formData, 'to_method');
+  const currency = text(formData, 'currency') ?? 'EGP';
+  const occurredAt = text(formData, 'occurred_at');
+  const note = text(formData, 'note');
+
+  // The same three rules the table's CHECK constraints enforce, applied here so
+  // the user gets a sentence instead of a 500. The constraints stay: this form
+  // is not the only thing that will ever insert into that table.
+  if (amount === null || amount <= 0) redirect('/deposits?error=amount');
+  if (!from || !to) redirect('/deposits?error=method');
+  if (from === to) redirect('/deposits?error=same');
+
+  await q(
+    `insert into deposits (amount, from_method, to_method, currency,
+                           occurred_at, note, created_by)
+     values ($1,$2,$3,$4,coalesce($5::timestamptz, now()),$6,$7)`,
+    [amount, from, to, currency, occurredAt, note, WEB],
+  );
+
+  revalidatePath('/deposits');
+  revalidatePath('/dashboard');
+  redirect('/deposits?saved=1');
+}
+
+export async function deleteDeposit(id) {
+  await requireAuth();
+  await q('delete from deposits where id = $1', [id]);
+  revalidatePath('/deposits');
+  revalidatePath('/dashboard');
+  redirect('/deposits?saved=1');
+}
+
+// ── dashboard settings ──────────────────────────────────────────────────────
+//
+// The commission rate and the per-apartment rent were cells in the sheet —
+// Dashboard!B20 and column I — and nothing in Postgres held either. They do
+// now, and this is the only thing that writes them.
+
+export async function saveDashboardSettings(formData) {
+  await requireAuth();
+
+  // Entered as a percentage, because that is what the sheet's cell shows and
+  // what anyone reading «13.1» means. Stored as the fraction the SUMIF wants.
+  const pct = number(formData, 'commission_pct');
+  if (pct !== null && pct >= 0) {
+    await q(
+      `insert into settings (key, value, label, updated_at)
+       values ('booking_commission_rate', $1, 'نسبة عمولة بوكينج', now())
+       on conflict (key) do update
+          set value = excluded.value, updated_at = now()`,
+      [pct / 100],
+    );
+  }
+
+  // The apartment id comes out of the field NAME, so it is parsed as an integer
+  // and passed as a parameter — the id never becomes part of the SQL text, and
+  // a field name that is not exactly `rent_<digits>` is ignored rather than
+  // interpreted.
+  for (const [field, value] of formData.entries()) {
+    const match = /^rent_(\d+)$/.exec(field);
+    if (!match) continue;
+    const id = Number(match[1]);
+    if (!Number.isSafeInteger(id)) continue;
+
+    const typed = String(value).trim();
+    // '' means «no rent recorded», which is not the same as a rent of zero:
+    // the sheet leaves ابو حديد 7's cell blank rather than claiming it is free.
+    const rent = typed === '' ? null : Number(typed.replace(/,/g, ''));
+    if (rent !== null && !Number.isFinite(rent)) continue;
+
+    await q('update apartments set monthly_rent = $2 where id = $1', [id, rent]);
+  }
+
+  revalidatePath('/dashboard');
+  revalidatePath('/');
+  redirect('/dashboard?saved=1');
+}

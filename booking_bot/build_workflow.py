@@ -632,12 +632,41 @@ def build():
     }, (1760, 1020), cred=SHEETS_CRED)
     g.node("Build Line Rows", "n8n-nodes-base.code", 2,
            {"jsCode": read_source("build_line_rows.js")}, (1960, 1020))
-    g.node("Write Line Rows", "n8n-nodes-base.googleSheets", 4.7,
-           sheets_update(BOOKINGS_TAB), (2160, 1020), cred=SHEETS_CRED)
+    # HTTP, not the Sheets node, and this is the whole reason a payment now
+    # saves in under a second.
+    #
+    # Measured live on 2026-08-20, execution 1937: as a `googleSheets` update
+    # node this took **32,618 ms** of a 36,870 ms turn, while every other node
+    # in the same execution finished inside 450 ms. The node matches on
+    # `row_number`, so it must READ the tab to find each row, and that read
+    # makes Google recalculate a workbook full of GOOGLEFINANCE calls and
+    # unbounded FILTER(UNIQUE(…)) ranges. The same execution wrote column U
+    # through a plain HTTP node in 287 ms.
+    #
+    # Nothing here needs finding: Build Line Rows names every cell outright and
+    # this posts them as one `values:batchUpdate`. Same lesson, third time —
+    # see values_put_id for the first two.
+    g.node("Write Line Rows", "n8n-nodes-base.httpRequest", 4.2, {
+        "method": "POST",
+        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}"
+               "/values:batchUpdate",
+        # Same binding note as the other Sheets-credentialed HTTP nodes: this
+        # can be set in the editor or by import, never over the API.
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": True,
+        "specifyBody": "json",
+        # USER_ENTERED, because عدد الليالي on an open stay is the live formula
+        # =TODAY()-J<row> and has to arrive as one.
+        "jsonBody": "={{ JSON.stringify({ valueInputOption: 'USER_ENTERED',"
+                    " data: $json.data }) }}",
+        "options": {},
+    }, (2160, 1020), cred=SHEETS_CRED)
     # The line's own id, in its own request. Build Line Rows leaves معرف النظام
-    # out of the row it emits, so the value comes from the Brain rather than
-    # from the item — and `executeOnce` because that node emits two items when
-    # the booking's row changed too, and both would write the same cell.
+    # out of the ranges it emits, so the value comes from the Brain rather than
+    # from the item. `executeOnce` is kept even though that node emits a single
+    # item now: it costs nothing, and it is the guarantee rather than the item
+    # count that matters.
     g.node("Write Line Id", "n8n-nodes-base.httpRequest", 4.2,
            values_put_id("BOOKINGS_TAB",
                          row_expr="$('Brain').first().json.save.row",

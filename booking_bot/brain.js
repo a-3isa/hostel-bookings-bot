@@ -1505,6 +1505,13 @@ if (cmd === '/start' || (cmd || '').startsWith('/start@')) {
         [{ text: t('btn_add_booking'), callback_data: 'choice_booking' }],
         [{ text: t('btn_add_expense'), callback_data: 'choice_expense' }],
         [{ text: t('btn_edit_booking'), callback_data: 'choice_edit' }],
+        // A fourth entry, added 2026-08-18. Recording a payment IS an edit —
+        // it has always been reachable through تعديل حجز — but getting there
+        // meant the field menu and a choice nobody making a payment cares
+        // about. `choice_paid` is the same flow the cashier gets: find the
+        // booking, take the money, done. The cashier has had the shortcut
+        // since the beginning and the admin, who does it more often, did not.
+        [{ text: t('btn_add_paid'), callback_data: 'choice_paid' }],
       ],
     });
   } else {
@@ -1564,7 +1571,7 @@ if (cmd === '/undo' || (cmd || '').startsWith('/undo@')) {
 // ended, which used to do nothing at all.
 if (!state && cbData && cbData.indexOf('choice_') === 0) {
   if (cbData === 'choice_expense') startExpense();
-  else if (cbData === 'choice_paid' && isCashier) startPaid();
+  else if (cbData === 'choice_paid' && (isAdmin || isCashier)) startPaid();
   else if (cbData === 'choice_booking' && isAdmin) startBooking();
   else if (cbData === 'choice_edit' && isAdmin) startEdit();
   return [{ json: out }];
@@ -1613,7 +1620,7 @@ switch (state) {
   // ── Router ────────────────────────────────────────────────────────────────
   case 'CHOICE':
     if (cbData === 'choice_expense') startExpense();
-    else if (cbData === 'choice_paid' && isCashier) startPaid();
+    else if (cbData === 'choice_paid' && (isAdmin || isCashier)) startPaid();
     else if (cbData === 'choice_booking' && isAdmin) startBooking();
     else if (cbData === 'choice_edit' && isAdmin) startEdit();
     break;
@@ -2133,11 +2140,19 @@ switch (state) {
     // Admins attach a receipt for the two transfer methods and may skip it. The
     // cashier is recording someone else's money, so anything that is not cash
     // needs proof, and there is no skip.
-    const needsReceipt = d.paidOnly
+    //
+    // Keyed on the ROLE, not on `paidOnly`. Those were the same thing until
+    // 2026-08-18, when the admin menu gained its own payment shortcut — which
+    // also sets `paidOnly`, because that flag means "linear, save as soon as
+    // the money is in" and not "this user is a cashier". Left as it was, an
+    // admin taking the shortcut would have been held to the cashier's rule and
+    // been unable to record a transfer they had no photo for.
+    const strictReceipt = !isAdmin;
+    const needsReceipt = strictReceipt
       ? payKey !== CASH_KEY
       : RECEIPT_PAYMENT_KEYS.indexOf(payKey) !== -1;
     if (needsReceipt) {
-      if (d.paidOnly) reply(t('paid_ask_receipt'));
+      if (strictReceipt) reply(t('paid_ask_receipt'));
       else reply(t('ask_receipt'), skipKb('xreceipt_skip'));
       setState('EDIT_RECEIPT', d);
       break;
@@ -2147,9 +2162,10 @@ switch (state) {
   }
 
   case 'EDIT_RECEIPT':
+    // Same role test as the prompt that led here — see EDIT_PAYMENT above.
     if (photoFileId) d.editReceipt = photoFileId;
-    else if (cbData === 'xreceipt_skip' && !d.paidOnly) d.editReceipt = '';
-    else if (d.paidOnly) { reply(t('paid_receipt_error')); break; }
+    else if (cbData === 'xreceipt_skip' && isAdmin) d.editReceipt = '';
+    else if (!isAdmin) { reply(t('paid_receipt_error')); break; }
     else { reply(t('receipt_error'), skipKb('xreceipt_skip')); break; }
     afterEditStep(d);
     break;
@@ -2342,6 +2358,7 @@ if (out.hasSave && out.save) {
     buttons.push([{ text: t('btn_add_booking'), callback_data: 'choice_booking' }]);
     buttons.push([{ text: t('btn_add_expense'), callback_data: 'choice_expense' }]);
     buttons.push([{ text: t('btn_edit_booking'), callback_data: 'choice_edit' }]);
+    buttons.push([{ text: t('btn_add_paid'), callback_data: 'choice_paid' }]);
   } else {
     buttons.push([{ text: t('btn_add_expense'), callback_data: 'choice_expense' }]);
     buttons.push([{ text: t('btn_add_paid'), callback_data: 'choice_paid' }]);
