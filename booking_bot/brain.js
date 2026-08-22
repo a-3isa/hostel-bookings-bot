@@ -2439,7 +2439,36 @@ switch (state) {
         'عدد الليالي': 0,
         'اجمالي سعر الحجز': 0,
       },
+      /*
+       * The booking's CONTINUATION LINES, cancelled with it.
+       *
+       * Everything above applies to the booking's own row and, until
+       * 2026-08-21, only to it. A booking paid in two methods occupies more
+       * rows than that, and every one of them repeats the guest's name, the
+       * apartment and the arrival — because the sheet's own formulas read
+       * those cells off each row.
+       *
+       * On an open-ended stay the line also carries `=TODAY()-J{r}`, copied
+       * there by commitPaymentLine. Cancel the booking and that formula went
+       * on climbing forever: the departed guest kept appearing in occupancy on
+       * every tab that sums عدد الليالي, and in the "long stays" section of
+       * the daily digest. The row did not even look cancelled, because the
+       * formatter blackened one row too.
+       *
+       * عدد الليالي goes to zero for exactly the reason it does above. The
+       * line's اجمالي سعر الحجز is already blank and is left alone, and so is
+       * its اجمالي ما تم دفعه: that money changed hands, and erasing it here
+       * would hide a refund that may or may not have happened.
+       */
+      lineRows: (Array.isArray(d.editLines) ? d.editLines : [])
+        .filter((l) => Number(l.row) > 0)
+        .map((l) => ({
+          row: Number(l.row),
+          fields: { 'عدد الليالي': 0, 'ملاحظات': t('del_note') },
+        })),
       formatRow: true,                  // black fill / white text, via HTTP
+      // The last row of the block, so the formatter blackens the whole of it.
+      formatThrough: Number(d.blockEnd) || d.editRow,
       receiptFileId: '',
       groupChatId: CFG.GROUP_CHAT_ID,
       groupText: t('del_group_msg', {
