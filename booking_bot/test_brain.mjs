@@ -1667,6 +1667,42 @@ r = editAs(ID_ONLY);
 check('neither name nor handle → the numeric id',
   r.save.groupText.includes('👤 بواسطة: 1226903540'), r.save.groupText);
 
+
+// ─── A confirmation card that is waiting for a button ────────────────────────
+//
+// Reported live on 2026-08-22. An admin's booking failed against the expired
+// Google credential that morning, which left the session on CONFIRM with the
+// card far up the chat. Every message they sent afterwards was dropped without
+// a word — the three CONFIRM states accept one callback each and `break` on
+// anything else — so from where they sat the bot had simply stopped answering.
+
+section('confirm: a typed message gets an answer, not silence');
+
+resetSession();
+sheetRows = SHEET;
+run(msg('/start'));            run(cb('choice_booking'));
+run(cb('bid_skip'));           run(msg('A12345'));
+run(msg('محمد علي'));          run(cb('bt_external'));
+run(msg('01012345678'));       run(cb('ar_2_4'));
+run(cb('nights_3'));           run(cb('cal_day_2026_08_15'));
+run(msg('4500'));              run(cb('pay_cash'));
+run(msg('2000'));
+r = run(msg('طلب سرير إضافي'));
+check('the confirmation card is on screen',
+  r.reply && r.reply.text.startsWith('📋 *مراجعة الحجز:*'), r.reply && r.reply.text);
+
+r = run(msg('هل حفظت؟'));
+check('a typed message on the card is answered, not swallowed',
+  r.reply !== null && /استخدم الأزرار/.test(r.reply.text), r.reply);
+check('and it points at the way out',
+  /\/cancel/.test(r.reply.text), r.reply.text);
+check('typing does not save anything', r.hasSave !== true, r.hasSave);
+check('and the session stays on the card', r.sessionState === 'CONFIRM',
+  r.sessionState);
+
+r = run(cb('save'));
+check('the button still works afterwards', r.hasSave === true, r.reply);
+
 sheetRows = null;
 
 // ─── Result ───────────────────────────────────────────────────────────────────
