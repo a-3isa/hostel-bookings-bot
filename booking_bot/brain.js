@@ -260,6 +260,11 @@ const S = {
     + 'ويتحدّث تلقائياً كلما طالت الإقامة.\n'
     + 'إدخال رقم ثابت سيلغي المعادلة ويثبّت السعر عند هذا الرقم.\n\n'
     + '💰 أدخل اجمالي سعر الحجز، أو /cancel للتراجع:',
+  // A confirmation card waits for a button, and a text message there used to be
+  // swallowed in silence — see waitingForButton().
+  use_buttons:
+    '👆 استخدم الأزرار في رسالة المراجعة أعلاه للحفظ أو الإلغاء.\n'
+    + 'لو الرسالة اختفت من الشاشة، أرسل /cancel ثم /start للبدء من جديد.',
   edit_paid_below_zero: '❌ المدفوع لا يمكن أن يقل عن صفر. المدفوع حالياً: {current}',
   // The same rule, one turn later, for the row the money really lands on — see
   // the note beside lineTotal in EDIT_PAYMENT.
@@ -1042,6 +1047,29 @@ function paidSoFar(dd) {
  */
 const SAVE_LOCK_MS = 60 * 1000;
 
+/**
+ * A confirmation card is waiting for a button, and the user typed instead.
+ *
+ * The three CONFIRM states accept exactly one callback each and `break` on
+ * anything else, which for a TEXT message meant total silence. That is fine
+ * while the card is on screen — the buttons are right there — and awful once it
+ * has scrolled away or the user has come back hours later: the bot looks dead.
+ *
+ * Reported live on 2026-08-22 by the admin whose booking failed against the
+ * expired Google credential that morning. The failed save left the session on
+ * CONFIRM with the card 400 messages up the chat, and every message they sent
+ * afterwards was dropped without a word. They concluded the bot had stopped
+ * answering them, which from where they were sitting it had.
+ *
+ * Returns true when this turn is a plain message rather than a button press.
+ */
+function waitingForButton() {
+  // `cq` is the callback_query, so it is truthy on a BUTTON press. The nudge is
+  // for the other case.
+  if (!cq) { reply(t('use_buttons')); return true; }
+  return false;
+}
+
 function saveLocked(dd) {
   return Boolean(dd.savingAt) && (Date.now() - Number(dd.savingAt)) < SAVE_LOCK_MS;
 }
@@ -1631,6 +1659,7 @@ switch (state) {
     break;
 
   case 'EXP_CONFIRM': {
+    if (waitingForButton()) break;
     if (cbData === 'ecancel') { endSession(); reply(t('cancelled')); break; }
     if (cbData !== 'esave') break;
     if (saveLocked(d)) break;
@@ -1848,6 +1877,7 @@ switch (state) {
     break;
 
   case 'CONFIRM': {
+    if (waitingForButton()) break;
     if (cbData === 'cancel') { endSession(); reply(t('cancelled')); break; }
     if (cbData !== 'save') break;
     if (saveLocked(d)) break;
@@ -2220,6 +2250,7 @@ switch (state) {
   }
 
   case 'EDIT_CONFIRM': {
+    if (waitingForButton()) break;
     if (cbData === 'xecancel') { endSession(); reply(t('cancelled')); break; }
     if (cbData !== 'xedone') break;
     if (!Object.keys(d.editNew || {}).length && !hasLinePayment(d)) {
