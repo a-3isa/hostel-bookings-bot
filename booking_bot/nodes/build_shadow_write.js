@@ -28,7 +28,7 @@ function sheetRow() {
       if (n && n.row_number) return Number(n.row_number);
     } catch (e) { /* did not execute this turn */ }
   }
-  return Number(save.row) || null;      // edit/cancel/undo carry it on the payload
+  return Number(save.row) || null;      // edit and cancel carry it on the payload
 }
 
 const row = sheetRow();
@@ -158,11 +158,11 @@ if (flow === 'booking' || flow === 'edit' || flow === 'cancel') {
       'on conflict (client_ref) do nothing;';
   } else if (F['اجمالي ما تم دفعه'] !== undefined) {
     // No payment act on the payload: a correction typed into the paid column,
-    // an /undo, or a replay of an older session. Fall back to mirroring the
+    // a correction, or a replay of an older session. Fall back to mirroring the
     // line, which is what every row backfilled from the sheet looks like.
     const paidSql = sqlNum(F['اجمالي ما تم دفعه']);
     if (paidSql === 'NULL' || Number(paidSql) === 0) {
-      // Paid cleared — an /undo, or a correction. The line no longer records a
+      // Paid cleared — a correction. The line no longer records a
       // payment, so neither may the table: both the mirrored line row and any
       // payment acts recorded against that line go.
       //

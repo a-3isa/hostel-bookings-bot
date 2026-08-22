@@ -348,20 +348,6 @@ const S = {
   // The payment leads, because that is the part the group is watching for, and
   // whatever else moved is listed underneath rather than lost.
   payment_other_changes: '✏️ تعديلات أخرى:\n{changes}',
-  // ── Undo ──
-  undo_none: 'لا يوجد تعديل يمكن التراجع عنه.',
-  undo_expired: '⌛ انتهت مهلة التراجع (10 دقائق). استخدم تعديل حجز.',
-  undo_not_supported:
-    'التراجع متاح للتعديلات والدفعات فقط.\nلإلغاء حجز جديد استخدم *تعديل حجز* ← 🗑️ إلغاء الحجز.',
-  undo_confirm: '↩️ *تراجع عن آخر تعديل؟*\n\n{changes}',
-  undo_saved: '✅ تم التراجع.',
-  undo_saved_no_group: '✅ تم التراجع.\n⚠️ تعذّر الإرسال للجروب.',
-  undo_group_msg:
-    '↩️ *تراجع عن تعديل*\n\n' +
-    '👤 المقيم: {name}\n' +
-    '🆔 ID: {private_id}\n\n' +
-    '{changes}\n\n' +
-    '👤 بواسطة: {actor}',
   conflict_warning:
     '⚠️ *تعارض في الحجز* — {room} محجوزة في نفس الفترة ({count}):\n{list}',
   // Two lines per clash on purpose. The first says who is in the room and for
@@ -382,11 +368,6 @@ const S = {
     'لو ده نفس الحجز، اضغط إلغاء.',
   dup_line: '• صف {row} — {name}{id_part}\n   🛏️ {arrival} — {apartment} / {room}',
   btn_confirm_dup: '⚠️ احفظ حجز جديد رغم التشابه',
-  // On the saved card, above the /start menu's own three buttons, which it
-  // reuses. These replaced "أرسل /start من جديد" — a receptionist with a phone in
-  // one hand and a guest in front of them should not have to type a command to
-  // do the obvious next thing.
-  btn_undo_last: '↩️ تراجع',
   btn_confirm_anyway: '⚠️ احفظ رغم التعارض',
   btn_confirm: '✅ حفظ',
   btn_cancel: '❌ إلغاء',
@@ -1253,43 +1234,6 @@ function otherChangeLines(dd) {
   return out_.join('\n');
 }
 
-const UNDO_WINDOW_MS = 10 * 60 * 1000;
-
-/** 'المدفوع: 2100 ← 1200' — the reverse of the diff that produced this record. */
-function undoLines(rec) {
-  return Object.keys(rec.before || {})
-    .map(col => `${col}: ${showValue((rec.after || {})[col])} ← ${showValue(rec.before[col])}`)
-    .join('\n');
-}
-
-/**
- * The pre-image of an edit: the sheet's value for every column about to change.
- *
- * A missing column is restored as an empty string rather than being skipped —
- * "this cell was blank before" is a value, and skipping it would leave the new
- * value in place on undo.
- *
- * Deliberately not produced for booking/expense appends. Blanking an appended
- * row would leave a gap, and the next write picks its row with `filled + 2`, so
- * the row after it would be overwritten. Cancelling a booking is the right tool
- * there, and it has its own flow.
- */
-function undoRecord(dd) {
-  const before = {};
-  for (const col of Object.keys(dd.editNew || {})) {
-    const v = dd.editOrig ? dd.editOrig[col] : undefined;
-    before[col] = v === undefined ? '' : v;
-  }
-  return {
-    row: dd.editRow,
-    at: Date.now(),
-    name: dd.editName || '',
-    privateId: dd.editPrivateId || '',
-    before,
-    after: dd.editNew || {},
-  };
-}
-
 // Columns copied onto a new payment line, so the row reads as the same guest.
 // E الجنسية is retired and left alone; K, N, P, R, S and T are the sheet's own
 // formulas and are never written on any path.
@@ -1370,17 +1314,6 @@ function commitPaymentLine(dd) {
     // number — which has happened once already, in the other direction.
     shiftFrom: target.kind === 'new' ? target.row : null,
     fields,
-    // Blanking a row the bot inserted would leave a hole the row calculation
-    // then writes into, so a new line is not offered to /undo. Growing a line
-    // that already existed is an ordinary edit and is.
-    undo: target.kind === 'new' ? null : {
-      row: target.row,
-      at: Date.now(),
-      name: dd.editName || '',
-      privateId: dd.editPrivateId || '',
-      before: { [paidCol]: num(target.base) },
-      after: { [paidCol]: lineTotal },
-    },
     payment: {
       added: num(added),
       method: dd.payMethod,
@@ -1471,9 +1404,6 @@ function commitEdit(dd) {
   out.save = {
     flow: 'edit',
     row: dd.editRow,                 // from the lookup, never computed
-    // The pre-image of exactly the columns being changed, so /undo can put them
-    // back. Persisted by "Clear Session" once the write has actually landed.
-    undo: undoRecord(dd),
     fields: dd.editNew,              // only the columns that actually changed
     // What was paid THIS TIME, and how — not the running total the sheet gets.
     // The sheet has one paid cell and one method cell per row, so a guest who
@@ -1538,20 +1468,19 @@ function startPaid() { reply(t('paid_ask_id')); setState('EDIT_FIND', { paidOnly
 
 // ─── Entry points: /start and /cancel ─────────────────────────────────────────
 
-// The buttons on the saved card stand in for the two commands a receptionist
-// would otherwise type. They are rewritten to the commands rather than handled
-// separately, so /start and /undo keep exactly one implementation each — the
-// undo window, the expiry message and the "cannot undo an append" case included.
+// `go_start` stands in for the /start a receptionist would otherwise type. It
+// is rewritten to the command rather than handled separately, so there is
+// exactly one implementation of /start.
 //
-// The session is already ended by the time this card is on screen, so these
-// arrive with no state, which is precisely the shape both commands expect.
-// `go_start` is no longer on any card the bot draws — the three menu buttons
-// replaced it — but every card already delivered still carries it, and Telegram
-// keeps those on screen forever. It stays for them.
-const asCommand = cbData === 'go_start' ? '/start'
-  : cbData === 'go_undo' ? '/undo'
-  : null;
-const cmd = asCommand || text;
+// The session is already ended by the time a saved card is on screen, so this
+// arrives with no state, which is precisely the shape /start expects.
+//
+// `go_start` is no longer on any card the bot draws — the menu buttons replaced
+// it — and `go_undo` is not either, now that undo is gone. Telegram keeps every
+// card already delivered on screen forever, so an old `go_undo` may still be
+// tapped; it falls through to the silent no-op below, which is the right answer
+// for a button that no longer means anything.
+const cmd = cbData === 'go_start' ? '/start' : text;
 
 if (cmd === '/start' || (cmd || '').startsWith('/start@')) {
   endSession();
@@ -1591,30 +1520,6 @@ if (text === '/cancel' || (text || '').startsWith('/cancel@')) {
   return [{ json: out }];
 }
 
-// ─── /undo ────────────────────────────────────────────────────────────────────
-// "Clear Session" parks the last edit's pre-image on the (now stateless) session
-// row, so the record survives the write that produced it. Undo restores those
-// columns and nothing else.
-
-if (cmd === '/undo' || (cmd || '').startsWith('/undo@')) {
-  let parked = {};
-  try { parked = JSON.parse(loadedRow.data || '{}'); } catch (e) { parked = {}; }
-  const rec = parked.lastWrite;
-  if (!rec || !rec.row) { reply(t(parked.lastAppend ? 'undo_not_supported' : 'undo_none'), null, true); }
-  else if (Date.now() - Number(rec.at || 0) > UNDO_WINDOW_MS) { reply(t('undo_expired')); }
-  else {
-    out.sessionState = 'UNDO_CONFIRM';
-    out.sessionData = JSON.stringify({ undo: rec });
-    reply(t('undo_confirm', { changes: undoLines(rec) }), {
-      inline_keyboard: [
-        [{ text: t('btn_confirm'), callback_data: 'undo_yes' }],
-        [{ text: t('btn_cancel'), callback_data: 'undo_no' }],
-      ],
-    }, true);
-  }
-  return [{ json: out }];
-}
-
 // ─── The saved card's three shortcuts ─────────────────────────────────────────
 //
 // The card carries the same buttons as the /start menu, but by the time it is on
@@ -1639,39 +1544,6 @@ if (!state) return [{ json: out }];
 // ─── State machine ────────────────────────────────────────────────────────────
 
 switch (state) {
-
-  case 'UNDO_CONFIRM': {
-    if (cbData === 'undo_no') { endSession(); reply(t('cancelled')); break; }
-    if (cbData !== 'undo_yes') break;
-    const rec = d.undo || {};
-    if (!rec.row) { endSession(); reply(t('undo_none')); break; }
-    if (Date.now() - Number(rec.at || 0) > UNDO_WINDOW_MS) {
-      endSession(); reply(t('undo_expired')); break;
-    }
-    if (saveLocked(d)) break;
-    d.savingAt = Date.now();
-    setState('UNDO_CONFIRM', d);
-    out.hasSave = true;
-    out.save = {
-      flow: 'edit',                    // same writer: row + named columns
-      row: rec.row,
-      fields: rec.before,              // put the old values back
-      // No `undo` record: undoing an undo would ping-pong, and the sheet history
-      // is the right tool past this point.
-      receiptFileId: '',
-      groupChatId: CFG.GROUP_CHAT_ID,
-      groupText: t('undo_group_msg', {
-        name: mdEscape(rec.name || t('empty')),
-        private_id: mdEscape(rec.privateId || t('empty')),
-        changes: undoLines(rec),
-        actor,
-      }),
-      savedText: t('undo_saved'),
-      savedNoGroupText: t('undo_saved_no_group'),
-      errorText: t('error'),
-    };
-    break;
-  }
 
   // ── Router ────────────────────────────────────────────────────────────────
   case 'CHOICE':
@@ -2495,9 +2367,6 @@ switch (state) {
 //
 // The buttons replace "أرسل /start من جديد", which asked a receptionist holding a
 // phone in one hand to type a command to do the single most likely next thing.
-// ↩️ تراجع is offered only when this save left something to undo: an appended
-// row has no pre-image, /undo answers `undo_not_supported` for it, and a button
-// that always says no is worse than no button.
 //
 // "Send Saved" and "Send Saved No Group" read these instead of a plain string,
 // which is also why they are HTTP nodes now — the Telegram node's inlineKeyboard
@@ -2505,9 +2374,6 @@ switch (state) {
 // this varies. Same reason "Send Reply" has always been an HTTP node.
 if (out.hasSave && out.save) {
   const buttons = [];
-  if (out.save.undo) {
-    buttons.push([{ text: t('btn_undo_last'), callback_data: 'go_undo' }]);
-  }
   // The whole menu, not just "new booking". Removing "أرسل /start من جديد" took
   // away the only route back to the other two flows, so offering one of them
   // would have made the card a downgrade for anyone whose next job is an

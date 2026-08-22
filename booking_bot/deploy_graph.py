@@ -25,7 +25,6 @@ What it sets up:
     confirmation, so the availability check has rows to look at.
   * "Needs Locations?" / "Read Locations": the availability tab A3:B, read only
     on the turns that draw an apartment keyboard.
-  * "Clear Session" parks the undo pre-image instead of blanking `data`.
   * A schedule branch: Report Schedule -> Report Config -> Read Report Formulas
     -> Read Report Values -> Build Reports -> Send Report.
 """
@@ -277,25 +276,9 @@ def main():
 
     # ── Undo: park the pre-image instead of blanking `data` ───────────────────
     #
-    # Only for a Clear Session still built on n8n's Data Table. The session moved
-    # to Postgres on 2026-08-14 and `build_workflow.py` writes the pre-image into
-    # the SQL itself, so there is nothing to patch there — and reaching for
-    # `parameters["columns"]` on the Postgres node would just raise.
-    #
-    # lastAppend is derived from the flow, not from "there is no undo record".
-    # An undo is itself an edit with no record of its own, and the two must not
-    # look alike: a second /undo should say "nothing to undo", not send the user
-    # off to إلغاء الحجز.
-    clear = next(n for n in wf["nodes"] if n["name"] == "Clear Session")
-    if "columns" in clear["parameters"]:
-        cols = json.loads(json.dumps(clear["parameters"]["columns"]))
-        cols["value"]["data"] = (
-            "={{ JSON.stringify({ lastWrite: $('Brain').first().json.save.undo || null,"
-            " lastAppend: ['booking','expense'].includes($('Brain').first().json.save.flow) }) }}"
-        )
-        ops.append({"type": "updateNodeParameters", "nodeName": "Clear Session",
-                    "parameters": {"columns": cols}})
-        print("  ~ Clear Session parks the undo record")
+    # Clear Session used to be rewritten here to park the last edit's pre-image,
+    # which is what /undo read. Undo was removed on 2026-08-22, so the node is
+    # left exactly as build_workflow.py builds it: state cleared, `data` blank.
 
     # ── Scheduled reports ─────────────────────────────────────────────────────
     if "Report Schedule" not in have:
