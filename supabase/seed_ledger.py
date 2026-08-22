@@ -25,7 +25,9 @@ Each seeded row carries the DIFFERENCE — a booking that already has 750 of its
 gives and `paid_at` left **NULL**. The date is the one thing the sheet never
 recorded and there is no honest way to guess it, so it is absent rather than
 made up. `source` is 'backfill' and `client_ref` is `ledger-seed:<id>`, which
-makes the rows identifiable forever and makes a second run a no-op.
+makes the rows identifiable forever. A re-run does not duplicate them: a
+booking that already has a placeholder has that placeholder GROWN by whatever
+the ledger is short by now, so a paid cell that rises later is still absorbed.
 
 A booking whose ledger holds MORE than the sheet is reported and left alone.
 That is the opposite problem — a payment recorded twice, or a sheet cell someone
@@ -95,20 +97,38 @@ def main():
             print("\ndry run — pass --apply to insert")
             return
 
-        inserted = 0
+        # A booking that already has a placeholder gets that placeholder GROWN,
+        # not a second one.
+        #
+        # This was a plain "insert only if absent", which made a re-run a no-op —
+        # right for a booking whose paid cell has not moved, wrong for one whose
+        # has. On 2026-08-22 booking 9's paid rose by 10,000 in the sheet; the
+        # existing `ledger-seed:9` row blocked the insert, and the tool printed
+        # "inserted 0" while still naming the gap it had just refused to close.
+        #
+        # A placeholder stands for "everything the ledger is missing for this
+        # booking", so the answer to a bigger gap is a bigger placeholder.
+        inserted, grown = 0, 0
         for bid, _name, gap, method, currency, _n in seed:
+            ref = CLIENT_REF.format(bid)
+            cur.execute(
+                "update payments set amount = amount + %s,"
+                " method = coalesce(method, %s) where client_ref = %s;",
+                (gap, method or None, ref))
+            if cur.rowcount:
+                grown += 1
+                continue
             cur.execute(
                 """
                 insert into payments (booking_id, amount, method, currency, paid_at,
                                       sheet_row, line_seq, source, client_ref)
-                select %s, %s, %s, %s, null, null, 1, 'backfill', %s
-                 where not exists (select 1 from payments where client_ref = %s);
+                values (%s, %s, %s, %s, null, null, 1, 'backfill', %s);
                 """,
-                (bid, gap, method or None, currency,
-                 CLIENT_REF.format(bid), CLIENT_REF.format(bid)))
+                (bid, gap, method or None, currency, ref))
             inserted += cur.rowcount
         conn.commit()
-        print(f"\ninserted {inserted} placeholder payment(s)")
+        print(f"\ninserted {inserted} placeholder payment(s),"
+              f" grew {grown} that already existed")
 
         cur.execute("select count(*), coalesce(sum(sheet_paid - payments_total), 0)"
                     " from reconcile_payments;")
