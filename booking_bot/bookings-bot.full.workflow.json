@@ -40,13 +40,13 @@
             {
               "id": "admins",
               "name": "ADMIN_USERS",
-              "value": "7941350507,@AbdulrahmanMohamed5,1226903540,5793725130",
+              "value": "7941350507,627334825,1226903540,5793725130",
               "type": "string"
             },
             {
               "id": "cashiers",
               "name": "CASHIER_USERS",
-              "value": "@Seifgamal24,@seiiffseiif",
+              "value": "1430533008,@seiiffseiif",
               "type": "string"
             },
             {

@@ -54,8 +54,29 @@ def load_workflow_id():
 
 WORKFLOW_ID = load_workflow_id()
 
-ADMIN_USERS = "7941350507,@AbdulrahmanMohamed5,1226903540,5793725130"
-CASHIER_USERS = "@Seifgamal24,@seiiffseiif"
+# Access lists. NUMERIC IDS wherever one is known, because a Telegram username
+# can be released and re-registered by anyone: the next person to claim a freed
+# handle would inherit whatever role it carries here. A numeric id belongs to an
+# account for life and cannot be transferred.
+#
+# Resolved from the bot's own execution history on 2026-08-22:
+#   @AbdulrahmanMohamed5 -> 627334825   (confirmed across 8 executions)
+#   @Seifgamal24         -> 1430533008  (confirmed across 10)
+#
+# `627334825` and `7941350507` share the display name "Abdulrahman Shaker" and
+# cannot be told apart by it. They are two live accounts, not a rename — only
+# 627334825 carries the username, so `@AbdulrahmanMohamed5` could never have
+# matched 7941350507 anyway. Both were already listed, so this narrows the entry
+# rather than widening access.
+#
+# @seiiffseiif is STILL A USERNAME and is the one remaining exposure. It appears
+# nowhere in the 858 retained executions (which begin 2026-08-15), so there is no
+# id to resolve it to — it predates this n8n instance; python_version/config.py
+# has it as the old EXPENSE_USERNAMES default. To close it, have that person send
+# /start and read the id off the resulting execution. Guessing is not an option:
+# a wrong number here grants or denies access to a live money system.
+ADMIN_USERS = "7941350507,627334825,1226903540,5793725130"
+CASHIER_USERS = "1430533008,@seiiffseiif"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
