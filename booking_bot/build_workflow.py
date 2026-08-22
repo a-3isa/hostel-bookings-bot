@@ -701,6 +701,24 @@ def build():
     g.connect("Route Save", "Build Edit Row", index=2)
     g.connect("Route Save", "Build Edit Row", index=3)
     g.connect("Route Save", "Needs Row Insert?", index=4)
+    # Both key reads carry an error path, added 2026-08-22 after a save that
+    # "did nothing".
+    #
+    # The Google Sheets OAuth credential expired. Every Sheets call started
+    # failing with "the credential needs to be reconnected" — and because these
+    # two nodes had no onError, the execution stopped HERE, before Send Save
+    # Error, before anything told the user. Answer Callback had already run, so
+    # the button's spinner stopped and that was the entire feedback: a Save that
+    # silently did nothing, twice, with a red execution in a log nobody watches.
+    #
+    # The write nodes downstream have had this since the beginning. The READS
+    # in front of them did not, and a read is the first thing to fail when a
+    # credential dies.
+    for reader in ("Read Booking Key", "Read Expense Key"):
+        node = next(n for n in g.nodes if n["name"] == reader)
+        node["onError"] = "continueErrorOutput"
+        g.connect(reader, "Send Save Error", index=1)
+
     g.connect("Read Booking Key", "Build Booking Row")
     g.connect("Build Booking Row", "Write Booking Row")
     g.connect("Read Expense Key", "Build Expense Row")
@@ -957,7 +975,13 @@ def build():
         " range: {"
         " sheetId: Number($('Config').first().json.BOOKINGS_SHEET_GID),"
         " startRowIndex: $('Brain').first().json.save.row - 1,"
-        " endRowIndex: $('Brain').first().json.save.row,"
+        # Through the last row of the block, not just the booking's own. A
+        # booking paid in two methods has its money on rows below this one, and
+        # they were left white and unmarked while the row above them was black.
+        # `formatThrough` is the booking's own row when it has no lines.
+        " endRowIndex: Math.max($('Brain').first().json.save.row,"
+        " Number($('Brain').first().json.save.formatThrough)"
+        " || $('Brain').first().json.save.row),"
         " startColumnIndex: 0, endColumnIndex: 21 },"
         " cell: { userEnteredFormat: {"
         " backgroundColor: { red: 0, green: 0, blue: 0 },"

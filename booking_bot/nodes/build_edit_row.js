@@ -27,10 +27,23 @@ const FORMULA_COLS = [
   'آخر تعديل',        // T
 ];
 
-const fields = {};
-for (const k of Object.keys(save.fields || {})) {
-  if (FORMULA_COLS.indexOf(k) !== -1) continue;
-  fields[k] = save.fields[k];
+/** One row's changed columns, with the sheet's own kept out of reach. */
+function rowItem(rowNumber, raw) {
+  const fields = {};
+  for (const k of Object.keys(raw || {})) {
+    if (FORMULA_COLS.indexOf(k) !== -1) continue;
+    fields[k] = raw[k];
+  }
+  return { json: { row_number: rowNumber, ...fields } };
 }
 
-return [{ json: { row_number: save.row, ...fields } }];
+const items = [rowItem(save.row, save.fields)];
+
+// A cancellation covers every row the booking occupies, not just its own — see
+// `lineRows` in brain.js. Nothing else emits them, so an ordinary edit is one
+// item exactly as before.
+for (const line of save.lineRows || []) {
+  if (Number(line.row) > 0) items.push(rowItem(Number(line.row), line.fields));
+}
+
+return items;
