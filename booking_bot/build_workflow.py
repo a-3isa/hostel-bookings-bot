@@ -304,9 +304,10 @@ def telegram_body(path):
 
     The Telegram node cannot express these: its inlineKeyboard is a fixed
     collection, so the number of rows and buttons is set when the graph is
-    generated, and the saved card has one row or two depending on whether the
-    save left anything to undo. Send Reply has been an HTTP node since the
-    beginning for the same reason — the calendar and the room grid vary too.
+    generated, and the saved card's menu depends on the user's role — a cashier
+    sees two entries where an admin sees four. Send Reply has been an HTTP node
+    since the beginning for the same reason: the calendar and the room grid
+    vary too.
     """
     return {
         "method": "POST",
@@ -821,10 +822,9 @@ def build():
            (2560, 540), cred=TELEGRAM_CRED)
     # HTTP, not Telegram nodes, for the reason Send Reply always has been: the
     # Telegram node's inlineKeyboard is a fixed collection, so the number of rows
-    # is decided here at design time. The saved card carries ↩️ تراجع only when
-    # the save left something to undo, so it has one row or two. The Brain emits
-    # the whole sendMessage body — savedBody / savedNoGroupBody — the same way it
-    # emits `reply`.
+    # is decided at design time, and the saved card's menu is not — an admin
+    # sees four entries and a cashier two. The Brain emits the whole sendMessage
+    # body — savedBody / savedNoGroupBody — the same way it emits `reply`.
     # `continueRegularOutput` on both, and this is not cosmetic: everything that
     # makes the save DURABLE hangs off Send Saved. The chain is
     # Write * Row -> Has Group? -> Send Saved -> Clear Session -> Build Shadow
@@ -919,11 +919,13 @@ def build():
     # so a failed write leaves the user on CONFIRM with the Save button still
     # working — see the closing comment in brain.js.
     #
-    # deploy_graph.py rewrites this node to park an undo pre-image rather than
-    # blanking `data`, and hangs the shadow write off it.
-    # The state is cleared and `data` keeps the undo pre-image, which is what
-    # /undo reads within its ten minutes. Blanking it here is what made an undo
-    # impossible for the first two months this bot existed.
+    # deploy_graph.py hangs the shadow write off this node.
+    #
+    # `data` used to keep the last edit's pre-image, which is what /undo read
+    # within its ten minutes. Undo was removed on 2026-08-22 — it left the
+    # payments ledger holding both the original payment and the one the undo
+    # created, and its cleanup was keyed on a row number, which is not a stable
+    # identity — so there is nothing to park and the row is simply cleared.
     g.node("Clear Session", "n8n-nodes-base.postgres", 2.6, {
         "operation": "executeQuery",
         "query": "insert into bot_sessions (chat_id, state, data, updated_at)\n"
@@ -933,10 +935,7 @@ def build():
                  "       data = excluded.data,\n"
                  "       updated_at = now();",
         "options": {"queryReplacement":
-                    "={{ [$('Brain').first().json.chatId,"
-                    " JSON.stringify({ lastWrite: $('Brain').first().json.save.undo"
-                    " || null, lastAppend: ['booking','expense']"
-                    ".includes($('Brain').first().json.save.flow) })] }}"},
+                    "={{ [$('Brain').first().json.chatId, '{}'] }}"},
     }, (2760, 660), cred=POSTGRES_CRED)
     # Send Saved's own edge is wired where the reply order is decided, so that
     # it lands before the group post rather than after it.

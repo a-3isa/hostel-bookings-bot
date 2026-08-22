@@ -96,14 +96,18 @@ function resetSession() { sessionRow = {}; }
 
 /**
  * Stand in for the "Clear Session" node, which runs only after the sheet write
- * actually succeeded: it ends the session and parks the undo record on the row.
+ * actually succeeded: it ends the session and blanks the row.
+ *
+ * It used to park the last edit's pre-image here, which is what /undo read.
+ * Undo was removed on 2026-08-22 — it left the payments ledger holding both the
+ * original payment and the one the undo created, and its cleanup was keyed on a
+ * row number, which is not a stable identity.
  */
 function clearSession() {
-  const save = lastBrain && lastBrain.save ? lastBrain.save : {};
   sessionRow = {
     chat_id: lastBrain ? lastBrain.chatId : '999',
     state: '',
-    data: JSON.stringify({ lastWrite: save.undo || null, lastAppend: !save.undo }),
+    data: '{}',
     updated_at: Date.now(),
   };
 }
@@ -722,7 +726,6 @@ check('the booking total is NOT reduced by the line',
 check('other edits still land on the booking row',
   r.save.bookingFields['ملاحظات'] === 'دفع الباقي', r.save.bookingFields);
 check('the database is told every row below moved down', r.save.shiftFrom === 4);
-check('a row that did not exist is not offered to /undo', r.save.undo === null);
 check('the payment act carries the line it belongs to',
   r.save.payment.lineSeq === 2 && r.save.payment.added === 900 &&
   r.save.payment.method === 'انستاباي', r.save.payment);
@@ -803,9 +806,6 @@ check('the guest identity is not rewritten on a row that already has it',
   !('اسم المقيم' in r.save.fields), Object.keys(r.save.fields));
 check('the booking total is untouched — no row was taken from it',
   r.save.bookingFields === null, r.save.bookingFields);
-check('growing an existing line IS undoable', r.save.undo !== null);
-check('the undo pre-image is the line before this payment',
-  r.save.undo.before['اجمالي ما تم دفعه'] === 1600, r.save.undo.before);
 check('nothing moved, so nothing is shifted', r.save.shiftFrom === null);
 
 payOn(SPLIT, 'xpay_vcash', 300);        // a third method, on neither row
@@ -1371,81 +1371,6 @@ r = run(cb('xnights_inf'));
 r = run(cb('ef_done'));
 check('the formula names the real row, not {r}',
   r.save.fields['عدد الليالي'] === '=TODAY()-J3', r.save.fields['عدد الليالي']);
-
-// ─── /undo ────────────────────────────────────────────────────────────────────
-
-section('undo: puts an edit back');
-resetSession();
-sheetRows = SHEET;
-run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));   // paid = 1200
-sheetRows = null;
-run(cb('ef_paid')); run(msg('300')); run(cb('xpay_cash')); run(cb('xleft_no'));
-r = run(cb('xedone'));
-check('the save carries a pre-image', Boolean(r.save.undo), r.save);
-check('the pre-image holds the OLD values',
-  r.save.undo.before['اجمالي ما تم دفعه'] === 1200 &&
-  r.save.undo.before['طريقة الدفع'] === 'كاش',
-  r.save.undo.before);
-const undoRec = r.save.undo;
-clearSession();                                   // the write succeeded
-
-r = run(msg('/undo'));
-check('undo asks for confirmation', r.reply.text.startsWith('↩️ *تراجع عن آخر تعديل؟*'),
-  r.reply.text);
-check('it shows the reversal direction', r.reply.text.includes('اجمالي ما تم دفعه: 1500 ← 1200'),
-  r.reply.text);
-r = run(cb('undo_no'));
-check('declining writes nothing', r.hasSave === false);
-
-/** Re-park a known record, as "Clear Session" would have left it. */
-function parkUndo(rec) {
-  sessionRow = { chat_id: '999', state: '', updated_at: Date.now(),
-    data: JSON.stringify({ lastWrite: rec, lastAppend: !rec }) };
-}
-parkUndo(undoRec);
-run(msg('/undo'));
-r = run(cb('undo_yes'));
-check('undo writes', r.hasSave === true);
-check('it targets the same row', r.save.row === 3, r.save.row);
-check('it restores the old values',
-  r.save.fields['اجمالي ما تم دفعه'] === 1200 && r.save.fields['طريقة الدفع'] === 'كاش',
-  r.save.fields);
-check('an undo cannot itself be undone', r.save.undo === undefined, r.save.undo);
-check('the group is told', r.save.groupText.includes('↩️ *تراجع عن تعديل*'), r.save.groupText);
-
-section('undo: window, absence, and appends');
-sessionRow = { chat_id: '999', state: '', updated_at: Date.now(),
-  data: JSON.stringify({ lastWrite: null, lastAppend: false }) };
-r = run(msg('/undo'));
-check('nothing to undo', r.reply.text === 'لا يوجد تعديل يمكن التراجع عنه.', r.reply.text);
-
-sessionRow = { chat_id: '999', state: '', updated_at: Date.now(),
-  data: JSON.stringify({ lastWrite: null, lastAppend: true }) };
-r = run(msg('/undo'));
-check('a new booking says to use إلغاء الحجز instead',
-  r.reply.text.includes('التراجع متاح للتعديلات والدفعات فقط'), r.reply.text);
-
-sessionRow = { chat_id: '999', state: '', updated_at: Date.now(),
-  data: JSON.stringify({ lastWrite: { row: 3, at: Date.now() - 11 * 60 * 1000, before: {} } }) };
-r = run(msg('/undo'));
-check('past 10 minutes it is refused', r.reply.text.startsWith('⌛ انتهت مهلة التراجع'),
-  r.reply.text);
-
-// A blank cell is a value: undo must clear it again, not leave the new one.
-resetSession();
-sheetRows = [{ ...SHEET[1], 'ملاحظات': '' }];
-run(msg('/start')); run(cb('choice_edit')); run(msg('77777'));
-sheetRows = null;
-run(cb('ef_notes'));
-run(msg('وصل متأخر'));
-r = run(cb('ef_done'));
-check('a previously blank cell is recorded as empty, not skipped',
-  'ملاحظات' in r.save.undo.before && r.save.undo.before['ملاحظات'] === '',
-  r.save.undo.before);
-clearSession();
-run(msg('/undo'));
-r = run(cb('undo_yes'));
-check('and undo blanks it again', r.save.fields['ملاحظات'] === '', r.save.fields);
 
 // ─── Double-tap protection on every save path ─────────────────────────────────
 
