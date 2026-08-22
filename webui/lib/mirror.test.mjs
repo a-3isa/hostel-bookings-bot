@@ -16,6 +16,8 @@ import {
 import { safeCell } from './sheets.js';
 import { calendarDate, dateInput, day } from './fmt.js';
 import { safeNext } from './nav.js';
+import { issueToken, verifyToken } from './session.js';
+import { SESSION_MS, readToken, sameHex, tokenFresh } from './token.js';
 
 const CASH = 'كاش';
 const INSTA = 'انستاباي';
@@ -482,4 +484,64 @@ test('nothing at all is the root', () => {
   assert.equal(safeNext(''), '/');
   assert.equal(safeNext(null), '/');
   assert.equal(safeNext(undefined), '/');
+});
+
+// -- the session cookie -----------------------------------------------------
+//
+// It used to be sha256("bookings-webui:" + password) — the same string every
+// time, valid forever. maxAge told the BROWSER when to forget it; the server
+// would have taken it a year later. One leak was every session, until the
+// password itself was changed, which signs everyone out.
+
+const PW = 'correct horse battery staple';
+
+test('a token this password issued verifies', () => {
+  assert.equal(verifyToken(PW, issueToken(PW)), true);
+});
+
+test('another password does not', () => {
+  assert.equal(verifyToken('something else', issueToken(PW)), false);
+});
+
+test('two sign-ins are different strings', () => {
+  assert.notEqual(issueToken(PW), issueToken(PW));
+});
+
+test('a token expires, and the server is what decides', () => {
+  const old = issueToken(PW, Date.now() - SESSION_MS - 1000);
+  assert.equal(verifyToken(PW, old), false);
+  const fresh = issueToken(PW, Date.now() - 60_000);
+  assert.equal(verifyToken(PW, fresh), true);
+});
+
+test('a token issued in the future is refused', () => {
+  assert.equal(verifyToken(PW, issueToken(PW, Date.now() + 60 * 60 * 1000)), false);
+});
+
+test('the timestamp cannot be edited without breaking the signature', () => {
+  const t = readToken(issueToken(PW, Date.now() - SESSION_MS - 1000));
+  const forged = `${Date.now()}.${t.nonce}.${t.signature}`;
+  assert.equal(verifyToken(PW, forged), false);
+});
+
+test('junk in the cookie is refused rather than throwing', () => {
+  for (const bad of ['', null, undefined, 'x', 'a.b.c', '1.2', `${Date.now()}.zz.qq`,
+                     `${Date.now()}.${'a'.repeat(24)}.${'b'.repeat(63)}`]) {
+    assert.equal(verifyToken(PW, bad), false, String(bad));
+  }
+});
+
+test('the shape checks the edge runtime shares agree with the server', () => {
+  const value = issueToken(PW);
+  const parsed = readToken(value);
+  assert.ok(parsed);
+  assert.equal(tokenFresh(parsed.issuedAt), true);
+  assert.equal(value, `${parsed.issuedAt}.${parsed.nonce}.${parsed.signature}`);
+});
+
+test('sameHex compares without leaking length as a match', () => {
+  assert.equal(sameHex('abcd', 'abcd'), true);
+  assert.equal(sameHex('abcd', 'abce'), false);
+  assert.equal(sameHex('abcd', 'abcde'), false);
+  assert.equal(sameHex('abcd', null), false);
 });

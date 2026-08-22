@@ -50,8 +50,15 @@ const SHAPE = `
     -- today, which is how priceCell tells "still the formula" from "somebody
     -- typed a price".
     b.nightly_rate, b.total_adjustment, b.effective_total,
+    -- coalesce(b.merged_into, b.id), matching supabase/mirror.py. A booking
+    -- that is itself a follower carries its money under the booking it was
+    -- merged into, so asking about its own id answers about an empty set and
+    -- the two writers disagree on whether to skip it. No follower rows exist
+    -- today — the collapse retired that model — but the column, its index and
+    -- the delete route's guard all survive, so the two must still agree.
     (select count(distinct p.currency) > 1
-       from payments p where p.booking_id = b.id) as mixed_currency,
+       from payments p
+      where p.booking_id = coalesce(b.merged_into, b.id)) as mixed_currency,
     (select coalesce(jsonb_agg(jsonb_build_object(
               'id', l.id, 'seq', l.line_seq, 'sheet_row', l.sheet_row,
               'amount', sums.amount, 'method', l.method, 'currency', l.currency)
@@ -74,6 +81,28 @@ const SHAPE = `
   where b.id = $1
 `;
 
+/**
+ * One lock for every operation that renumbers sheet rows.
+ *
+ * Transaction-scoped, so it is released by COMMIT or ROLLBACK and cannot be
+ * leaked by a crashed lambda. The key is a constant: the thing being protected
+ * is the ROW NUMBERING of the bookings tab, which is global. A per-booking lock
+ * would not help — inserting a line under booking 21 shifts every row below it,
+ * including rows belonging to bookings nobody has locked.
+ *
+ * Without it, two saves that each open a line compute their target row from
+ * separate reads and interleave: A inserts at 500, B inserts at 500 pushing A's
+ * to 501, then B's transaction claims 500 and A's claims it too. The sheet and
+ * the database end up disagreeing about which row is whose, and because both
+ * rows are ones this code just created, the column-U guard is deliberately
+ * skipped for them — so each booking's amount, method and guest name is written
+ * onto the other's row.
+ *
+ * Anything that shifts rows must take this: openLine here, retireExpenseRow
+ * below, and the booking delete route.
+ */
+const ROW_LOCK = "select pg_advisory_xact_lock(hashtext('bookings-sheet-rows'))";
+
 // Everything below this row moves down by one, in all three tables that
 // remember a row number. Renumbered through negatives first: sheet_row is
 // UNIQUE and not deferrable, so a single incrementing UPDATE collides with a
@@ -92,7 +121,6 @@ async function shiftRowsDown(client, atRow) {
 // exist. The row lands directly under the booking's block, purple, with the
 // formatting and fill-down formulas of the row above.
 async function openLine(booking, line) {
-  const atRow = blockEnd(booking) + 1;
   // The Google call goes INSIDE the transaction, and last. If Sheets refuses,
   // the rollback puts every row number back and nothing has happened anywhere.
   // The other way round — insert first, then renumber — leaves the sheet one
@@ -101,6 +129,16 @@ async function openLine(booking, line) {
   // so the column-U guard refuses it and mirror.py reads it as a hand edit.
   // The delete route and retireExpenseRow have always done it this way.
   return tx(async (client) => {
+    await client.query(ROW_LOCK);
+    // The row is computed INSIDE the lock, from a fresh read. Taking it from
+    // the `booking` this function was handed would use a block end measured
+    // before anyone queued, which is the stale number the race is about.
+    const fresh = (await client.query(
+      `select b.sheet_row,
+              coalesce((select max(l.sheet_row) from booking_lines l
+                         where l.booking_id = b.id), b.sheet_row) as block_end
+         from bookings b where b.id = $1`, [booking.id])).rows[0];
+    const atRow = Number(fresh.block_end || fresh.sheet_row) + 1;
     const created = (await client.query(
       `insert into booking_lines (booking_id, line_seq, method, currency)
        values ($1,$2,$3,$4) returning id`,
@@ -305,6 +343,7 @@ export async function retireExpenseRow(row, was) {
     if (!guard.ok) return { published: false, reason: guard.reason, found: guard.found };
 
     await tx(async (client) => {
+      await client.query(ROW_LOCK);
       await client.query(
         'update expenses set sheet_row = -(sheet_row - 1) where sheet_row > $1', [row]);
       await client.query(
