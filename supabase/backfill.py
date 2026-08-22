@@ -188,26 +188,69 @@ def load_registry(sh):
     return reg
 
 
+# An open-ended stay is the ONE formula that keeps counting: `=TODAY()-J96`,
+# which is what the bot writes and what makes عدد الليالي grow each night.
+OPEN_ENDED_RE = re.compile(r"TODAY\s*\(", re.IGNORECASE)
+
+
+def is_open_ended(nights_formula):
+    """Is عدد الليالي a live count, or just a number arrived at by arithmetic?
+
+    This used to be `startswith("=")` — any formula at all meant open-ended.
+    Row 96 was typed as `= 5+9` on 2026-08-22: a fourteen-night stay whose
+    count somebody worked out in the cell. Read as open-ended, its nights were
+    stored as NULL and `effective_total` recomputed the price from
+    `today - arrival`, so a 9,800 booking reported as 3,500 and the reconcile
+    called it a difference that no amount of re-running could settle.
+
+    A stay is open-ended only when the sheet cannot yet know how long it is —
+    when the formula depends on TODAY(). `= 5+9` is a constant the moment it is
+    typed, and 14 is simply the answer.
+    """
+    text = str(nights_formula or "").strip()
+    return text.startswith("=") and bool(OPEN_ENDED_RE.search(text))
+
+
 def continuation_seq(row, id_of, named_ids, top_seq):
-    """The line sequence of a nameless row, or None if it is not a line at all.
+    """The line sequence of a row that repeats an id, or None if it is not a line.
 
-    Most nameless rows are the formula-only tail and are skipped. One shape is
-    not: a row carrying MONEY, naming no guest, no apartment and no room, and
-    repeating in column U the id of a booking a named row above it already
-    holds. That is the same stay paid a second time in another method — طريقة
-    الدفع has room for exactly one — and the sheet shows it on its own row.
+    A booking id belongs to exactly ONE row: the booking's own. A row further
+    down carrying the same id is a continuation LINE of it — the same stay paid
+    a second time in another method, which needs its own row because طريقة
+    الدفع has room for exactly one.
 
-    The bot spells such a row `16-2` when it writes one, and parse_sheet_id
-    reads the suffix. Row 18 of إدخال الحجوزات was merged into row 17 by hand
-    on 2026-08-17 and carries a bare `16`, which reads as line 1 and collides
-    with the booking's own row. The sheet is the reference and is not edited to
-    suit the database, so the line is recognised from what the row IS rather
-    than from a suffix nobody typed: the sequence is simply the next one free
-    for that booking.
+    The bot spells such a row `1102-2` and `parse_sheet_id` reads the suffix.
+    A line added BY HAND does not get the suffix: the row is inserted under the
+    booking and column U is copied down with everything else, so it reads as a
+    bare `1102` — the booking's own id, on a second row.
+
+    Taken literally that says the booking lives on both rows, and the damage is
+    not theoretical. On 2026-08-22 a 1,000 كاش line was added by hand under
+    خالد عاشور on row 89. `reindex.py` re-points a booking to wherever column U
+    says it is, so it moved booking 1102 from row 88 onto row 89 — its own
+    payment line — and `backfill.py`, which upserts keyed on `sheet_row`, wrote
+    row 89's content onto the booking that used to be there and every row below
+    it in turn. Ten guests' names, totals and paid amounts landed on each
+    other's records in one run.
+
+    So a repeat is read as a line, and the sequence is the next one free.
+
+    THE NAME NO LONGER MATTERS. This used to require a nameless row, which was
+    right for row 18 (merged by hand, guest cell left blank) and wrong for
+    everything else: the bot itself repeats the guest's name, apartment and room
+    on every line it writes, because the sheet's own formulas read those cells
+    per row. Requiring a blank name meant the common shape was the one that got
+    through. What identifies a line is the repeated id and nothing else.
+
+    A row with money is still required. A blank row that merely inherited a
+    stamp is not a payment of anything.
+
+    If two genuinely different bookings ever carry the same id — a copied row —
+    the second is read as a line rather than as a booking. That is the safe way
+    to be wrong: a line is money attributed to a booking that really exists,
+    while the alternative overwrites a different guest's record.
     """
     if not id_of or id_of not in named_ids:
-        return None
-    if cell(row, B["apartment"]) or cell(row, B["room"]):
         return None
     if not (cell(row, B["paid"]) or cell(row, B["total"])):
         return None
@@ -230,19 +273,25 @@ def load_bookings(sh):
     for i, row in enumerate(values, start=2):
         name = cell(row, B["guest_name"])
         id_of, line_seq = parse_sheet_id(cell(row, 20))
-        if not name:
+        # A row repeating an id a NAMED row above already holds is that
+        # booking's continuation line, named or not — see continuation_seq.
+        is_line = False
+        if id_of and id_of in named_ids and line_seq == 1:
             seq = continuation_seq(row, id_of, named_ids, top_seq)
-            if seq is None:
-                continue                    # formula-only tail rows
-            line_seq = seq
+            if seq is not None:
+                line_seq, is_line = seq, True
+        # An unstamped row parses to (None, None), so this cannot test line_seq:
+        # the formula-only tail would sail straight through and be adopted as
+        # forty empty bookings. Only a row that IS something is kept.
+        if not name and not is_line:
+            continue                        # formula-only tail rows
         if id_of:
             if name:
                 named_ids.add(id_of)
             top_seq[id_of] = max(top_seq.get(id_of, 0), line_seq or 1)
         frow = formulas[i - 2] if i - 2 < len(formulas) else []
         nights_raw = cell(row, B["nights"])
-        # A live formula in عدد الليالي is what "open-ended" means in the sheet.
-        is_open = str(cell(frow, B["nights"])).startswith("=")
+        is_open = is_open_ended(cell(frow, B["nights"]))
         out.append({
             "sheet_row": i,
             "booking_ref": cell(row, B["booking_ref"]),
