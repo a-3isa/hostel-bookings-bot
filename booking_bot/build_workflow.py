@@ -580,9 +580,18 @@ def build():
 
     # booking: find the last row from the key column, then write only the input
     # columns onto row_number.
+    # No `alwaysOutputData`. It used to be here so an empty tab still produced an
+    # item for the builder, but the range starts at row 1 — the header row, which
+    # is never empty — so a successful read always returns one.
+    #
+    # With the error output added on 2026-08-22 it became actively wrong:
+    # `alwaysOutputData` puts an EMPTY item on output 0 even when the node
+    # failed, so a dead credential ran BOTH branches — the empty item down to
+    # the writer, which failed too, and the real error down to Send Save Error.
+    # Execution 2446 sent the user «حدث خطأ أثناء الحفظ» twice for one tap.
     g.node("Read Booking Key", "n8n-nodes-base.httpRequest", 4.2,
            values_get("BOOKINGS_TAB", BOOKING_KEY_RANGE), (1560, 480),
-           cred=SHEETS_CRED, alwaysOutputData=True)
+           cred=SHEETS_CRED)
     g.node("Build Booking Row", "n8n-nodes-base.code", 2,
            {"jsCode": read_source("build_booking_row.js")}, (1760, 480))
     g.node("Write Booking Row", "n8n-nodes-base.googleSheets", 4.7,
@@ -591,7 +600,7 @@ def build():
     # expense: the same shape against the other tab and its own key column.
     g.node("Read Expense Key", "n8n-nodes-base.httpRequest", 4.2,
            values_get("EXPENSE_TAB", EXPENSE_KEY_RANGE), (1560, 660),
-           cred=SHEETS_CRED, alwaysOutputData=True)
+           cred=SHEETS_CRED)
     g.node("Build Expense Row", "n8n-nodes-base.code", 2,
            {"jsCode": read_source("build_expense_row.js")}, (1760, 660))
     g.node("Write Expense Row", "n8n-nodes-base.googleSheets", 4.7,
