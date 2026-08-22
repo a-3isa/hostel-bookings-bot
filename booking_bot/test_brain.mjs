@@ -22,8 +22,13 @@ const CONFIG = {
   EXPENSE_TAB: 'مصروفات عامة',
   GROUP_CHAT_ID: '-5001910339',
   EXPENSE_GROUP_CHAT_ID: '-5072732996',
-  ADMIN_USERS: '7941350507,@AbdulrahmanMohamed5,1226903540,5793725130',
-  CASHIER_USERS: '@Seifgamal24,@seiiffseiif',
+  // The production lists, verbatim. Numeric ids everywhere an id is known — a
+  // username can be released and re-registered, and the next person to claim a
+  // freed handle would inherit its role. @seiiffseiif is the one entry still
+  // matched by name, because that account appears nowhere in the retained
+  // execution history and there is no id to resolve it to.
+  ADMIN_USERS: '7941350507,627334825,1226903540,5793725130',
+  CASHIER_USERS: '1430533008,@seiiffseiif',
   TIMEZONE: 'Africa/Cairo',
 };
 
@@ -128,10 +133,17 @@ function buildWrite(filledRows) {
 
 const USER = { id: 7941350507, first_name: 'Ahmed', last_name: 'Isa', username: 'ahmed' };
 // Admin listed by @username rather than by id — no username on the id list.
-const ADMIN_BY_NAME = { id: 313131, first_name: 'Abdulrahman', username: 'AbdulrahmanMohamed5' };
+// The username-matching path is still live for exactly one account, so it still
+// needs a test. No ADMIN is matched by name any more — @AbdulrahmanMohamed5 was
+// resolved to 627334825 on 2026-08-22 — so the case is exercised through the
+// cashier who could not be resolved.
+const CASHIER_BY_NAME = { id: 313131, first_name: 'Seif', username: 'seiiffseiif' };
 const OTHER = { id: 111, first_name: 'Sara', username: 'someone' };
 // The cashier: expenses + adding a payment, nothing else.
-const EXPUSER = { id: 222, first_name: 'Seif', username: 'Seifgamal24' };
+// The real numeric id, since @Seifgamal24 is no longer what grants the role.
+// The username is kept on the payload because the account really does have one:
+// what changed is that the bot no longer decides anything from it.
+const EXPUSER = { id: 1430533008, first_name: 'Seif', username: 'Seifgamal24' };
 const CHAT = { id: 999 };
 
 const msg = (text, from = USER) => ({ message: { chat: CHAT, from, text } });
@@ -174,20 +186,27 @@ check('admin menu has booking, expense, edit and payment',
   'choice_booking,choice_expense,choice_edit,choice_paid',
   r.reply.reply_markup.inline_keyboard);
 
-r = run(msg('/start', ADMIN_BY_NAME));
-check('admin listed by @username also gets the full menu',
+r = run(msg('/start', { id: 627334825, first_name: 'Abdulrahman' }));
+check('the admin resolved from @AbdulrahmanMohamed5 gets the full menu by id',
   r.reply.reply_markup.inline_keyboard.length === 4, r.reply.reply_markup.inline_keyboard);
+
+r = run(msg('/start', CASHIER_BY_NAME));
+check('the one remaining @username still matches, and as a cashier',
+  r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() ===
+  'choice_expense,choice_paid',
+  r.reply.reply_markup.inline_keyboard);
+
+r = run(msg('/start', { id: 1430533008, first_name: 'seif', last_name: 'gamal' }));
+check('the cashier resolved from @Seifgamal24 matches by id, without a username',
+  r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() ===
+  'choice_expense,choice_paid',
+  r.reply.reply_markup.inline_keyboard);
 
 // The two people who were on the old BOOKING_USER_IDS / EXPENSE_USERNAMES lists.
 // Dropping either would silently lock a working receptionist out of the live bot.
 r = run(msg('/start', { id: 5793725130, first_name: 'Mostafa' }));
 check('the second receptionist kept full access',
   r.reply.reply_markup.inline_keyboard.length === 4, r.reply.reply_markup.inline_keyboard);
-r = run(msg('/start', { id: 444, first_name: 'Seif', username: 'seiiffseiif' }));
-check('the old expense user is now a cashier',
-  r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() ===
-  'choice_expense,choice_paid',
-  r.reply.reply_markup.inline_keyboard);
 
 r = run(msg('/start', EXPUSER));
 check('cashier gets a two-option menu', r.reply.text === 'اختر العملية:', r.reply.text);
