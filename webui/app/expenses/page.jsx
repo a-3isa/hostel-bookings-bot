@@ -5,6 +5,40 @@ import { dateTimeInput, day, num } from '../../lib/fmt';
 import { Empty, Tile } from '../../components/ui';
 
 export const dynamic = 'force-dynamic';
+// Sequential Google round trips per save — see the booking page.
+export const maxDuration = 30;
+
+// Why a sheet write was refused, in the reader's language. `publishBooking`
+// leaves the database correct and the sheet stale, and supabase/mirror.py
+// repairs it on its next run — so none of these is data loss. They are all "the
+// sheet has not caught up yet, and here is why", which is exactly what nobody
+// could see before.
+const SHEET_REFUSED = {
+  'not-configured': 'الاتصال بجوجل شيت غير مضبوط على الخادم.',
+  'no-booking': 'لم يُعثر على الحجز عند الكتابة.',
+  'no-expense': 'لم يُعثر على المصروف عند الكتابة.',
+  'mixed-currency': 'الحجز مدفوع بأكثر من عملة، والشيت له خانة واحدة للمدفوع.',
+  unstamped: 'صف الشيت لا يحمل معرف النظام في العمود U.',
+  mismatch: 'العمود U في هذا الصف يشير إلى سجل آخر.',
+  'no-row': 'لا يوجد صف في الشيت لهذا السجل.',
+  empty: 'الصف المستهدف في الشيت فارغ.',
+  error: 'تعذّر الاتصال بجوجل شيت.',
+};
+
+function SheetNotice({ reason }) {
+  if (!reason) return null;
+  return (
+    <div className="banner">
+      <span className="ico">⚠</span>
+      <div>
+        تم الحفظ في Postgres، لكن <strong>الشيت لم يتغيّر</strong> —{' '}
+        {SHEET_REFUSED[reason] ?? 'سبب غير معروف.'}{' '}
+        سيُصحّح ذلك عند تشغيل <code>supabase/mirror.py</code>.
+      </div>
+    </div>
+  );
+}
+
 
 const SORTS = {
   id: 'e.id',
@@ -88,6 +122,7 @@ export default async function Expenses({ searchParams }) {
       {raw?.saved && (
         <div className="banner good"><span className="ico">✓</span><div>تم الحفظ في Postgres وكُتب إلى تبويب «مصروفات عامة».</div></div>
       )}
+      <SheetNotice reason={raw?.sheet} />
 
       <div className="kpis">
         <Tile label="عدد المصروفات" value={totals.n} />

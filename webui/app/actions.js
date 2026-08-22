@@ -4,7 +4,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
-import { COOKIE, sessionToken, signedIn } from '../lib/auth';
+import { COOKIE, SESSION_MS, issueToken, signedIn } from '../lib/auth';
 import { one, q, tx } from '../lib/db';
 import { bool, integer, number, text } from '../lib/fmt';
 import { safeNext } from '../lib/nav';
@@ -103,12 +103,15 @@ export async function login(formData) {
   attempts.delete(who);
 
   const jar = await cookies();
-  jar.set(COOKIE, sessionToken(password), {
+  // A fresh token per sign-in: it carries its own issue time, signed, so the
+  // server can refuse it once it is old. `maxAge` is still set so the browser
+  // tidies up, but it is no longer what enforces the window — see lib/auth.js.
+  jar.set(COOKIE, issueToken(password), {
     httpOnly: true,
     sameSite: 'lax',
     secure: true,
     path: '/',
-    maxAge: 60 * 60 * 12,
+    maxAge: SESSION_MS / 1000,
   });
   redirect(next);
 }
@@ -170,6 +173,22 @@ function bookingFields(formData, room) {
   };
 }
 
+/**
+ * Turn a publish result into a query string the page can show.
+ *
+ * `publishBooking` and `publishExpense` have always returned {published,
+ * reason} and every call site threw it away. A write refused because a row's
+ * column U names a different booking, or skipped because the booking mixes
+ * currencies, produced exactly the same green ✅ as a success — and the reason
+ * went to console.error, which on Vercel means nobody sees it. That is how the
+ * sheet and the database drift apart without anyone noticing, which is the one
+ * failure this whole path exists to prevent.
+ */
+function sheetFlag(result) {
+  if (!result || result.published) return '';
+  return `&sheet=${encodeURIComponent(result.reason || 'error')}`;
+}
+
 export async function createBooking(formData) {
   await requireAuth();
   const room = await roomFields(formData);
@@ -192,11 +211,11 @@ export async function createBooking(formData) {
   // so this is what seats it — the nine other tabs cannot see it until it has
   // one. publishBooking never throws: if Sheets is down the booking is still
   // saved and supabase/mirror.py picks it up.
-  await publishBooking(created.id);
+  const sheet = sheetFlag(await publishBooking(created.id));
 
   revalidatePath('/');
   revalidatePath('/bookings');
-  redirect(`/bookings/${created.id}?saved=1`);
+  redirect(`/bookings/${created.id}?saved=1${sheet}`);
 }
 
 export async function saveBooking(id, formData) {
@@ -228,11 +247,11 @@ export async function saveBooking(id, formData) {
     );
   });
 
-  await publishBooking(id);
+  const sheet = sheetFlag(await publishBooking(id));
 
   revalidatePath('/');
   revalidatePath('/bookings');
-  redirect(`/bookings/${id}?saved=1`);
+  redirect(`/bookings/${id}?saved=1${sheet}`);
 }
 
 export async function setCancelled(id, cancelled) {
@@ -253,11 +272,11 @@ export async function setCancelled(id, cancelled) {
     );
   });
 
-  await publishBooking(id);
+  const sheet = sheetFlag(await publishBooking(id));
 
   revalidatePath('/');
   revalidatePath('/bookings');
-  redirect(`/bookings/${id}?saved=1`);
+  redirect(`/bookings/${id}?saved=1${sheet}`);
 }
 
 // Deleting a booking lives in app/bookings/[id]/delete/confirm/route.js, not
@@ -330,11 +349,11 @@ export async function addPayment(bookingId, formData) {
   // booking's block, shifting everything below it down by one. The rule and
   // the row insert both live in lib/publish.js — the same ones
   // supabase/mirror.py applies — so the dashboard is not deciding them here.
-  await publishBooking(bookingId);
+  const sheet = sheetFlag(await publishBooking(bookingId));
 
   revalidatePath('/bookings');
   revalidatePath(`/bookings/${bookingId}`);
-  redirect(`/bookings/${bookingId}?saved=1`);
+  redirect(`/bookings/${bookingId}?saved=1${sheet}`);
 }
 
 export async function deletePayment(bookingId, paymentId) {
@@ -356,9 +375,9 @@ export async function deletePayment(bookingId, paymentId) {
   // The line the payment was on keeps its row; its cell simply shrinks by what
   // was removed. An emptied line is not torn out of the sheet from here —
   // deleting a row moves every row beneath it and that is the mirror's call.
-  await publishBooking(bookingId);
+  const sheet = sheetFlag(await publishBooking(bookingId));
   revalidatePath(`/bookings/${bookingId}`);
-  redirect(`/bookings/${bookingId}?saved=1`);
+  redirect(`/bookings/${bookingId}?saved=1${sheet}`);
 }
 
 // ── expenses ────────────────────────────────────────────────────────────────
@@ -396,10 +415,10 @@ export async function createExpense(formData) {
   // An expense with no row of its own is appended at the bottom of the tab, the
   // way a person adds one. Nothing below moves, so no stored row number goes
   // stale.
-  await publishExpense(created.id);
+  const sheet = sheetFlag(await publishExpense(created.id));
 
   revalidatePath('/expenses');
-  redirect('/expenses?saved=1');
+  redirect(`/expenses?saved=1${sheet}`);
 }
 
 export async function saveExpense(id, formData) {
@@ -424,10 +443,10 @@ export async function saveExpense(id, formData) {
      f.notes, f.payment_method, f.responsible, f.spent_at],
   );
 
-  await publishExpense(id, was);
+  const sheet = sheetFlag(await publishExpense(id, was));
 
   revalidatePath('/expenses');
-  redirect('/expenses?saved=1');
+  redirect(`/expenses?saved=1${sheet}`);
 }
 
 export async function deleteExpense(id) {
@@ -437,9 +456,9 @@ export async function deleteExpense(id) {
   const was = await one(
     'select sheet_row, item, amount from expenses where id = $1', [id]);
   await q('delete from expenses where id = $1', [id]);
-  if (was) await retireExpenseRow(was.sheet_row, was);
+  const sheet = was ? sheetFlag(await retireExpenseRow(was.sheet_row, was)) : '';
   revalidatePath('/expenses');
-  redirect('/expenses?saved=1');
+  redirect(`/expenses?saved=1${sheet}`);
 }
 
 // ── deposits ────────────────────────────────────────────────────────────────

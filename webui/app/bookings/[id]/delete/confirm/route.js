@@ -87,6 +87,11 @@ export async function POST(request, { params }) {
   const client = await pgPool().connect();
   try {
     await client.query('begin');
+    // The same lock every row-renumbering path takes — see ROW_LOCK in
+    // lib/publish.js. Deleting rows shifts everything below them, so a delete
+    // running beside a line-open would leave the two disagreeing about which
+    // row is whose.
+    await client.query("select pg_advisory_xact_lock(hashtext('bookings-sheet-rows'))");
     await client.query('delete from bookings where id = $1', [bookingId]);
 
     // Deleting a sheet row closes the gap, so every row below it moves up by one
