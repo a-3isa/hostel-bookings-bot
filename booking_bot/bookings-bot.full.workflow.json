@@ -629,7 +629,6 @@
         },
         "options": {}
       },
-      "alwaysOutputData": true,
       "credentials": {
         "googleSheetsOAuth2Api": {
           "id": "REPLACE_ME",
@@ -718,7 +717,6 @@
         },
         "options": {}
       },
-      "alwaysOutputData": true,
       "credentials": {
         "googleSheetsOAuth2Api": {
           "id": "REPLACE_ME",
