@@ -175,7 +175,14 @@ def main():
         # target row makes the second phase collide — seen live on 2026-08-12,
         # where a duplicate created from a blank inserted row occupied row 18
         # and the re-point died on bookings_sheet_row_key.
-        targets = {now for _bid, _was, now in repoint}
+        #
+        # ADOPTED rows are targets too. That was missing until 2026-08-22, when
+        # a test booking whose sheet row had been deleted was still holding row
+        # 105 in the database while a hand-typed booking on the sheet's row 105
+        # was being adopted: the insert died on the same unique constraint and
+        # took the whole run with it. An adoption claims a row exactly as a
+        # re-point does, so it needs the row cleared exactly as one does.
+        targets = {now for _bid, _was, now in repoint} | set(adoptable)
         movers = {bid for bid, _was, _now in repoint}
         cur.execute("select id from bookings where sheet_row = any(%s) and id <> all(%s);",
                     (list(targets), list(movers) or [0]))
