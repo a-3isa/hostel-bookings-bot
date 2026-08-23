@@ -65,19 +65,62 @@ function sheetId(raw) {
   return { id: String(Number(m[1])), seq: String(seq) };
 }
 
+/**
+ * A row REPEATING an id a named row above already holds is that booking's
+ * continuation line, whether or not the suffix was ever typed.
+ *
+ * `sheetId` above reads `413-2` when the bot wrote the row. A line added by
+ * hand never gets the suffix: the row is inserted under the booking and column
+ * U is copied down with everything else, so it reads as a bare `413` on a
+ * second row. Taken literally that says the booking lives on both.
+ *
+ * The morning reconcile got this wrong in two different ways at once. Rows 88
+ * and 89 — خالد عاشور's cash line — both came through as line 1, so the fold
+ * happened to sum them and nothing was reported. Row 18 — حسام's فودافون كاش
+ * line, merged by hand with the guest cell left blank — was dropped entirely
+ * by the `if (!name) continue` above, so its 3,500 was missing from the sheet
+ * side and the booking was reported as differing every single morning, in the
+ * message the group reads, while the hand-run Python reconcile said zero.
+ *
+ * `continuation_seq` in supabase/backfill.py is the same rule. Money is
+ * required: a blank row that merely inherited a stamp is not a payment.
+ */
+const namedIds = new Set();
+const topSeq = new Map();
+
+function money(j) {
+  return String(j['اجمالي ما تم دفعه'] ?? '').trim()
+      || String(j['اجمالي سعر الحجز'] ?? '').trim();
+}
+
 const values = [];
 for (const j of rows) {
   const name = String(j['اسم المقيم'] || '').trim();
-  if (!name) continue;                     // formula-only tail rows
   const row = Number(j.row_number);
   if (!row) continue;
+  const id = sheetId(j['معرف النظام']);
+  const numericId = id.id === 'NULL' ? null : Number(id.id);
+
+  let seq = id.seq === 'NULL' ? null : Number(id.seq);
+  let isLine = false;
+  if (numericId !== null && seq === 1 && namedIds.has(numericId) && money(j)) {
+    seq = (topSeq.get(numericId) || 1) + 1;
+    isLine = true;
+  }
+  // The formula-only tail is nameless AND is not a line. Testing the name alone
+  // is what dropped row 18.
+  if (!name && !isLine) continue;
+  if (numericId !== null) {
+    if (name && !isLine) namedIds.add(numericId);
+    topSeq.set(numericId, Math.max(topSeq.get(numericId) || 0, seq || 1));
+  }
   // Column U — the booking's database id, written by the bot and by
   // reindex.py. This is what lets the reconcile key on the BOOKING instead of
   // the row it happens to occupy: inserting a row renumbers everything beneath
   // it, and keying on sheet_row reported forty of those as differences once.
   // Blank on a row nobody has stamped yet, and the reconcile falls back to
   // sheet_row for those.
-  const key = sheetId(j['معرف النظام']);
+  const key = { id: id.id, seq: seq === null ? 'NULL' : String(seq) };
   values.push(
     `(${row}, ${s(name)}, ${s(j['اسم الشقة'])}, ${s(j['رقم الغرفة'])}, ` +
     `${s(j['تاريخ البداية'])}::date, ${n(j['عدد الليالي'])}, ` +
