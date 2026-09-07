@@ -845,6 +845,60 @@ check('a nightly-rate total is left to the sheet', r.save.bookingFields === null
   r.save.bookingFields);
 check('the line is still written', r.save.fields['اجمالي ما تم دفعه'] === 700);
 
+section('payment lines: غير مدفوع is not a method, so it is replaced');
+
+// A booking taken with nothing paid. Its طريقة الدفع says غير مدفوع, which is
+// the ABSENCE of a payment written into the column that names payments — so the
+// first real payment belongs on this row: the cell is relabelled and the amount
+// goes into اجمالي ما تم دفعه. Ruled by the user on 2026-08-28. Before it, the
+// first payment looked like a SECOND method and inserted a purple line under a
+// row still announcing the stay was unpaid, shifting every guest below it.
+const UNPAID_BOOKING = [{
+  'بوكنج ID': '', 'ID': '31313', 'اسم المقيم': 'مروان', 'اسم الشقة': 'انبي 3',
+  'رقم الغرفة': 2, 'تاريخ البداية': '2026-08-02', 'اجمالي سعر الحجز': 600,
+  'اجمالي ما تم دفعه': 0, 'طريقة الدفع': 'غير مدفوع', 'ملاحظات': '',
+  booking_id: 23, lines: [], block_end: 2, total_is_formula: false,
+}];
+
+r = payOn(UNPAID_BOOKING, 'xpay_cash', 700);
+check('no line is announced in the review',
+  !r.reply.text.includes('سطر منفصل'), r.reply.text);
+r = run(cb('xleft_no')); r = run(cb('xedone'));
+check('the first payment is an ordinary edit, not a line',
+  r.save.flow === 'edit', r.save.flow);
+// An `edit` carries no insert fields at all — that is the point: this payload
+// cannot shift a row even by accident.
+check('nothing is inserted, so nothing below it moves',
+  !r.save.insert && !r.save.shiftFrom, [r.save.insert, r.save.shiftFrom]);
+check('it lands on the booking\'s own row', r.save.row === 2, r.save.row);
+check('the amount goes into the booking\'s own paid cell',
+  r.save.fields['اجمالي ما تم دفعه'] === 700, r.save.fields['اجمالي ما تم دفعه']);
+check('and غير مدفوع is replaced by how they actually paid',
+  r.save.fields['طريقة الدفع'] === 'كاش', r.save.fields['طريقة الدفع']);
+
+// The same, for a transfer: the receipt step is about the METHOD and must not
+// be skipped just because the payment landed on the booking's own row.
+r = payOn(UNPAID_BOOKING, 'xpay_instapay', 250);
+check('a transfer onto an unpaid booking still asks for a receipt',
+  r.reply.text === '📎 أرسل صورة إيصال التحويل أو اضغط تخطي:', r.reply.text);
+r = run(photo('RCPT4')); r = run(cb('xleft_no')); r = run(cb('xedone'));
+check('still the booking\'s own row', r.save.flow === 'edit' && r.save.row === 2,
+  [r.save.flow, r.save.row]);
+check('method replaced, amount on the row',
+  r.save.fields['طريقة الدفع'] === 'انستاباي' &&
+  r.save.fields['اجمالي ما تم دفعه'] === 250, r.save.fields);
+
+// A SECOND method after that is still a line — the rule changed for the first
+// payment only, not for the split it was always meant to protect.
+const PAID_AFTER_UNPAID = [Object.assign({}, UNPAID_BOOKING[0], {
+  'طريقة الدفع': 'كاش', 'اجمالي ما تم دفعه': 700, booking_id: 24,
+})];
+r = payOn(PAID_AFTER_UNPAID, 'xpay_instapay', 300);
+r = run(photo('RCPT5')); r = run(cb('xleft_no')); r = run(cb('xedone'));
+check('once a real method is on the row, a different one still opens a line',
+  r.save.flow === 'payment_line' && r.save.lineSeq === 2,
+  [r.save.flow, r.save.lineSeq]);
+
 // ── Editing the total on a nightly-rate booking ──────────────────────────────
 //
 // Sixteen bookings hold `=500*I10` in اجمالي سعر الحجز and ten of those are

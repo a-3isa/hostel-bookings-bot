@@ -30,6 +30,24 @@ export function lineKey(method, currency) {
   return JSON.stringify([s(method).trim(), s(currency).trim() || DEFAULT_CURRENCY]);
 }
 
+// طريقة الدفع says this when nothing has been paid. It is not a method.
+export const UNPAID = 'غير مدفوع';
+
+// Does this طريقة الدفع name a way money actually changed hands?
+//
+// غير مدفوع does not: it is the absence of a payment written into the column
+// that names payments. Every rule asking "has this booking been paid in a method
+// already?" has to read it as a blank, or the FIRST real payment looks like a
+// second method and opens a line under a row still claiming the stay is unpaid.
+// Ruled by the user on 2026-08-28.
+//
+// Mirrored by `has_method` in `supabase/mirror.py` and `hasMethod` in
+// `booking_bot/brain.js`; the three must agree.
+export function hasMethod(method) {
+  const v = s(method).trim();
+  return Boolean(v) && v !== UNPAID;
+}
+
 const keyParts = (key) => JSON.parse(key);
 
 // A calendar date, formatted from its own parts and never through UTC.
@@ -159,18 +177,20 @@ export function blockEnd(b) {
 //   opens     [{seq, method, currency, amount, payment_ids}] — a type this
 //             booking has not been paid in before. Each needs a row.
 //   adopted   {method, currency} the booking's own line takes on when it had no
-//             method at all. An empty payment cell with a populated line
-//             beneath it is not what anyone means by two payment methods.
+//             method at all — or when that cell still said غير مدفوع, which
+//             `hasMethod` reads as the same thing. An empty payment cell with a
+//             populated line beneath it is not what anyone means by two payment
+//             methods, and neither is one announcing the stay was never paid.
 //
 // Two payments of the same new type in one run share ONE new line.
 export function planAllocation(b) {
   const lines = b.lines ?? [];
   const primary = lineKey(b.payment_method, b.primary_currency);
-  const primaryMethod = keyParts(primary)[0];
+  const paidInPrimary = hasMethod(keyParts(primary)[0]);
   let adopted = null;
 
   const seqOf = new Map();
-  if (primaryMethod) seqOf.set(primary, 1);
+  if (paidInPrimary) seqOf.set(primary, 1);
   for (const ln of lines) {
     const k = lineKey(ln.method, ln.currency);
     if (!seqOf.has(k)) seqOf.set(k, ln.seq);
@@ -182,9 +202,15 @@ export function planAllocation(b) {
 
   for (const p of b.unallocated ?? []) {
     const key = lineKey(p.method, p.currency);
-    if (!primaryMethod && adopted === null) {
+    // `!seqOf.has(key)`: only adopt a method no row of this booking already
+    // carries. A booking left in the old shape — own row saying غير مدفوع with
+    // a كاش line already under it — would otherwise end up with كاش on BOTH
+    // rows, one of them holding nothing, which is exactly the duplicate lineKey
+    // exists to prevent. The payment joins the line that already carries its
+    // method and the cell above is left alone.
+    if (!paidInPrimary && adopted === null && !seqOf.has(key)) {
       adopted = { method: keyParts(key)[0], currency: keyParts(key)[1] };
-      if (!seqOf.has(key)) seqOf.set(key, 1);
+      seqOf.set(key, 1);
     }
     if (seqOf.has(key)) {
       merges.push({ payment_id: p.id, seq: seqOf.get(key) });

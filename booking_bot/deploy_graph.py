@@ -27,6 +27,19 @@ What it sets up:
     on the turns that draw an apartment keyboard.
   * A schedule branch: Report Schedule -> Report Config -> Read Report Formulas
     -> Read Report Values -> Build Reports -> Send Report.
+
+The 08:00 schedule POSTS NOTHING. Since 2026-08-28, at the user's request, both
+wires into `Send Report` are cut — the reports branch and the reconcile — so no
+scheduled message reaches the ops group at all. The daily digest is additionally
+switched off inside `nodes/build_reports.js`.
+
+The branch itself still runs end to end, because it carries the day's real work:
+the sheet reads, the snapshot, the discrepancy view and the mirror append that
+publishes dashboard-born bookings into the sheet. Silencing it is a matter of
+connections, never of deleting the branch or the trigger.
+
+Per-booking announcements are unaffected — `Post To Group` is a different node,
+a different chat and a different trigger.
 """
 
 import json
@@ -103,7 +116,7 @@ def read_source(name):
 def apply_offline(wf, ops):
     """Run the operations against a workflow held in memory.
 
-    The same four verbs the MCP endpoint understands, so the file this produces
+    The same five verbs the MCP endpoint understands, so the file this produces
     and the graph a successful `--publish` produces are the same graph. Anything
     else in `ops` is a verb this has not been taught and is refused loudly rather
     than skipped: a silently dropped operation is a node that quietly does not
@@ -118,6 +131,11 @@ def apply_offline(wf, ops):
             node.setdefault("id", node["name"].lower().replace(" ", "-").replace("?", ""))
             wf["nodes"].append(node)
             nodes[node["name"]] = node
+        elif kind == "removeConnection":
+            branches = conns.get(op["source"], {}).get("main", [])
+            i = op["sourceIndex"]
+            if i < len(branches):
+                branches[i] = [c for c in branches[i] if c["node"] != op["target"]]
         elif kind == "addConnection":
             main = conns.setdefault(op["source"], {}).setdefault("main", [])
             while len(main) <= op["sourceIndex"]:
@@ -347,7 +365,22 @@ def main():
     connect("Report Config", "Read Report Formulas")
     connect("Read Report Formulas", "Read Report Values")
     connect("Read Report Values", "Build Reports")
-    connect("Build Reports", "Send Report")
+    # `Send Report` posts NOTHING any more (user, 2026-08-28: "i dont want him to
+    # send any messages"). Both wires into it are cut — this one and the
+    # reconcile's, below — so the scheduled branch is silent whatever its Code
+    # nodes decide to emit.
+    #
+    # The node is kept, unwired, on purpose: restoring either report is one
+    # connection, and a deleted node takes its Telegram credential binding with
+    # it (that has to be redone by hand in the UI, which is how the branch got
+    # stuck before). `Build Reports` still runs and still builds the Saturday
+    # debt report; it just has nowhere to send it.
+    #
+    # This does NOT touch the per-booking announcements. Those go to
+    # GROUP_CHAT_ID / EXPENSE_GROUP_CHAT_ID through `Post To Group`, are a
+    # receptionist's confirmation that a save landed, and were never part of the
+    # 08:00 schedule.
+    disconnect("Build Reports", "Send Report")
 
     # ── Phase 2: dual-write to Supabase ──────────────────────────────────────
     #
@@ -491,7 +524,17 @@ def main():
         connect("Build Snapshot SQL", "Write Snapshot")
         connect("Write Snapshot", "Read Discrepancies")
         connect("Read Discrepancies", "Build Reconcile Message")
-        connect("Build Reconcile Message", "Send Report")
+        # The morning reconcile is no longer POSTED either (same ruling). Only
+        # the Telegram hop is cut: Build Reconcile Message still runs, still
+        # builds the text, and still hands its one item to Read Unmirrored —
+        # which is what publishes dashboard-born bookings into the sheet, and
+        # which stops dead if this node ever returns nothing. That is why the
+        # message is disconnected rather than switched off inside the node.
+        #
+        # The comparison itself is untouched: the snapshot is still written and
+        # `reconcile_bookings` still holds every difference, so a disagreement is
+        # one query away instead of arriving unasked at 08:00.
+        disconnect("Build Reconcile Message", "Send Report")
 
         # ── Phase 4c: publish DB-born bookings into the sheet ─────────────────
         #

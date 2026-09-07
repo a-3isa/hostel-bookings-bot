@@ -4,9 +4,20 @@
  * This is the report that earns the flip. It answers one question: does the
  * database still agree with the spreadsheet?
  *
- * It posts even when everything matches. A report that only appears when
- * something is wrong is indistinguishable from a report that has quietly stopped
- * running, and the whole point of the trust period is knowing the difference.
+ * It used to post every morning, matching or not: a report that only appears
+ * when something is wrong is indistinguishable from one that has quietly stopped
+ * running, and that was the whole point of the trust period. The trust period is
+ * over — on 2026-08-28 the user asked for the daily messages to stop, and
+ * `deploy_graph.py` disconnected this node from "Send Report".
+ *
+ * The node still runs, and still returns exactly ONE item. Do not "optimise" it
+ * into returning nothing on a clean morning: "Read Unmirrored Bookings" hangs
+ * off this output, and that is what publishes dashboard-born bookings into the
+ * sheet. An empty return here silently stops them appearing at all.
+ *
+ * The text it builds now goes nowhere. It is left in place because reconnecting
+ * one wire is how the report comes back, and because the same text is what any
+ * manual `select * from reconcile_bookings` has to be read against.
  */
 
 const CFG = $('Report Config').first().json;

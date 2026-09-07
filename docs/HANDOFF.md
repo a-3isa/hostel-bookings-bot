@@ -1,5 +1,132 @@
 # Handoff — where the Supabase migration stands
 
+## 2026-08-28 — no scheduled messages, غير مدفوع is not a method, and the DB was resynced from the sheet
+
+**All of this is LIVE.** Workflow `hzMYegbL3yifl7KN`, activeVersionId
+`7d4a9ece-be5f-4587-a27b-1d4315c2ea65`, 55 nodes, `active: true`, live Brain
+byte-identical to `booking_bot/brain.js`.
+
+**The 08:00 schedule posts nothing.** Asked for in two steps on the same day —
+first "stop the daily updates" (digest + reconcile, keeping Saturday's debt
+report), then, after it posted again the next morning because nothing had been
+deployed yet, *"i dont want him to send any messages"*.
+
+- **Both wires into `Send Report` are cut** — `Build Reports` and `Build
+  Reconcile Message`. That is the switch: it does not matter what either Code
+  node decides to emit.
+- `Send Report` is **kept, unwired**. Reconnecting one input restores one report;
+  deleting the node would take its Telegram credential binding with it, and
+  rebinding is a UI-only step.
+- The daily digest is switched off a second way, behind `SEND_DAILY_DIGEST` in
+  `booking_bot/nodes/build_reports.js`. `test_reports.mjs` compiles a second copy
+  of the source with the flag flipped, so it cannot rot while it is off.
+- `Build Reconcile Message` still runs and **must keep returning exactly one
+  item**: `Read Unmirrored Bookings` hangs off its output and that is what
+  publishes dashboard-born bookings into the sheet. Making it return nothing on a
+  clean morning would silently stop them appearing.
+- Everything the schedule *does* is untouched: both reads, the snapshot,
+  `reconcile_bookings`, the mirror append. Never silence it by deleting the
+  trigger or the branch.
+- Per-booking announcements are unaffected — `Post To Group`, different chats,
+  fired by the Telegram trigger.
+- `apply_offline` in `deploy_graph.py` learned `removeConnection`; it refused the
+  verb before, so `--offline` could not have produced this graph.
+
+**غير مدفوع is the absence of a payment, not a payment method.** A booking taken
+unpaid and later paid in cash used to get a purple كاش line INSERTED under a row
+that still announced غير مدفوع — two "methods", one of them a statement that
+nothing had been paid, plus a row shift under every guest below it. Now the first
+real payment lands on the booking's own row: the cell is relabelled and the
+amount goes into اجمالي ما تم دفعه. A *second* method after that still opens a
+line, exactly as before.
+
+Three ports had to change together and they are twin-tested:
+
+| where | what | tests |
+|---|---|---|
+| `booking_bot/brain.js` | `hasMethod()`, read by `paymentTarget()` | `test_brain.mjs` |
+| `supabase/mirror.py` | `has_method()`, read by `plan_allocation()` | `supabase/test_lines.py` |
+| `webui/lib/mirror.js` | `hasMethod()`, read by `planAllocation()` | `webui/lib/mirror.test.mjs` |
+
+`webui/lib/publish.js` also had to widen its own adoption guard: it wrote
+`coalesce(nullif(payment_method,''), …)`, which by definition refuses to touch a
+cell reading غير مدفوع.
+
+One consequence worth knowing, because it changes behaviour for bookings that
+already exist in the OLD shape: adoption now happens only for a method no row of
+the booking already carries. Own row `غير مدفوع` with a كاش line under it and a
+new كاش payment → the payment joins that line and the cell above is left alone.
+Relabelling it would have put كاش on both rows with the upper one holding
+nothing, which is the duplicate `line_key` exists to prevent.
+
+**Unrelated and pre-existing:** `booking_bot/test_shadow.mjs` throws at its
+"payment lines" section (`put()` → `Cannot read properties of undefined`). It
+fails identically on `HEAD` with none of this applied. Not investigated.
+
+### The database was resynced from the sheet, and the sheet won everything
+
+State before: **reconcile 12**, and the database had taken **no booking update
+since 2026-08-22 19:52** — 101 bookings have `updated_at > created_at` and that
+was the newest such timestamp. New bookings, new expenses and at-booking payments
+kept landing through 08-26; it was the edit/payment path that produced nothing.
+
+The cause underneath it: **18 bookings and 2 payment lines had a stale
+`sheet_row`**, from hand-inserted rows shifting the tab. That is not cosmetic —
+`build_shadow_write.js` writes an edit as `insert into bookings (sheet_row, …) on
+conflict (sheet_row) do update`, so with drift an edit at sheet row 114 upserts
+onto whichever DB row *claims* 114, a different guest. It had not fired yet (no
+booking held a wrong name) but it was loaded. **`reindex.py --apply` is the
+answer and it has to run before anything keyed on `sheet_row`.**
+
+What ran, in this order — the order is load-bearing:
+
+```
+python supabase/backup.py --no-n8n        # backups/20260827T222509Z
+python supabase/reindex.py   --apply      # column U -> sheet_row: 18 + 2 fixed
+python supabase/backfill.py  --apply --reconcile
+python supabase/sheet_sync.py --apply     # NEW, see below
+```
+
+`backfill.py` is an upsert and only an upsert: it can add and correct, never
+remove, and it does not touch `payments` or `booking_lines` at all.
+**`supabase/sheet_sync.py` is new** and finishes the job in the other direction —
+the sheet is the reference, so what the database holds and the sheet does not
+state is removed. It rebuilds `booking_lines` and `payments` from the sheet,
+drops stay segments whose price formula no longer splits, and reports (but
+refuses without `--force-bookings`) any booking stamped on no sheet row.
+
+The user chose the destructive option for `payments` with the tradeoff stated:
+the table was emptied and rebuilt from the sheet's paid cells, so **20
+`receipt_file_id`s and every real `paid_at` are gone**. They are in
+`backups/20260827T222509Z/database.json` if they are ever wanted back.
+Rebuilt rows are `source = 'sheet'` with `paid_at` NULL, following
+`seed_ledger.py`: the date money changed hands is the one thing the sheet never
+records, and `now()` would be a lie that reads like a fact.
+
+Result, verified live:
+
+| check | before | after |
+|---|---|---|
+| `reconcile_bookings` | 12 | **0** |
+| `reconcile_payments` | 0 | **0** |
+| `reindex.py` re-points | 18 + 2 | **0** |
+| sheet lines with no `booking_lines` row | 2 | **0** |
+| `payments` sum ≠ `bookings.paid` | 0 | **0** |
+| bookings in db, not in the sheet | 0 | **0** |
+| rows | 117 / 120 / 8 / 59 | **117 / 121 / 10 / 59** |
+
+Kept deliberately, at the user's choice: `bot_sessions` (live Telegram
+conversation state), `booking_audit` (the dashboard's edit trail),
+`sheet_snapshot` (scratch, rewritten every reconcile), `apartments` / `rooms` /
+`settings` (registry from the الإتاحة tab — the bot cannot run without them).
+
+**One real sheet inconsistency, left as the sheet has it:** row 36 (احمد باسط,
+booking 32) shows 3,130 paid with طريقة الدفع still reading غير مدفوع.
+`sheet_sync.py` warns about it on every run and records it verbatim rather than
+guessing a method. Fixing it means editing the sheet.
+
+---
+
 ## START HERE (2026-08-18) — everything in this repo is live
 
 The workflow `hzMYegbL3yifl7KN` on `superfoxxy.dpdns.org` is **current**. The
