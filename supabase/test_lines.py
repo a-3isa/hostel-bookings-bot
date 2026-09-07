@@ -17,7 +17,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mirror import (LINE_ROW_COLOUR, block_end, cell_value, line_key, line_payload,
+from mirror import (LINE_ROW_COLOUR, block_end, cell_value, has_method, line_key,
+                    line_payload,
                     open_line, plan_allocation, price_cell, primary_payload,
                     shift_rows_down)
 
@@ -148,6 +149,67 @@ def test_a_later_different_method_still_opens_a_line():
     assert merges == [(1, 1)]
     assert adopted == ("انستاباي", "EGP")
     assert [o["method"] for o in opens] == ["كاش"]
+
+
+# ── غير مدفوع is not a method, it is the absence of one ──────────────────────
+#
+# Ruled by the user on 2026-08-28. Before it, a booking taken unpaid and later
+# paid in cash got a كاش line INSERTED under a row that still announced غير
+# مدفوع — two payment methods, one of which was the statement that nothing had
+# been paid, and a row shift under every guest below for no reason.
+
+def test_the_first_payment_replaces_غير_مدفوع():
+    row = booking(method="غير مدفوع", unallocated=[payment(1, 700, "كاش")])
+    merges, opens, adopted = plan_allocation(row)
+    assert merges == [(1, 1)]          # the booking's own row
+    assert opens == []                 # nothing inserted, nothing shifted
+    assert adopted == ("كاش", "EGP")   # and the cell now says how they paid
+
+
+def test_a_second_method_after_غير_مدفوع_still_opens_a_line():
+    """The rule that was replaced is only replaced for the FIRST payment."""
+    row = booking(method="غير مدفوع",
+                  unallocated=[payment(1, 700, "كاش"), payment(2, 300, "انستاباي")])
+    merges, opens, adopted = plan_allocation(row)
+    assert merges == [(1, 1)]
+    assert adopted == ("كاش", "EGP")
+    assert [o["method"] for o in opens] == ["انستاباي"]
+
+
+def test_غير_مدفوع_never_becomes_a_line_of_its_own():
+    """Two payments on an unpaid booking: one adopts, one opens. Never three."""
+    row = booking(method="غير مدفوع",
+                  unallocated=[payment(1, 100, "كاش"), payment(2, 200, "كاش")])
+    merges, opens, adopted = plan_allocation(row)
+    assert merges == [(1, 1), (2, 1)]
+    assert opens == []
+    assert adopted == ("كاش", "EGP")
+
+
+def test_غير_مدفوع_with_a_line_already_there_merges_into_it():
+    """A booking left in the old shape is repaired, not doubled.
+
+    Its own row says غير مدفوع and a كاش line already sits under it. The payment
+    joins that line, and the booking's own cell is NOT relabelled: كاش on both
+    rows would be the duplicate line_key exists to prevent, with the upper one
+    holding no money at all.
+    """
+    row = booking(method="غير مدفوع",
+                  lines=[line(2, "كاش", 11, amount=500)],
+                  unallocated=[payment(1, 400, "كاش")])
+    merges, opens, adopted = plan_allocation(row)
+    assert merges == [(1, 2)]
+    assert opens == []
+    assert adopted is None
+
+
+def test_has_method_reads_غير_مدفوع_as_blank():
+    assert has_method("كاش") is True
+    assert has_method("  انستاباي ") is True
+    assert has_method("") is False
+    assert has_method(None) is False
+    assert has_method("غير مدفوع") is False
+    assert has_method("  غير مدفوع  ") is False
 
 
 # ── nothing to do ────────────────────────────────────────────────────────────

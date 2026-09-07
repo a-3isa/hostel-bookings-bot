@@ -30,7 +30,7 @@
 
 import { one, q, tx } from './db';
 import {
-  blockEnd, expensePayload, linePayload, planAllocation, primaryPayload,
+  blockEnd, expensePayload, linePayload, planAllocation, primaryPayload, UNPAID,
 } from './mirror';
 import {
   checkExpenseRow, checkRow, deleteExpenseRow, firstFreeExpenseRow, firstFreeRow,
@@ -203,8 +203,14 @@ export async function publishBooking(bookingId) {
       await q('update payments set line_seq = $1 where id = $2', [m.seq, m.payment_id]);
     }
     if (adopted) {
-      await q(`update bookings set payment_method = coalesce(nullif(payment_method,''), $2)
-                where id = $1`, [booking.id, adopted.method]);
+      // Only where there is no method to lose. planAllocation already decided
+      // that, but this runs against the row as it is NOW rather than as it was
+      // when the booking was loaded, so the guard is repeated here — and it has
+      // to accept غير مدفوع, which is the absence of a payment spelled out in
+      // the column that names payments, not a method being overwritten.
+      await q(`update bookings set payment_method = $2
+                where id = $1 and (coalesce(payment_method,'') = '' or payment_method = $3)`,
+              [booking.id, adopted.method, UNPAID]);
     }
 
     // Rows this call created. They are blank and unstamped by definition, so

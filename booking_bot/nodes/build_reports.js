@@ -16,12 +16,18 @@
  * formula read. One extra Sheets call a day buys an exact answer.
  *
  * Output: one item per message to send, so the Telegram node downstream just
- * loops. Zero items on a quiet day means no message at all, which is the point:
- * a digest that fires "nothing today" every morning stops being read.
+ * loops. Zero items means no message at all.
  *
- * Two reports share one trigger and one read:
- *   - the daily digest, every day;
- *   - the debt report, Saturdays only (the start of the working week here).
+ * ONE report is left here: the debt report, Saturdays only (the start of the
+ * working week here). Six mornings a week this node now returns nothing.
+ *
+ * The daily digest — ☀️ تقرير اليوم, arrivals / departures / long open stays —
+ * was switched off by the user on 2026-08-28. The trigger, both reads and this
+ * node all stay: the same 08:00 run also drives the reconcile snapshot and the
+ * mirror append that publishes dashboard-born bookings into the sheet, so this
+ * is a report being silenced, not a branch being removed. To bring the digest
+ * back, restore the block marked below — the collection loop is still here
+ * because the debt report shares it.
  */
 
 // The reports branch has its own Config: the Telegram trigger's Config node
@@ -32,6 +38,12 @@ const CHAT_ID = CFG.REPORT_GROUP_CHAT_ID;
 
 const LONG_STAY_DAYS = 30;
 const DEBT_WEEKDAY = 6;                       // 0 = Sunday … 6 = Saturday
+
+// The daily digest, off since 2026-08-28 at the user's request. Flip to true to
+// bring it back; everything it needs is still computed below, because the debt
+// report walks the same rows and the open-stay read is what tells the two of
+// them apart from a stay that merely looks like it ends today.
+const SEND_DAILY_DIGEST = false;
 
 const S = {
   digest_title: '☀️ *تقرير اليوم* — {date}',
@@ -163,9 +175,9 @@ for (const j of rows) {
 
 const messages = [];
 
-// ── Daily digest ──
+// ── Daily digest ── OFF since 2026-08-28; see SEND_DAILY_DIGEST above.
 // Sent only when there is something to say.
-if (arrivals.length || departures.length || longStays.length) {
+if (SEND_DAILY_DIGEST && (arrivals.length || departures.length || longStays.length)) {
   const parts = [t('digest_title', { date: today }), ''];
   if (arrivals.length) parts.push(t('arrivals', { n: arrivals.length }), ...arrivals, '');
   if (departures.length) parts.push(t('departures', { n: departures.length }), ...departures, '');

@@ -10,8 +10,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  blockEnd, dateOnly, desired, expensePayload, lineKey, linePayload,
-  planAllocation, primaryPayload, priceCell, stamp,
+  blockEnd, dateOnly, desired, expensePayload, hasMethod, lineKey, linePayload,
+  planAllocation, primaryPayload, priceCell, stamp, UNPAID,
 } from './mirror.js';
 import { safeCell } from './sheets.js';
 import { calendarDate, dateInput, day } from './fmt.js';
@@ -150,6 +150,65 @@ test('a later different method still opens a line', () => {
   assert.deepEqual(merges, [{ payment_id: 1, seq: 1 }]);
   assert.deepEqual(adopted, { method: INSTA, currency: 'EGP' });
   assert.deepEqual(opens.map((o) => o.method), [CASH]);
+});
+
+// ── غير مدفوع is not a method, it is the absence of one ─────────────────────
+//
+// Ruled by the user on 2026-08-28. Before it, a booking taken unpaid and later
+// paid in cash got a كاش line INSERTED under a row that still announced غير
+// مدفوع — two payment methods, one of which was the statement that nothing had
+// been paid, and a row shift under every guest below for no reason.
+// Twinned with the same four cases in `supabase/test_lines.py`.
+
+test('hasMethod reads غير مدفوع as blank', () => {
+  assert.equal(hasMethod(CASH), true);
+  assert.equal(hasMethod(`  ${INSTA} `), true);
+  assert.equal(hasMethod(''), false);
+  assert.equal(hasMethod(null), false);
+  assert.equal(hasMethod(UNPAID), false);
+  assert.equal(hasMethod(`  ${UNPAID}  `), false);
+});
+
+test('the first payment replaces غير مدفوع on the booking row', () => {
+  const { merges, opens, adopted } = planAllocation(
+    booking({ payment_method: UNPAID, unallocated: [payment(1, 700, CASH)] }));
+  assert.deepEqual(merges, [{ payment_id: 1, seq: 1 }]);
+  assert.deepEqual(opens, []);                    // nothing inserted, nothing shifted
+  assert.deepEqual(adopted, { method: CASH, currency: 'EGP' });
+});
+
+test('a second method after غير مدفوع still opens a line', () => {
+  const { merges, opens, adopted } = planAllocation(booking({
+    payment_method: UNPAID,
+    unallocated: [payment(1, 700, CASH), payment(2, 300, INSTA)],
+  }));
+  assert.deepEqual(merges, [{ payment_id: 1, seq: 1 }]);
+  assert.deepEqual(adopted, { method: CASH, currency: 'EGP' });
+  assert.deepEqual(opens.map((o) => o.method), [INSTA]);
+});
+
+test('غير مدفوع never becomes a line of its own', () => {
+  const { merges, opens, adopted } = planAllocation(booking({
+    payment_method: UNPAID,
+    unallocated: [payment(1, 100, CASH), payment(2, 200, CASH)],
+  }));
+  assert.deepEqual(merges, [{ payment_id: 1, seq: 1 }, { payment_id: 2, seq: 1 }]);
+  assert.deepEqual(opens, []);
+  assert.deepEqual(adopted, { method: CASH, currency: 'EGP' });
+});
+
+test('غير مدفوع with that method already on a line merges into it', () => {
+  // A booking left in the old shape. The payment joins the line that already
+  // carries كاش, and the cell above is NOT relabelled: كاش on both rows would be
+  // the duplicate lineKey exists to prevent, the upper one holding no money.
+  const { merges, opens, adopted } = planAllocation(booking({
+    payment_method: UNPAID,
+    lines: [line(2, CASH, 11, 500)],
+    unallocated: [payment(1, 400, CASH)],
+  }));
+  assert.deepEqual(merges, [{ payment_id: 1, seq: 2 }]);
+  assert.deepEqual(opens, []);
+  assert.equal(adopted, null);
 });
 
 test('a booking with no loose payments is left alone', () => {

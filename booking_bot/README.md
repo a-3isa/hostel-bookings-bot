@@ -178,11 +178,29 @@ Telegram nodes. They predate this script and those nodes work; ignore them.
 ### Scheduled reports
 
 `Report Schedule → Report Config → Read Report Formulas → Read Report Values →
-Build Reports → Send Report` posts to the ops group (`REPORT_GROUP_CHAT_ID`):
+Build Reports` still runs every morning. **It posts nothing.**
 
-- a **daily digest** — arrivals, departures, and open stays past 30 days — sent
-  only when there is something in it;
+On 2026-08-28 the user asked for no scheduled messages at all, and both wires
+into `Send Report` were cut — the reports branch and the reconcile. The node is
+kept, unwired: reconnecting one input restores one report, while deleting the
+node would take its Telegram credential binding with it. What it used to send:
+
 - a **debt report** on Saturdays, every booking with المتبقي > 0 plus a total.
+  `Build Reports` still builds it; it has nowhere to go.
+- a **daily digest** — arrivals, departures, and open stays past 30 days —
+  switched off a second way, behind `SEND_DAILY_DIGEST` at the top of
+  `nodes/build_reports.js`. `test_reports.mjs` still exercises it, by compiling a
+  copy of the source with the flag flipped.
+- the **daily reconcile message**. `Build Reconcile Message` still runs and must
+  keep returning one item: `Read Unmirrored Bookings` hangs off its output, and
+  that is what publishes dashboard-born bookings into the sheet.
+
+The branch stays wired end to end because it carries the day's real work — the
+sheet reads, the snapshot, `reconcile_bookings`, and the mirror append. Never
+silence it by deleting the trigger or the branch. See `docs/HANDOFF.md`.
+
+Per-booking announcements are a different thing and are unaffected: `Post To
+Group`, a different chat, fired by the Telegram trigger.
 
 The range is read **twice** on purpose. Evaluated gives real numbers for المتبقي,
 which is a sheet formula; FORMULA identifies open-ended stays, whose عدد الليالي
@@ -190,6 +208,10 @@ is a live `=TODAY()-J`. Without the second read an open stay reads as departing
 today on every single day, and the digest would announce the same guest as
 leaving for months. FORMULA alone cannot replace the first read either — المتبقي
 and, on nightly-rate rows, اجمالي سعر الحجز come back as formula text.
+
+No message is sent at all now, so neither read feeds one. Both stay wired
+regardless: `Read Report Values` runs *after* the formula read, and it is what
+the snapshot, the reconcile and the mirror append all hang off.
 
 > **One manual step:** the trigger fires at 08:00 in the **n8n instance's**
 > timezone. The workflow has no timezone set and the MCP surface cannot set one,

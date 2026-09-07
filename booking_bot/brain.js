@@ -72,6 +72,24 @@ const RECEIPT_PAYMENT_KEYS = ['instapay', 'vcash'];
 const CASH_KEY = 'cash';
 const UNPAID_KEY = 'unpaid';
 
+/** The label غير مدفوع, read off PAYMENTS so the two can never drift apart. */
+const UNPAID_LABEL = (PAYMENTS.find(p => p.key === UNPAID_KEY) || {}).label || 'غير مدفوع';
+
+/**
+ * Does this طريقة الدفع cell name a way money actually changed hands?
+ *
+ * غير مدفوع does not. It is the absence of a payment written into the column
+ * that names payments, so every rule that asks "has this booking been paid in a
+ * method already?" has to read it as a blank — otherwise the first real payment
+ * looks like a SECOND method and opens a line under a row that says nothing was
+ * paid. Mirrored by `has_method` in `supabase/mirror.py` and `hasMethod` in
+ * `webui/lib/mirror.js`; the three must agree.
+ */
+function hasMethod(m) {
+  const v = String(m === undefined || m === null ? '' : m).trim();
+  return Boolean(v) && v !== UNPAID_LABEL;
+}
+
 /**
  * The same, for EXPENSES, where cash is included.
  *
@@ -1099,6 +1117,14 @@ function hasLinePayment(dd) {
  * money was right and the method was a lie, and the Dashboard's per-method
  * balances read that cell.
  *
+ * غير مدفوع is not a payment method, it is the ABSENCE of one (ruled by the
+ * user on 2026-08-28). A booking whose طريقة الدفع still says غير مدفوع has
+ * never been paid, so the first real payment belongs on its own row: the cell
+ * is relabelled to the new method and the amount goes into اجمالي ما تم دفعه.
+ * Opening a line there would leave the booking's row claiming it was unpaid
+ * with a payment sitting underneath it — two "methods", one of which is a
+ * statement that nothing was paid.
+ *
  * Returns one of:
  *   {kind:'booking'} the booking's own row — same method, or it has none yet
  *   {kind:'line'}    a continuation row already carrying this method
@@ -1109,9 +1135,10 @@ function paymentTarget(dd, method) {
   const lines = Array.isArray(dd.editLines) ? dd.editLines : [];
   const own = String((dd.editOrig && dd.editOrig['طريقة الدفع']) || '').trim();
 
-  // An empty طريقة الدفع cell is filled, never left blank with a line beneath
-  // it — that is not what anyone means by two payment methods.
-  if (!own || own === want) return { kind: 'booking', row: dd.editRow };
+  // An empty طريقة الدفع cell — or one that still says غير مدفوع — is filled,
+  // never left blank with a line beneath it: that is not what anyone means by
+  // two payment methods.
+  if (!hasMethod(own) || own === want) return { kind: 'booking', row: dd.editRow };
 
   const hit = lines.find((l) => String(l.method || '').trim() === want);
   if (hit) {

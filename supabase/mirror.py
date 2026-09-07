@@ -278,6 +278,25 @@ DEFAULT_CURRENCY = "EGP"
 # that the sheet's own black text stays readable on it.
 LINE_ROW_COLOUR = {"red": 0.85, "green": 0.78, "blue": 0.93}
 
+# طريقة الدفع says this when nothing has been paid. It is not a method.
+UNPAID = "غير مدفوع"
+
+
+def has_method(method):
+    """Does this طريقة الدفع name a way money actually changed hands?
+
+    غير مدفوع does not: it is the absence of a payment written into the column
+    that names payments. Every rule asking "has this booking been paid in a
+    method already?" has to read it as a blank, or the FIRST real payment looks
+    like a second method and opens a line under a row still claiming the stay is
+    unpaid. Ruled by the user on 2026-08-28.
+
+    Mirrored by `hasMethod` in `webui/lib/mirror.js` and in
+    `booking_bot/brain.js`; the three must agree.
+    """
+    v = s(method).strip()
+    return bool(v) and v != UNPAID
+
 
 def line_key(method, currency):
     """What makes two payments the same LINE.
@@ -307,14 +326,18 @@ def plan_allocation(row):
 
     A payment arriving on a booking with no method yet fills the booking's own
     row instead of opening a second one. An empty طريقة الدفع cell with a
-    populated line beneath it is not what anyone means by two payment methods.
+    populated line beneath it is not what anyone means by two payment methods —
+    and neither is a cell reading غير مدفوع, which `has_method` treats the same
+    way: the first real payment RELABELS that cell and lands its amount in the
+    booking's own اجمالي ما تم دفعه.
     """
     lines = row["lines"] or []
     primary = line_key(row["payment_method"], row["primary_currency"])
+    paid_in_primary = has_method(primary[0])
     adopted = None
 
     seq_of = {}
-    if primary[0]:
+    if paid_in_primary:
         seq_of[primary] = 1
     for ln in lines:
         seq_of.setdefault(line_key(ln["method"], ln["currency"]), ln["seq"])
@@ -323,9 +346,15 @@ def plan_allocation(row):
     merges, opened = [], {}
     for p in row["unallocated"] or []:
         key = line_key(p["method"], p["currency"])
-        if not primary[0] and adopted is None:
+        # `key not in seq_of`: only adopt a method no row of this booking
+        # already carries. A booking left in the old shape — own row saying غير
+        # مدفوع with a كاش line already under it — would otherwise end up with
+        # كاش on BOTH rows, one of them holding nothing, which is precisely the
+        # duplicate that line_key exists to prevent. The payment joins the line
+        # that already carries its method and the cell above is left alone.
+        if not paid_in_primary and adopted is None and key not in seq_of:
             adopted = key
-            seq_of.setdefault(key, 1)
+            seq_of[key] = 1
         if key in seq_of:
             merges.append((p["id"], seq_of[key]))
         elif key in opened:
