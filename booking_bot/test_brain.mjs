@@ -409,8 +409,12 @@ check('row = filled data rows + 2', body.row_number === 8, body.row_number);
 check('the row is keyed by sheet header name, for autoMapInputData',
   'اسم المقيم' in body && 'اجمالي سعر الحجز' in body, Object.keys(body));
 check('formula columns are never emitted',
-  !['تاريخ المغادرة', 'المتبقي', 'نسبة البرنامج', 'صافي الدخل', 'آخر تعديل']
+  !['تاريخ المغادرة', 'نسبة البرنامج', 'صافي الدخل', 'آخر تعديل']
     .some(c => c in body), Object.keys(body));
+// P is written, but only ever as the sheet's own formula aimed at this row —
+// the fill-down that used to supply it stops a few rows below the data.
+check('P المتبقي carries the formula, not a number',
+  body['المتبقي'] === '=IF(C8="","",IFERROR(L8-M8,""))', body['المتبقي']);
 
 // ─── 4. Booking variants ──────────────────────────────────────────────────────
 

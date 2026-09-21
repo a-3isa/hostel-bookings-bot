@@ -69,4 +69,30 @@ for (const k of Object.keys(save.fields)) {
   out[k] = typeof v === 'string' ? v.replace(/\{r\}/g, String(r)) : v;
 }
 
+/**
+ * P المتبقي — the sheet's own FORMULA, written by us. Never a number.
+ *
+ * P is still off-limits to `save.fields` (the filter above), and for the same
+ * reason as ever: a computed value written into P is dead the moment the next
+ * payment lands, and the Dashboard and every per-property tab read P expecting
+ * it to track L − M.
+ *
+ * What changed is who puts the formula there. It used to be the sheet's own
+ * fill-down, and a fill-down only reaches as far as somebody once dragged it —
+ * measured 2026-09-21, it stops at row 89 while the last booking is on row 88.
+ * The very next booking is fine and the one after it gets a permanently blank
+ * P, which is the "rows whose calculated columns are empty" that
+ * `supabase/heal_formulas.py` exists to repair after the fact.
+ *
+ * So the row carries its own formula down with it. The text is the sheet's,
+ * copied off a healthy row, not an invention: the IF(C…) guard is what keeps a
+ * half-written row from showing a stray 0, and the IFERROR keeps a non-numeric
+ * L (a mixed-currency note, say) from spreading #VALUE! across the tab.
+ *
+ * N نسبة البرنامج, S صافي الدخل, R تاريخ الإدخال and T آخر تعديل still depend on
+ * the fill-down and still need `heal_formulas.py`. Only P was asked for; each of
+ * the others has a different pattern and one of them (N) branches on نوع الحجز.
+ */
+out['المتبقي'] = '=IF(C{r}="","",IFERROR(L{r}-M{r},""))'.replace(/\{r\}/g, String(r));
+
 return [{ json: out }];

@@ -2,7 +2,8 @@
 
 A full port of the live Python bot (`/start` → booking flow or expense flow) to a
 single n8n workflow. Same Arabic prompts, same keyboards, same sheet columns —
-including leaving **column P (المتبقي) empty** so the sheet's own formula owns it.
+and **column P (المتبقي) is written as the sheet's own formula**, never as a
+number, so it keeps tracking L − M as payments land.
 
 ## What's here
 
@@ -34,11 +35,51 @@ python booking_bot/push_brain.py       # deploy (see below)
 
 ## Deployed instance
 
-Pushed to `https://superfoxxy.dpdns.org` via the **n8n MCP server** (`create_workflow_from_code`):
+The live bot moved hosts. As of 2026-09-21 it is on
+`https://n8n-fv0b.srv1982020.hstgr.cloud`:
 
-- Workflow: **Bookings Bot (Telegram - Google Sheets)** — id `2H97FsGnzwmzl7YE`
-- <https://superfoxxy.dpdns.org/workflow/2H97FsGnzwmzl7YE>
-- Status: **published and active.**
+- Workflow: **Bookings Bot (Telegram - Google Sheets)** — id `hzMYegbL3yifl7KN`
+- <https://n8n-fv0b.srv1982020.hstgr.cloud/workflow/hzMYegbL3yifl7KN>
+- Status: **published and active**, 55 nodes, 2 triggers (Telegram + the 08:00
+  Report Schedule).
+
+`superfoxxy.dpdns.org` (workflow `2H97FsGnzwmzl7YE`) is the old host and answers
+HTTP 530 — its Cloudflare tunnel is down.
+
+> **The deploy scripts need a token for the new host.** They pick their endpoint
+> out of `~/.claude.json`; the entry for `n8n-fv0b` carries no bearer, because
+> Claude Code signs in over OAuth and keeps the result in a credential store the
+> scripts cannot read. Both got HTTP 401 and aborted.
+>
+> Since 2026-09-21 they also accept one from the environment or `.env`:
+>
+> ```bash
+> N8N_MCP_TOKEN=<bearer>        # in .env (gitignored), or inline for one run
+> python booking_bot/push_brain.py --publish
+> ```
+>
+> The token fills in for every registered server that has none, so the URL still
+> comes from Claude Code's own config; set `N8N_MCP_URL` too only if the host is
+> not registered there at all. Get both from the workflow card's **MCP** toggle
+> in n8n. See `env_override()` in `push_brain.py`.
+>
+> Everything except `brain.js` can also go over the **MCP tools in the Claude
+> session**, which are already authenticated: `update_workflow` with
+> `updateNodeParameters` per node, then `publish_workflow`. That is how the
+> 2026-09-21 change was deployed. `brain.js` cannot — at 102 KB it does not fit
+> in a tool call, which is why `push_brain.py` reads it off disk in the first
+> place.
+>
+> Note also that the live graph had drifted about four weeks behind this repo.
+> Ten node bodies were brought back in line on 2026-09-21 and verified
+> byte-identical. **Two are still behind:**
+>
+> - **`Brain`** — live 93,135 chars vs 101,936 here; 52 hunks, +305/−180 lines.
+>   Needs `push_brain.py`, i.e. needs the token above.
+> - **`Build Shadow Write`** — comment-only drift (three lines still mentioning
+>   the removed `/undo`). No behavioural difference; left alone.
+>
+> Do not assume a node on that instance matches `nodes/` — diff it first.
 
 To re-push after editing `brain.js`: `python booking_bot/push_brain.py --publish`
 (see *Deploying a brain.js change* below).
@@ -81,8 +122,17 @@ The write path uses the Google Sheets **`update`** operation matched on
 `row_number`, never `append`. Same reason the Python code uses `batch_update`: it
 finds the true last row from a formula-free key column (C اسم المقيم for bookings,
 B البند for expenses), then writes **only** the input columns — so the sheet's own
-formulas in **K, N, P, R, S and T** survive. `append` would write empty strings
-into those cells and destroy them. `P` (المتبقي) is calculated by the sheet.
+formulas in **K, N, R, S and T** survive. `append` would write empty strings into
+those cells and destroy them.
+
+**P (المتبقي) is the one exception, and only in who supplies the formula.** A
+value is still never written there. Since 2026-09-21 *Build Booking Row* writes
+the sheet's own `=IF(C{r}="","",IFERROR(L{r}-M{r},""))`, aimed at the row being
+created. It used to rely on the tab's fill-down, and a fill-down only reaches as
+far as somebody once dragged it — measured that day it stopped at row 89 with the
+last booking on row 88, so the *second* new booking would have got a permanently
+blank P. N, R, S and T still depend on the fill-down and still need
+`supabase/heal_formulas.py`; only P was asked for.
 
 Because one node's column mapping is bound to one sheet's headers, the write is
 **split into two branches** behind an *Is Expense?* IF — a single Sheets node
@@ -178,22 +228,44 @@ Telegram nodes. They predate this script and those nodes work; ignore them.
 ### Scheduled reports
 
 `Report Schedule → Report Config → Read Report Formulas → Read Report Values →
-Build Reports` still runs every morning. **It posts nothing.**
+Build Reports → Send Report` runs every morning and **posts one message** to
+`REPORT_GROUP_CHAT_ID` (`-5057362381`): 📋 *تقرير اليوم*, in three sections —
 
-On 2026-08-28 the user asked for no scheduled messages at all, and both wires
-into `Send Report` were cut — the reports branch and the reconcile. The node is
-kept, unwired: reconnecting one input restores one report, while deleting the
-node would take its Telegram credential binding with it. What it used to send:
+- 🏠 **الغرف المشغولة** — every room with a guest in it right now, grouped by
+  apartment, headed with the room and guest counts. A guest whose تاريخ المغادرة
+  is *today* is not counted here; they are in the next section instead.
+- 🛫 **مغادرة اليوم** — whoever leaves today. An open-ended stay is never one:
+  its تاريخ المغادرة evaluates to today on every date it is read, which is what
+  the second FORMULA read exists to detect.
+- 💰 **العملاء المدينون** — every booking with المتبقي > 0, biggest first, plus
+  the total.
 
-- a **debt report** on Saturdays, every booking with المتبقي > 0 plus a total.
-  `Build Reports` still builds it; it has nowhere to go.
-- a **daily digest** — arrivals, departures, and open stays past 30 days —
-  switched off a second way, behind `SEND_DAILY_DIGEST` at the top of
-  `nodes/build_reports.js`. `test_reports.mjs` still exercises it, by compiling a
-  copy of the source with the flag flipped.
+Asked for on 2026-09-21. It replaces the Saturday-only debt report, which is now
+just the third section. It is sent **even when all three sections are empty** —
+a report that only shows up when there is news cannot be told apart from a branch
+that has stopped running, which is exactly what happened to this one between
+2026-08-28 and 2026-09-21. If it would exceed Telegram's 4,096-character limit
+it is split across several sends rather than failing.
+
+Two things stay off:
+
+- the old **☀️ daily digest** — arrivals and open stays past 30 days — behind
+  `SEND_DAILY_DIGEST` at the top of `nodes/build_reports.js`, where the user put
+  it on 2026-08-28. `test_reports.mjs` still exercises it by compiling a copy of
+  the source with the flag flipped. Its departures section duplicates the daily
+  report's, so turning it back on announces departures twice.
 - the **daily reconcile message**. `Build Reconcile Message` still runs and must
-  keep returning one item: `Read Unmirrored Bookings` hangs off its output, and
-  that is what publishes dashboard-born bookings into the sheet.
+  keep returning one item — `Read Unmirrored Bookings` hangs off its output, and
+  that is what publishes dashboard-born bookings into the sheet — but its wire
+  into `Send Report` stays cut.
+
+> **The live instance had silenced this branch a different way: every node in it
+> was *disabled*, so the 08:00 trigger never even registered** (`triggerCount`
+> was 1, and there is not one scheduled execution in the history). Re-enabled on
+> 2026-09-21. Cutting `Build Reconcile Message → Send Report` was required rather
+> than tidy: a disabled node forwards its input downstream, so with that wire in
+> place the disabled reconcile chain would have pushed raw sheet rows into
+> `Send Report`.
 
 The branch stays wired end to end because it carries the day's real work — the
 sheet reads, the snapshot, `reconcile_bookings`, and the mirror append. Never
@@ -209,14 +281,16 @@ today on every single day, and the digest would announce the same guest as
 leaving for months. FORMULA alone cannot replace the first read either — المتبقي
 and, on nightly-rate rows, اجمالي سعر الحجز come back as formula text.
 
-No message is sent at all now, so neither read feeds one. Both stay wired
-regardless: `Read Report Values` runs *after* the formula read, and it is what
-the snapshot, the reconcile and the mirror append all hang off.
+Both stay wired regardless of what is being sent: `Read Report Values` runs
+*after* the formula read, and it is what the snapshot, the reconcile and the
+mirror append all hang off.
 
-> **One manual step:** the trigger fires at 08:00 in the **n8n instance's**
-> timezone. The workflow has no timezone set and the MCP surface cannot set one,
-> so change it in the UI (Workflow settings → Timezone → `Africa/Cairo`) if you
-> want 08:00 local. Report *content* already uses Cairo dates regardless.
+The trigger fires at 08:00 in the **workflow's** timezone, which is pinned to
+`Africa/Cairo` as of 2026-09-21 — so 08:00 means 08:00 local. It used to be
+unset, and therefore the n8n instance's, and this was a manual UI step because
+the MCP surface could not set one; it can now
+(`setWorkflowSettings` → `{"timezone": "Africa/Cairo"}`). Report *content* has
+always used Cairo dates regardless of the trigger.
 
 ### 4. Fill in the Config node
 

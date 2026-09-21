@@ -1,8 +1,8 @@
 /**
- * Offline harness for nodes/build_reports.js — the scheduled debt report, and
- * the daily digest that is switched off behind SEND_DAILY_DIGEST. Fakes the n8n
- * Code-node globals and pins "today" so the assertions do not drift with the
- * calendar.
+ * Offline harness for nodes/build_reports.js — the daily report (occupied
+ * rooms, today's departures, outstanding balances), and the old ☀️ digest that
+ * is switched off behind SEND_DAILY_DIGEST. Fakes the n8n Code-node globals and
+ * pins "today" so the assertions do not drift with the calendar.
  *
  *     node booking_bot/test_reports.mjs
  */
@@ -85,25 +85,72 @@ const row = (o) => ({
 const WED = '2026-08-12T06:00:00Z';
 const SAT = '2026-08-15T06:00:00Z';
 
-section('the daily digest is OFF');
-// What the bot actually does now. A weekday with arrivals, departures and a long
-// open stay — every reason the digest ever had to speak — and it says nothing.
+section('the daily report goes out every morning');
 let msgs = build([
   row({ 'اسم المقيم': 'واصل', 'تاريخ البداية': '2026-08-12', 'تاريخ المغادرة': '2026-08-15' }),
   row({ 'اسم المقيم': 'مغادر', 'تاريخ البداية': '2026-08-09', 'تاريخ المغادرة': '2026-08-12' }),
-  row({ 'اسم المقيم': 'طويل', 'تاريخ البداية': '2026-06-01', 'تاريخ المغادرة': '2026-08-12',
-        'عدد الليالي': 72, __open: true }),
+  row({ 'اسم المقيم': 'مقيم', 'تاريخ البداية': '2026-08-10', 'تاريخ المغادرة': '2026-08-20' }),
 ], WED);
-check('no message on a weekday, however busy', msgs.length === 0, msgs.map(m => m.text));
-
-// And it is the DIGEST that is off, not the whole node: Saturday's debt report
-// still goes out. Switching one off by breaking the other is the failure this
-// pins.
-msgs = build([row({ 'اسم المقيم': 'مدين', 'تاريخ البداية': '2026-08-15', 'المتبقي': 400 })], SAT);
-check('Saturday still carries the debt report',
-  msgs.length === 1 && msgs[0].text.includes('💰 *المبالغ المتبقية*'), msgs.map(m => m.text));
-check('and no digest rides along with it',
+check('one message on a weekday', msgs.length === 1, msgs.map(m => m.text));
+check('goes to the reports group', msgs[0].chat_id === '-5057362381', msgs[0].chat_id);
+check('titled as today', msgs[0].text.startsWith('📋 *تقرير اليوم* — 2026-08-12'), msgs[0].text);
+check('carries all three sections',
+  ['🏠', '🛫', '💰'].every(icon => msgs[0].text.includes(icon)), msgs[0].text);
+check('the old ☀️ digest does not ride along',
   !msgs.some(m => m.text.includes('☀️')), msgs.map(m => m.text));
+
+// The quiet day is the one that matters: a report that only appears when there
+// is news cannot be told apart from a branch that has stopped running, which is
+// how this one sat silent from 2026-08-28.
+msgs = build([], WED);
+check('an empty house still reports', msgs.length === 1, msgs.map(m => m.text));
+check('and says so in every section',
+  msgs[0].text.includes('🏠 *الغرف المشغولة* — لا يوجد') &&
+  msgs[0].text.includes('🛫 *مغادرة اليوم* — لا يوجد') &&
+  msgs[0].text.includes('💰 *العملاء المدينون* — لا يوجد'), msgs[0].text);
+
+section('occupied rooms');
+msgs = build([
+  row({ 'اسم المقيم': 'مقيم', 'اسم الشقة': 'ذاكر حسين', 'رقم الغرفة': '2',
+        'تاريخ البداية': '2026-08-10', 'تاريخ المغادرة': '2026-08-20' }),
+  row({ 'اسم المقيم': 'واصل اليوم', 'اسم الشقة': 'ذاكر حسين', 'رقم الغرفة': '10',
+        'تاريخ البداية': '2026-08-12', 'تاريخ المغادرة': '2026-08-15' }),
+  row({ 'اسم المقيم': 'مفتوح', 'اسم الشقة': 'انبي 3', 'رقم الغرفة': '1',
+        'تاريخ البداية': '2026-07-20', 'تاريخ المغادرة': '2026-08-12',
+        'عدد الليالي': 23, __open: true }),
+  row({ 'اسم المقيم': 'مغادر اليوم', 'اسم الشقة': 'انبي 3', 'رقم الغرفة': '4',
+        'تاريخ البداية': '2026-08-09', 'تاريخ المغادرة': '2026-08-12' }),
+  row({ 'اسم المقيم': 'قادم', 'اسم الشقة': 'انبي 3', 'رقم الغرفة': '5',
+        'تاريخ البداية': '2026-08-20', 'تاريخ المغادرة': '2026-08-25' }),
+  row({ 'اسم المقيم': 'راحل', 'اسم الشقة': 'انبي 3', 'رقم الغرفة': '6',
+        'تاريخ البداية': '2026-08-01', 'تاريخ المغادرة': '2026-08-04' }),
+], WED);
+let daily = msgs[0].text;
+check('a guest mid-stay is occupying', daily.includes('مقيم'), daily);
+check('so is one who arrived today', daily.includes('واصل اليوم'), daily);
+check('an open-ended stay is occupying, not departing',
+  daily.includes('مفتوح') && !daily.includes('🛫 *مغادرة اليوم* (2)'), daily);
+check('someone leaving today is a departure, not an occupied room',
+  daily.indexOf('مغادر اليوم') > daily.indexOf('🛫'), daily);
+check('a future booking is not occupying', !daily.includes('قادم'), daily);
+check('a finished stay is not occupying', !daily.includes('راحل'), daily);
+check('three rooms, three guests', daily.includes('🏠 *الغرف المشغولة* (3 غرفة / 3 نزيل)'), daily);
+check('grouped under the apartment', daily.includes('*ذاكر حسين*') && daily.includes('*انبي 3*'),
+  daily);
+check('and the room number is on the line', daily.includes('• غرفة 2 — مقيم (منذ 2026-08-10)'),
+  daily);
+check('rooms sort numerically, not as text',
+  daily.indexOf('غرفة 2 — مقيم') < daily.indexOf('غرفة 10 — واصل اليوم'), daily);
+
+section('two guests in one room count as one room');
+msgs = build([
+  row({ 'اسم المقيم': 'أخ', 'اسم الشقة': 'انبي 3', 'رقم الغرفة': '7',
+        'تاريخ البداية': '2026-08-10', 'تاريخ المغادرة': '2026-08-20' }),
+  row({ 'اسم المقيم': 'أخته', 'اسم الشقة': 'انبي 3', 'رقم الغرفة': '7',
+        'تاريخ البداية': '2026-08-10', 'تاريخ المغادرة': '2026-08-20' }),
+], WED);
+check('one room, two guests', msgs[0].text.includes('🏠 *الغرف المشغولة* (1 غرفة / 2 نزيل)'),
+  msgs[0].text);
 
 section('digest (flag on): arrivals and departures for today');
 msgs = buildDigest([
@@ -111,7 +158,10 @@ msgs = buildDigest([
   row({ 'اسم المقيم': 'مغادر', 'تاريخ البداية': '2026-08-09', 'تاريخ المغادرة': '2026-08-12' }),
   row({ 'اسم المقيم': 'مقيم', 'تاريخ البداية': '2026-08-10', 'تاريخ المغادرة': '2026-08-20' }),
 ], WED);
-check('one message on a weekday', msgs.length === 1, msgs.map(m => m.text));
+// Two now: the digest first, then the daily report that is always sent. This is
+// the double-announcement the node's header warns about — the digest's own
+// مغادرة اليوم section duplicates the daily report's.
+check('the digest rides alongside the daily report', msgs.length === 2, msgs.map(m => m.text));
 check('goes to the reports group', msgs[0].chat_id === '-5057362381', msgs[0].chat_id);
 check('arrivals listed', msgs[0].text.includes('🛬 *وصول اليوم* (1)') && msgs[0].text.includes('واصل'),
   msgs[0].text);
@@ -119,9 +169,10 @@ check('departures listed', msgs[0].text.includes('🛫 *مغادرة اليوم*
   msgs[0].text);
 check('a guest merely staying is in neither list', !msgs[0].text.includes('مقيم'), msgs[0].text);
 
-section('digest (flag on): stays nothing on a quiet day');
+section('digest (flag on): stays quiet on a quiet day');
 msgs = buildDigest([row({ 'تاريخ البداية': '2026-08-01', 'تاريخ المغادرة': '2026-08-04' })], WED);
-check('no arrivals, no departures, no message', msgs.length === 0, msgs);
+check('no arrivals, no departures, no digest',
+  msgs.length === 1 && !msgs[0].text.includes('☀️'), msgs.map(m => m.text));
 
 section('digest (flag on): long open-ended stays');
 msgs = buildDigest([
@@ -157,26 +208,45 @@ msgs = buildDigest([
 check('not an arrival, and not a debt',
   msgs.every(m => !m.text.includes('ملغى')), msgs.map(m => m.text));
 
-section('debt report: Saturdays only');
+section('debts: a section of the daily report, every day');
+// This used to be a message of its own, on Saturdays. Asked for daily on
+// 2026-09-21, so the weekday gate is gone: the same rows report the same debts
+// midweek as at the weekend.
 const withDebt = [
   row({ 'اسم المقيم': 'مدين كبير', 'المتبقي': 1500 }),
   row({ 'اسم المقيم': 'مدين صغير', 'المتبقي': 250.5 }),
   row({ 'اسم المقيم': 'خالص', 'المتبقي': 0 }),
 ];
-msgs = build(withDebt, WED);
-check('no debt report midweek', msgs.length === 0, msgs.map(m => m.text));
+const midweek = build(withDebt, WED)[0].text;
+const weekend = build(withDebt, SAT)[0].text;
+check('debts are reported midweek', midweek.includes('💰 *العملاء المدينون* (2)'), midweek);
+check('and the weekend says the same thing',
+  weekend.includes('💰 *العملاء المدينون* (2)'), weekend);
+check('largest debt first', midweek.indexOf('مدين كبير') < midweek.indexOf('مدين صغير'), midweek);
+check('a settled booking is left out', !midweek.includes('خالص'), midweek);
+check('total is summed', midweek.includes('*الإجمالي المتبقي: 1750.5*'), midweek);
 
-msgs = build(withDebt, SAT);
-check('one message on Saturday', msgs.length === 1, msgs.map(m => m.text));
-const debt = msgs[0].text;
-check('titled as the debt report', debt.includes('💰 *المبالغ المتبقية*'), debt);
-check('largest debt first', debt.indexOf('مدين كبير') < debt.indexOf('مدين صغير'), debt);
-check('a settled booking is left out', !debt.includes('خالص'), debt);
-check('total is summed', debt.includes('*الإجمالي المتبقي: 1750.5*'), debt);
+msgs = build([row({ 'المتبقي': 0 })], WED);
+check('an all-settled day still reports, positively',
+  msgs[0].text.includes('💰 *العملاء المدينون* — لا يوجد'), msgs.map(m => m.text));
 
-msgs = build([row({ 'المتبقي': 0 })], SAT);
-check('an all-settled Saturday still reports, positively',
-  msgs.length === 1 && msgs[0].text.includes('✅ لا توجد مبالغ متبقية'), msgs.map(m => m.text));
+section('a full house is split, not truncated');
+// Telegram refuses anything over 4096 characters, so the node packs lines into
+// as many messages as it takes. 120 occupied rooms is past the limit; the point
+// is that they all still arrive.
+msgs = build(Array.from({ length: 120 }, (_, i) => row({
+  'اسم المقيم': `نزيل رقم ${i}`, 'اسم الشقة': 'ذاكر حسين', 'رقم الغرفة': String(i + 1),
+  'تاريخ البداية': '2026-08-10', 'تاريخ المغادرة': '2026-08-20',
+})), WED);
+check('more than one message', msgs.length > 1, msgs.length);
+check('every one is under the Telegram limit', msgs.every(m => m.text.length <= 4096),
+  msgs.map(m => m.text.length));
+check('every one goes to the reports group',
+  msgs.every(m => m.chat_id === '-5057362381'), msgs.map(m => m.chat_id));
+const whole = msgs.map(m => m.text).join(' ');
+check('no guest is lost in the split',
+  Array.from({ length: 120 }, (_, i) => `نزيل رقم ${i}`).every(n => whole.includes(n)),
+  msgs.map(m => m.text.length));
 
 section('markdown safety');
 msgs = buildDigest([row({ 'اسم المقيم': 'ضيف_مهم *جدا*', 'تاريخ البداية': '2026-08-12' })], WED);
