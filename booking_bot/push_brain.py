@@ -18,6 +18,7 @@ import base64
 import json
 import os
 import sys
+import time
 import urllib.request
 
 # This script's own messages are ASCII, but --check prints workflow names and
@@ -138,6 +139,54 @@ def env_override():
     return values.get("N8N_MCP_URL", ""), token
 
 
+def claude_code_token():
+    """The live n8n bearer out of Claude Code's own credential store.
+
+    Claude Code signs in to the MCP endpoint over OAuth and keeps the result in
+    `~/.claude/.credentials.json`, not in `~/.claude.json` next to the server
+    URL. That split is why both deploy scripts answered 401 for the whole of
+    2026-09-21 while the Claude session was talking to the same endpoint
+    happily: the URL was readable and the credential was not.
+
+    The token is short-lived — one hour — and Claude Code refreshes it in place
+    whenever it makes a call. So this reads it fresh on every run rather than
+    copying it anywhere. An expired one is skipped and reported rather than
+    sent, because "JWT Verification Failed" looks exactly like a wrong account
+    and cost an hour of looking in the wrong place.
+
+    Refreshing it here is deliberately NOT attempted. The refresh token rotates,
+    and spending Claude Code's copy would log the session out of its own server.
+    Make any n8n call in Claude Code instead; that refreshes the file, and this
+    picks it up.
+    """
+    path = os.path.expanduser(r"~/.claude/.credentials.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            store = json.load(fh)
+    except (OSError, ValueError):
+        return []
+
+    out = []
+    for entry in (store.get("mcpOAuth") or {}).values():
+        url = str(entry.get("serverUrl") or "")
+        token = entry.get("accessToken") or ""
+        if not token or "n8n" not in url.lower():
+            continue
+        try:
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            exp = int(json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0))
+        except Exception:
+            exp = 0
+        if exp and exp <= time.time():
+            print(f"note: Claude Code's token for {url} expired "
+                  f"{int(time.time()) - exp}s ago. Make any n8n call in Claude "
+                  f"Code to refresh it, then re-run.")
+            continue
+        out.append((exp, url, "Bearer " + token))
+    return out
+
+
 def load_servers():
     """Every n8n MCP credential this machine knows, newest token first.
 
@@ -186,6 +235,12 @@ def load_servers():
     # on purpose and the discovered ones are guesses.
     if env_url:
         found.insert(0, (2 ** 31, env_url, env_token))
+
+    # Claude Code's own live bearer, ahead of everything discovered but behind
+    # an explicitly named URL. Last in the file, first to be tried, because it
+    # is the only credential here that is known to be current.
+    for iat, url, auth in claude_code_token():
+        found.insert(1 if env_url else 0, (iat, url, auth))
 
     if not found:
         raise SystemExit(

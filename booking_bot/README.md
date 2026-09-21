@@ -46,40 +46,43 @@ The live bot moved hosts. As of 2026-09-21 it is on
 `superfoxxy.dpdns.org` (workflow `2H97FsGnzwmzl7YE`) is the old host and answers
 HTTP 530 — its Cloudflare tunnel is down.
 
-> **The deploy scripts need a token for the new host.** They pick their endpoint
-> out of `~/.claude.json`; the entry for `n8n-fv0b` carries no bearer, because
-> Claude Code signs in over OAuth and keeps the result in a credential store the
-> scripts cannot read. Both got HTTP 401 and aborted.
+> **Where the bearer comes from.** `~/.claude.json` holds the MCP server URL but
+> no credential: Claude Code signs in over OAuth and keeps the token in
+> `~/.claude/.credentials.json` instead. That split is why both scripts answered
+> HTTP 401 for most of 2026-09-21 while the Claude session was talking to the
+> same endpoint perfectly happily.
 >
-> Since 2026-09-21 they also accept one from the environment or `.env`:
+> Since then `push_brain.py` reads that store itself — see `claude_code_token()`
+> — so on a machine running Claude Code both scripts just work:
 >
 > ```bash
-> N8N_MCP_TOKEN=<bearer>        # in .env (gitignored), or inline for one run
+> python booking_bot/push_brain.py --check      # reachable + workflows listed
 > python booking_bot/push_brain.py --publish
+> python booking_bot/deploy_graph.py --publish
 > ```
 >
-> The token fills in for every registered server that has none, so the URL still
-> comes from Claude Code's own config; set `N8N_MCP_URL` too only if the host is
-> not registered there at all. Get both from the workflow card's **MCP** toggle
-> in n8n. See `env_override()` in `push_brain.py`.
+> The token lives one hour and Claude Code refreshes it in place. An expired one
+> is skipped with a note rather than sent — "JWT Verification Failed" reads
+> exactly like a wrong account and cost an hour of looking in the wrong place.
+> To refresh it, make any n8n call in Claude Code and re-run. The script
+> deliberately does **not** spend the refresh token itself: it rotates, and
+> using it would log the session out of its own server.
+>
+> Elsewhere, set `N8N_MCP_TOKEN` (and `N8N_MCP_URL` if the host is not
+> registered at all) in the environment or `.env` — see `env_override()`. A
+> token fills in for every registered server that has none.
 >
 > Everything except `brain.js` can also go over the **MCP tools in the Claude
-> session**, which are already authenticated: `update_workflow` with
-> `updateNodeParameters` per node, then `publish_workflow`. That is how the
-> 2026-09-21 change was deployed. `brain.js` cannot — at 102 KB it does not fit
-> in a tool call, which is why `push_brain.py` reads it off disk in the first
-> place.
+> session** directly: `update_workflow` with `updateNodeParameters` per node,
+> then `publish_workflow`. `brain.js` cannot — at 102 KB it does not fit in a
+> tool call, which is why `push_brain.py` reads it off disk in the first place.
 >
-> Note also that the live graph had drifted about four weeks behind this repo.
-> Ten node bodies were brought back in line on 2026-09-21 and verified
-> byte-identical. **Two are still behind:**
->
-> - **`Brain`** — live 93,135 chars vs 101,936 here; 52 hunks, +305/−180 lines.
->   Needs `push_brain.py`, i.e. needs the token above.
-> - **`Build Shadow Write`** — comment-only drift (three lines still mentioning
->   the removed `/undo`). No behavioural difference; left alone.
->
-> Do not assume a node on that instance matches `nodes/` — diff it first.
+> Note also that the live graph had drifted about four weeks behind this repo —
+> `Brain` alone was 8.8 KB short, 52 hunks, +305/−180 lines. All twelve node
+> bodies were brought back in line on 2026-09-21 and verified byte-identical
+> against `brain.js` and `nodes/`, and the Config access lists went from the
+> username form to the numeric ids. Do not assume it stays that way: diff before
+> you push.
 
 To re-push after editing `brain.js`: `python booking_bot/push_brain.py --publish`
 (see *Deploying a brain.js change* below).
