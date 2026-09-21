@@ -15,28 +15,32 @@
  * So: money and dates come from the evaluated read, open-endedness from the
  * formula read. One extra Sheets call a day buys an exact answer.
  *
+ * The apartment/room registry comes from a third read, "Read Report Locations"
+ * — the same query the Telegram branch's Read Locations node runs. Nothing on
+ * the bookings tab knows which rooms exist, only which ones are slept in, so
+ * the empty rooms cannot be named without it.
+ *
  * Output: one item per message to send, so the Telegram node downstream just
  * loops. Zero items means no message at all.
  *
- * ONE report goes out, every morning: 📋 تقرير اليوم, to REPORT_GROUP_CHAT_ID.
- * Three sections —
+ * TWO reports go out, every morning, to REPORT_GROUP_CHAT_ID — split on
+ * 2026-09-21 at the user's request, because the two get read by different
+ * people for different reasons and one scrolling message served neither:
  *
- *   🏠 الغرف المشغولة   every room with a guest in it right now, by apartment
- *   🛫 مغادرة اليوم      whoever's تاريخ المغادرة is today
- *   💰 العملاء المدينون  every booking with المتبقي > 0, plus the total
+ *   🏠 تقرير الإتاحة    every room in the building, apartment by apartment,
+ *                      carrying its guest or reading متاحه, then who leaves today
+ *   💰 تقرير المديونيات  every booking with المتبقي > 0, biggest first
  *
- * Asked for on 2026-09-21, and it replaces the Saturday-only debt report: the
- * debts are a section of the daily message now, not a message of their own.
- * It is sent even when all three sections are empty — a report that only shows
- * up when there is news cannot be told apart from a branch that has died, which
- * is exactly what happened to this one between 2026-08-28 and now.
+ * Both are sent even when empty — a report that only shows up when there is
+ * news cannot be told apart from a branch that has died, which is exactly what
+ * happened to this one between 2026-08-28 and 2026-09-21.
  *
  * The old ☀️ digest — arrivals and long open stays — stays switched off behind
  * SEND_DAILY_DIGEST, where the user put it on 2026-08-28. Its departures
- * section is what the new report's مغادرة اليوم grew out of, so flipping that
+ * section duplicates the availability report's مغادرة اليوم, so flipping that
  * flag back on would announce departures twice. Pick one.
  *
- * The trigger, both reads and this node also drive the reconcile snapshot and
+ * The trigger, the reads and this node also drive the reconcile snapshot and
  * the mirror append that publishes dashboard-born bookings into the sheet, so
  * the branch runs whatever this node decides to emit.
  */
@@ -64,15 +68,22 @@ const S = {
   arrivals: '🛬 *وصول اليوم* ({n})',
   departures: '🛫 *مغادرة اليوم* ({n})',
   long_stays: '🕰️ *إقامات مفتوحة أطول من {days} يوم* ({n})',
-  line_guest: '• {name} — {apartment} غرفة {room}',
-  line_long: '• {name} — {apartment} غرفة {room} — منذ {arrival} ({days} يوم)',
+  line_guest: '• {name} — {apartment} · {room}',
+  line_long: '• {name} — {apartment} · {room} — منذ {arrival} ({days} يوم)',
+  // A "·" between the apartment and the room on the departure line: the word
+  // غرفة came off it on 2026-09-21, and "انبي 3 4" reads as one number when the
+  // apartment name ends in a digit — which half of them do. The room lines need
+  // no separator, their apartment is a heading above them, and the debt line
+  // carries no room at all.
   nothing: 'لا يوجد',
-  debt_line: '• {name} — {apartment} غرفة {room} — متبقي {amount}',
-  debt_total: '\n*الإجمالي المتبقي: {total}*',
-  daily_title: '📋 *تقرير اليوم* — {date}',
+  debt_line: '• {name} — {apartment}: {amount}',
+  avail_title: '🏠 *تقرير الإتاحة* — {date}',
+  debt_title: '💰 *تقرير المديونيات* — {date}',
   occupied: '🏠 *الغرف المشغولة* ({n} غرفة / {g} نزيل)',
   occ_apartment: '*{apartment}*',
-  occ_line: '  • غرفة {room} — {name} (منذ {arrival})',
+  occ_line: '  • {room} — {name} ({arrival} ← {departure})',
+  room_free: '  • {room} — متاحه',
+  occ_open: 'مفتوح',
   occ_none: '🏠 *الغرف المشغولة* — لا يوجد',
   dep_none: '🛫 *مغادرة اليوم* — لا يوجد',
   debt_section: '💰 *العملاء المدينون* ({n})',
@@ -92,6 +103,18 @@ function todayIso() {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(new Date());
+}
+
+/**
+ * yyyy-mm-dd → dd/mm, for the availability lines.
+ *
+ * The year is noise on a report about who is in the building this morning: the
+ * arrival and the departure are both within days of today. Anything that is not
+ * an ISO date is passed through untouched rather than mangled.
+ */
+function dm(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || '').trim());
+  return m === null ? String(iso || '').trim() : m[3] + '/' + m[2];
 }
 
 /**
@@ -155,6 +178,32 @@ for (const i of $('Read Report Formulas').all()) {
 }
 
 /**
+ * Every room that exists, in registry order, or [] when it cannot be read.
+ *
+ * The node is wired with continueRegularOutput, and a graph deployed before
+ * 2026-09-21 does not carry it at all — referencing a node that is not there
+ * throws. Either way the answer is the same: say nothing about empty rooms
+ * rather than announce the whole building as free, which is what subtracting
+ * the occupied rooms from an empty registry would otherwise produce.
+ */
+function registry() {
+  let items;
+  try {
+    items = $('Read Report Locations').all();
+  } catch (e) {
+    return [];
+  }
+  const out = [];
+  for (const i of items || []) {
+    const j = i.json || {};
+    const apartment = String(j['الشقة'] || '').trim();
+    const room = String(j['الغرفة'] || '').trim();
+    if (apartment && room) out.push({ apartment, room });
+  }
+  return out;
+}
+
+/**
  * A continuation LINE, not a guest.
  *
  * Column U is `413` on a booking's own row and `413-2` on a row carrying one of
@@ -194,8 +243,10 @@ const occupied = [];
 
 for (const j of rows) {
   const name = esc(j['اسم المقيم']);
-  const apartment = esc(j['اسم الشقة'] || '—');
-  const room = esc(j['رقم الغرفة'] || '—');
+  // Raw, not escaped: the room registry is matched on these, and the Markdown
+  // escaping goes back on at render time.
+  const apartment = String(j['اسم الشقة'] || '').trim() || '—';
+  const room = String(j['رقم الغرفة'] || '').trim() || '—';
   const arrival = String(j['تاريخ البداية'] || '').trim();
   const isOpen = openByRow[String(j.row_number)] === true;
   const nights = parseNum(j['عدد الليالي']);
@@ -204,8 +255,9 @@ for (const j of rows) {
   const departure = isOpen ? '' : (String(j['تاريخ المغادرة'] || '').trim() ||
     (nights === null ? '' : isoAddDays(arrival, Math.trunc(nights))));
 
-  if (arrival === today) arrivals.push(t('line_guest', { name, apartment, room }));
-  if (departure && departure === today) departures.push(t('line_guest', { name, apartment, room }));
+  const where = { name, apartment: esc(apartment), room: esc(room) };
+  if (arrival === today) arrivals.push(t('line_guest', where));
+  if (departure && departure === today) departures.push(t('line_guest', where));
 
   /**
    * In the room right now.
@@ -214,6 +266,8 @@ for (const j of rows) {
    * The guest whose تاريخ المغادرة IS today is deliberately not counted here —
    * they are listed one section down, under مغادرة اليوم, and counting them in
    * both would make the room look taken by someone who is on their way out.
+   * The same call is what makes the room they are leaving count as free today,
+   * which is the question الغرف الفارغة is asked to answer.
    *
    * A booking with neither an end nor a live =TODAY()-J is not counted either:
    * without عدد الليالي there is nothing to say when it ends, and guessing
@@ -222,17 +276,24 @@ for (const j of rows) {
    * The dates are ISO, so a string compare is a date compare.
    */
   if (arrival !== '' && arrival <= today && (isOpen || (departure && departure > today))) {
-    occupied.push({ apartment, room, name, arrival });
+    occupied.push({ apartment, room, name, arrival, departure, isOpen });
   }
 
   const age = daysBetween(arrival, today);
   if (isOpen && age !== null && age > LONG_STAY_DAYS) {
-    longStays.push(t('line_long', { name, apartment, room, arrival, days: age }));
+    longStays.push(t('line_long', {
+      name, apartment: esc(apartment), room: esc(room), arrival, days: age,
+    }));
   }
 
   const remaining = parseNum(j['المتبقي']);
   if (remaining !== null && remaining > 0) {
-    debts.push({ amount: remaining, line: t('debt_line', { name, apartment, room, amount: remaining }) });
+    debts.push({
+      amount: remaining,
+      // Name, apartment and the amount — no room number and no "متبقي" (user,
+      // 2026-09-21). Who owes, where, how much.
+      line: t('debt_line', { name, apartment: esc(apartment), amount: remaining }),
+    });
   }
 }
 
@@ -250,36 +311,98 @@ if (SEND_DAILY_DIGEST && (arrivals.length || departures.length || longStays.leng
   messages.push({ chat_id: CHAT_ID, text: parts.join('\n').trim(), parse_mode: 'Markdown' });
 }
 
-// ── The daily report ── 🏠 occupied rooms · 🛫 today's departures · 💰 debts ──
+// ── Report 1 ── every room, in order, taken or متاحه · 🛫 today's departures ──
 //
-// Sent every morning, whatever it finds. The debts used to be a message of
-// their own, on Saturdays; they are the third section of this one now.
+// Reshaped on 2026-09-21 to the layout the user drew: no occupied section and
+// no empty section, one list of the WHOLE building, apartment by apartment,
+// each room either carrying its guest or reading متاحه. The two-section version
+// meant reading both lists and subtracting them in your head to answer the only
+// question anyone asks it — is there a bed in انبي 2 tonight.
 {
-  const parts = [t('daily_title', { date: today }), ''];
+  const parts = [t('avail_title', { date: today }), ''];
 
-  // 🏠 Occupied, grouped by apartment. Sorted by apartment, then by room
-  // NUMERICALLY — plain string order puts room 10 between 1 and 2, and the
-  // room numbers on this sheet run past 9.
-  if (occupied.length) {
+  // `apartment|room` is a room's identity — a bare room number is not unique
+  // across apartments.
+  const guestsByRoom = {};
+  for (const o of occupied) {
+    const key = o.apartment + '|' + o.room;
+    (guestsByRoom[key] = guestsByRoom[key] || []).push(o);
+  }
+
+  function roomLines(apartment, room) {
+    const guests = guestsByRoom[apartment + '|' + room];
+    // One room can hold more than one guest — a family books a bed each, under
+    // its own name and sometimes its own dates — so each gets a line rather
+    // than one line naming them both with one set of dates.
+    if (!guests || !guests.length) return [t('room_free', { room: esc(room) })];
+    return guests.map(o => t('occ_line', {
+      room: esc(o.room),
+      name: o.name,
+      // Arrival and departure, day/month only — no year, no "منذ" and no
+      // "غرفة" (user, 2026-09-21): the apartment heading above already says
+      // these are rooms, and what the group reads off the line is when the bed
+      // frees up.
+      arrival: dm(o.arrival),
+      departure: o.isOpen || !o.departure ? t('occ_open') : dm(o.departure),
+    }));
+  }
+
+  const all = registry();
+  if (all.length) {
+    // Registry order is apartment, then room numerically — the query sorts it
+    // that way, and room 10 must not land between 1 and 2.
+    const blocks = [];
+    const at = {};
+    function block(apartment) {
+      if (at[apartment] === undefined) {
+        at[apartment] = blocks.length;
+        blocks.push({ apartment, rooms: [], seen: {} });
+      }
+      return blocks[at[apartment]];
+    }
+    function room(apartment, number) {
+      const b = block(apartment);
+      if (b.seen[number] === undefined) {
+        b.seen[number] = true;
+        b.rooms.push(number);
+      }
+    }
+    for (const r of all) room(r.apartment, r.room);
+    // A guest in a room the registry has never heard of — a new room, or an
+    // apartment spelled differently on the sheet — is appended rather than
+    // dropped. Losing a guest off this report is worse than an odd-looking
+    // block at the bottom of it.
+    for (const o of occupied) room(o.apartment, o.room);
+
+    for (const b of blocks) {
+      parts.push(t('occ_apartment', { apartment: esc(b.apartment) }));
+      for (const number of b.rooms) parts.push(...roomLines(b.apartment, number));
+    }
+    parts.push('');
+  } else if (occupied.length) {
+    // No registry: the empty rooms cannot be named, so this falls back to the
+    // pre-2026-09-21 layout — the occupied rooms only, under their apartment,
+    // with the counts that made that list readable on its own.
     occupied.sort((a, b) =>
       a.apartment.localeCompare(b.apartment, 'ar') ||
       (parseNum(a.room) === null || parseNum(b.room) === null
         ? String(a.room).localeCompare(String(b.room), 'ar')
         : parseNum(a.room) - parseNum(b.room)));
-    // One room can hold more than one guest (a family books a bed each under
-    // its own name), so the headline counts both: distinct rooms, and people.
-    // `apartment|room` is the room's identity — a bare room number is not
-    // unique across apartments.
-    const roomKeys = {};
-    for (const o of occupied) roomKeys[o.apartment + '|' + o.room] = true;
-    parts.push(t('occupied', { n: Object.keys(roomKeys).length, g: occupied.length }));
+    const rooms = {};
+    for (const o of occupied) rooms[o.apartment + '|' + o.room] = true;
+    parts.push(t('occupied', { n: Object.keys(rooms).length, g: occupied.length }));
     let apartment = null;
     for (const o of occupied) {
       if (o.apartment !== apartment) {
         apartment = o.apartment;
-        parts.push(t('occ_apartment', { apartment }));
+        parts.push(t('occ_apartment', { apartment: esc(apartment) }));
       }
-      parts.push(t('occ_line', { room: o.room, name: o.name, arrival: o.arrival }));
+      parts.push(t('occ_line', {
+        room: esc(o.room),
+        name: o.name,
+        arrival: dm(o.arrival),
+        departure: o.isOpen || !o.departure ? t('occ_open') : dm(o.departure),
+      }));
     }
     parts.push('');
   } else {
@@ -288,17 +411,29 @@ if (SEND_DAILY_DIGEST && (arrivals.length || departures.length || longStays.leng
 
   // 🛫 Departures
   if (departures.length) {
-    parts.push(t('departures', { n: departures.length }), ...departures, '');
+    parts.push(t('departures', { n: departures.length }), ...departures);
   } else {
-    parts.push(t('dep_none'), '');
+    parts.push(t('dep_none'));
   }
 
-  // 💰 Debts, biggest first, with the total
+  for (const text of pack(parts)) {
+    messages.push({ chat_id: CHAT_ID, text, parse_mode: 'Markdown' });
+  }
+}
+
+// ── Report 2 ── 💰 debts, biggest first ──
+//
+// A message of its own since 2026-09-21. It was the third section of the
+// availability report for a day, and a Saturday-only message before that.
+//
+// No total line: the user dropped it the same evening. The list is what gets
+// acted on, guest by guest, and a five-figure sum under it was a number nobody
+// chased.
+{
+  const parts = [t('debt_title', { date: today }), ''];
   if (debts.length) {
     debts.sort((a, b) => b.amount - a.amount);
-    const total = debts.reduce((sum, x) => sum + x.amount, 0);
-    parts.push(t('debt_section', { n: debts.length }), ...debts.map(x => x.line),
-               t('debt_total', { total: Math.round(total * 100) / 100 }));
+    parts.push(t('debt_section', { n: debts.length }), ...debts.map(x => x.line));
   } else {
     parts.push(t('debt_section_none'));
   }
