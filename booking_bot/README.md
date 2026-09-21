@@ -230,33 +230,66 @@ Telegram nodes. They predate this script and those nodes work; ignore them.
 
 ### Scheduled reports
 
-`Report Schedule → Report Config → Read Report Formulas → Read Report Values →
-Build Reports → Send Report` runs every morning and **posts one message** to
-`REPORT_GROUP_CHAT_ID` (`-5057362381`): 📋 *تقرير اليوم*, in three sections —
+`Report Schedule → Report Config → Read Report Locations → Read Report Formulas
+→ Read Report Values → Build Reports → Send Report` runs every morning and **posts
+two messages** to `REPORT_GROUP_CHAT_ID` (`-5057362381`).
 
-- 🏠 **الغرف المشغولة** — every room with a guest in it right now, grouped by
-  apartment, headed with the room and guest counts. A guest whose تاريخ المغادرة
-  is *today* is not counted here; they are in the next section instead.
-- 🛫 **مغادرة اليوم** — whoever leaves today. An open-ended stay is never one:
-  its تاريخ المغادرة evaluates to today on every date it is read, which is what
-  the second FORMULA read exists to detect.
-- 💰 **العملاء المدينون** — every booking with المتبقي > 0, biggest first, plus
-  the total.
+🏠 *تقرير الإتاحة* — **every room in the building**, apartment by apartment, in
+registry order:
 
-Asked for on 2026-09-21. It replaces the Saturday-only debt report, which is now
-just the third section. It is sent **even when all three sections are empty** —
-a report that only shows up when there is news cannot be told apart from a branch
-that has stopped running, which is exactly what happened to this one between
-2026-08-28 and 2026-09-21. If it would exceed Telegram's 4,096-character limit
-it is split across several sends rather than failing.
+```
+*ذاكر حسين*
+  • 1 — متاحه
+  • 5 — عمرو عبدالبديع (19/09 ← 22/09)
+```
+
+A room either carries its guest — bare room number, name, then arrival and
+departure as day/month, `مفتوح` for an open-ended stay — or reads `متاحه`. No
+year, no "منذ", no "غرفة" (user, 2026-09-21). The occupied/empty split this
+replaced made you subtract two lists in your head to answer the only question
+the report is ever asked: is there a bed in انبي 2 tonight.
+
+- The room list comes from the registry: `Read Report Locations`, the same
+  `read_locations.sql` the Telegram branch runs, wired at the head of the chain
+  so it costs one query rather than one per row. A guest in a room — or a whole
+  apartment — the registry does not list is **appended** rather than dropped.
+  If the registry cannot be read at all (the node errors, or an older deploy
+  does not carry it) the report falls back to the occupied rooms only, under a
+  `🏠 الغرف المشغولة (n غرفة / g نزيل)` heading; it never calls a room متاحه on
+  a guess.
+- A guest whose تاريخ المغادرة is *today* frees their room on this list, and
+  appears below under 🛫 **مغادرة اليوم** — whoever leaves today, `• <اسم> —
+  <شقة> · <غرفة>`. An open-ended stay is never a departure: its تاريخ المغادرة
+  evaluates to today on every date it is read, which is what the second FORMULA
+  read exists to detect.
+- One room can hold more than one guest — a family books a bed each — and each
+  gets their own line, since their dates can differ.
+
+💰 *تقرير المديونيات* — 💰 **العملاء المدينون**: every booking with المتبقي > 0,
+biggest first, as `• <اسم> — <شقة>: <مبلغ>`. No room number, no "متبقي" on the
+line and no total under it (user, 2026-09-21) — the list is what gets acted on,
+guest by guest.
+
+Asked for on 2026-09-21 as one message in three sections, then split into two
+the same day — rooms and money get read by different people — and the
+availability half reshaped room-by-room the same evening. The Saturday-only debt
+report it replaced is the second message now. **Both are
+sent even when empty** — a report that only shows up when there is news cannot
+be told apart from a branch that has stopped running, which is exactly what
+happened to this one between 2026-08-28 and 2026-09-21. Either message is split
+across several sends rather than failing Telegram's 4,096-character limit.
+
+Both sheet reads carry `executeOnce`. `Read Report Values` always did; `Read
+Report Formulas` needs it too now that 26 registry rows arrive at its input, or
+it would re-read the whole tab once per room.
 
 Two things stay off:
 
 - the old **☀️ daily digest** — arrivals and open stays past 30 days — behind
   `SEND_DAILY_DIGEST` at the top of `nodes/build_reports.js`, where the user put
   it on 2026-08-28. `test_reports.mjs` still exercises it by compiling a copy of
-  the source with the flag flipped. Its departures section duplicates the daily
-  report's, so turning it back on announces departures twice.
+  the source with the flag flipped. Its departures section duplicates the
+  availability report's, so turning it back on announces departures twice.
 - the **daily reconcile message**. `Build Reconcile Message` still runs and must
   keep returning one item — `Read Unmirrored Bookings` hangs off its output, and
   that is what publishes dashboard-born bookings into the sheet — but its wire

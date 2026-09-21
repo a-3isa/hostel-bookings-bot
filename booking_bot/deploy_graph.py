@@ -25,12 +25,14 @@ What it sets up:
     confirmation, so the availability check has rows to look at.
   * "Needs Locations?" / "Read Locations": the availability tab A3:B, read only
     on the turns that draw an apartment keyboard.
-  * A schedule branch: Report Schedule -> Report Config -> Read Report Formulas
-    -> Read Report Values -> Build Reports -> Send Report.
+  * A schedule branch: Report Schedule -> Report Config -> Read Report Locations
+    -> Read Report Formulas -> Read Report Values -> Build Reports -> Send Report.
 
-The 08:00 schedule posts ONE message: 📋 تقرير اليوم — the occupied rooms,
-today's departures and the outstanding balances — to REPORT_GROUP_CHAT_ID. Asked
-for on 2026-09-21, and it is built by `nodes/build_reports.js`.
+The 08:00 schedule posts TWO messages to REPORT_GROUP_CHAT_ID: 🏠 تقرير
+الإتاحة — the occupied rooms, today's departures and the empty rooms — and
+💰 تقرير المديونيات, the outstanding balances. Asked for on 2026-09-21 (one
+message at first, split in two later the same day), and both are built by
+`nodes/build_reports.js`.
 
 The reconcile's own wire into `Send Report` stays cut, as it has been since
 2026-08-28: that message arrived every morning whether or not anything
@@ -318,11 +320,18 @@ def main():
                  ]}, "options": {}},
                  [-960, 800])
         print("  + Report Config")
+    # The room registry, for 🔓 الغرف الفارغة. The bookings tab only knows which
+    # rooms are slept in; naming the empty ones needs the list of rooms that
+    # exist, which is the same query the Telegram branch's Read Locations runs.
+    # It sits at the HEAD of the chain: one item in from Report Config is one
+    # query, whereas hanging it off either sheet read would fire it once per row.
+    postgres_read("Read Report Locations", "read_locations.sql", [-840, 960])
     if "Read Report Formulas" not in have:
         add_node("Read Report Formulas", "n8n-nodes-base.googleSheets", 4.7,
                  sheets_read(BOOKINGS_TAB, "A:U", formula=True),
-                 [-720, 800], cred=SHEETS_CRED)
-        print("  + Read Report Formulas")
+                 [-720, 800], cred=SHEETS_CRED,
+                 settings={"executeOnce": True})
+        print("  + Read Report Formulas (executeOnce)")
     if "Read Report Values" not in have:
         # executeOnce: the formulas read hands it N items, and without this the
         # Sheets node would re-read the whole tab once per row.
@@ -360,13 +369,23 @@ def main():
     # addNode does not carry node-level settings, so pin executeOnce separately.
     ops.append({"type": "setNodeSettings", "nodeName": "Read Report Values",
                 "settings": {"executeOnce": True}})
+    # Read Report Formulas needs it too, since 2026-09-21: the registry read now
+    # feeds it 26 items, and without this it would re-read the whole tab 26
+    # times — 26 Sheets calls for one report, and a rate limit on a busy day.
+    ops.append({"type": "setNodeSettings", "nodeName": "Read Report Formulas",
+                "settings": {"executeOnce": True}})
     # "Read Locations" used to be re-pinned to the الإتاحة range here. Since
     # Phase 4b it is a Postgres node owned by postgres_read() above, and leaving
     # this line in would quietly turn it back into a Sheets read on the next
     # deploy — reintroducing the mid-conversation wait and nothing else.
 
     connect("Report Schedule", "Report Config")
-    connect("Report Config", "Read Report Formulas")
+    # Report Config -> Read Report Locations -> Read Report Formulas. The direct
+    # wire is cut first: leaving it would fire the formulas read twice, once from
+    # each parent, and the second run would overwrite the first's items.
+    disconnect("Report Config", "Read Report Formulas")
+    connect("Report Config", "Read Report Locations")
+    connect("Read Report Locations", "Read Report Formulas")
     connect("Read Report Formulas", "Read Report Values")
     connect("Read Report Values", "Build Reports")
     # The daily report is POSTED again (user, 2026-09-21: "every day a message
