@@ -159,7 +159,13 @@ section('formula columns are still never written');
   const save = { flow: 'booking', fields: { 'اسم المقيم': 'ضيف', 'المتبقي': 500,
                                             'صافي الدخل': 400, 'آخر تعديل': 'x' } };
   const out = bookingFn(brain(save), { all: () => [row(2, { 'اسم المقيم': 'ضيف' })] })[0].json;
-  check('P المتبقي absent', 'المتبقي' in out, false);
+  // P is the one exception, and it is not an exception to the rule that matters:
+  // a VALUE is still never written there. The Brain's 500 is dropped and the
+  // sheet's own formula, aimed at this row, is written in its place — because
+  // the fill-down that used to supply it runs out a few rows below the data.
+  check('P المتبقي is never the computed value', out['المتبقي'] === 500, false);
+  check('P المتبقي is the sheet formula, on this row',
+        out['المتبقي'], '=IF(C3="","",IFERROR(L3-M3,""))');
   check('S صافي الدخل absent', 'صافي الدخل' in out, false);
   check('T آخر تعديل absent', 'آخر تعديل' in out, false);
 }

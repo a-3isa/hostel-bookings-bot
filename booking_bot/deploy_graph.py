@@ -28,10 +28,14 @@ What it sets up:
   * A schedule branch: Report Schedule -> Report Config -> Read Report Formulas
     -> Read Report Values -> Build Reports -> Send Report.
 
-The 08:00 schedule POSTS NOTHING. Since 2026-08-28, at the user's request, both
-wires into `Send Report` are cut — the reports branch and the reconcile — so no
-scheduled message reaches the ops group at all. The daily digest is additionally
-switched off inside `nodes/build_reports.js`.
+The 08:00 schedule posts ONE message: 📋 تقرير اليوم — the occupied rooms,
+today's departures and the outstanding balances — to REPORT_GROUP_CHAT_ID. Asked
+for on 2026-09-21, and it is built by `nodes/build_reports.js`.
+
+The reconcile's own wire into `Send Report` stays cut, as it has been since
+2026-08-28: that message arrived every morning whether or not anything
+disagreed, and nobody asked for it back. The old ☀️ digest stays switched off
+inside `nodes/build_reports.js` for the same reason.
 
 The branch itself still runs end to end, because it carries the day's real work:
 the sheet reads, the snapshot, the discrepancy view and the mirror append that
@@ -365,22 +369,20 @@ def main():
     connect("Report Config", "Read Report Formulas")
     connect("Read Report Formulas", "Read Report Values")
     connect("Read Report Values", "Build Reports")
-    # `Send Report` posts NOTHING any more (user, 2026-08-28: "i dont want him to
-    # send any messages"). Both wires into it are cut — this one and the
-    # reconcile's, below — so the scheduled branch is silent whatever its Code
-    # nodes decide to emit.
+    # The daily report is POSTED again (user, 2026-09-21: "every day a message
+    # with the occupied rooms and the clients that have dept to be sent to the
+    # updates group"). It goes to REPORT_GROUP_CHAT_ID, which is the group the
+    # schedule branch has always been configured for.
     #
-    # The node is kept, unwired, on purpose: restoring either report is one
-    # connection, and a deleted node takes its Telegram credential binding with
-    # it (that has to be redone by hand in the UI, which is how the branch got
-    # stuck before). `Build Reports` still runs and still builds the Saturday
-    # debt report; it just has nowhere to send it.
+    # Only THIS wire is restored. The reconcile's wire into the same node stays
+    # cut (below): nobody asked for that one back, and it is the one that used
+    # to arrive unasked every morning whether or not there was a disagreement.
     #
     # This does NOT touch the per-booking announcements. Those go to
     # GROUP_CHAT_ID / EXPENSE_GROUP_CHAT_ID through `Post To Group`, are a
     # receptionist's confirmation that a save landed, and were never part of the
     # 08:00 schedule.
-    disconnect("Build Reports", "Send Report")
+    connect("Build Reports", "Send Report")
 
     # ── Phase 2: dual-write to Supabase ──────────────────────────────────────
     #

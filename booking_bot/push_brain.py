@@ -94,8 +94,52 @@ def token_issued_at(auth):
         return 0
 
 
+def env_override():
+    """`N8N_MCP_URL` / `N8N_MCP_TOKEN`, from the environment or `.env`.
+
+    Claude Code signs in to the MCP endpoint over OAuth and keeps the resulting
+    bearer in its own credential store, which this script cannot read. So when
+    the instance moves to a host that demands a token — as it did on 2026-09-21,
+    when `n8n-fv0b.srv1982020.hstgr.cloud` answered 401 to every entry in
+    `~/.claude.json` — there is no way to hand it one, and both deploy scripts
+    stop at the door with a full `brain.js` they cannot deliver.
+
+    Two shapes, because the two problems are different:
+
+      * `N8N_MCP_TOKEN` alone is the common one. Claude Code has already
+        registered the right URL; what is missing is only the credential. The
+        token is attached to every registered server that has none, and those
+        are tried first.
+      * `N8N_MCP_URL` as well, when the host is not in `~/.claude.json` at all.
+
+    Get the token from n8n: the workflow card's **MCP** toggle shows the server
+    URL and its bearer. `.env` is gitignored, which is where it belongs.
+    """
+    values = {}
+    env_path = os.path.join(os.path.dirname(HERE), ".env")
+    try:
+        with open(env_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                values[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    # A real environment variable beats the file, so one run can differ.
+    for key in ("N8N_MCP_URL", "N8N_MCP_TOKEN"):
+        if os.environ.get(key, "").strip():
+            values[key] = os.environ[key].strip()
+
+    token = values.get("N8N_MCP_TOKEN", "")
+    if token and not token.lower().startswith("bearer "):
+        token = "Bearer " + token
+    return values.get("N8N_MCP_URL", ""), token
+
+
 def load_servers():
-    """Every n8n MCP credential in ~/.claude.json, newest token first.
+    """Every n8n MCP credential this machine knows, newest token first.
 
     The server is configured for Claude Code rather than for this script, so it
     is read from there instead of being duplicated into .env. It has been
@@ -104,10 +148,14 @@ def load_servers():
     name found a revoked token and answered 401 for two days while a working one
     sat in the same file under a different name.
 
+    `N8N_MCP_URL` / `N8N_MCP_TOKEN` override both — see `env_override`.
+
     Newest first is a guess, not an answer: a token can authenticate perfectly
     and still belong to an n8n account that cannot see this workflow, which is
     exactly what the newest one does. `select_server` is what settles it.
     """
+    env_url, env_token = env_override()
+
     with open(os.path.expanduser(r"~\.claude.json"), encoding="utf-8") as fh:
         cfg = json.load(fh)
 
@@ -126,9 +174,24 @@ def load_servers():
             auth = (srv.get("headers") or {}).get("Authorization", "")
             if srv.get("url"):
                 found.append((token_issued_at(auth), srv["url"], auth))
+    # The token fills in for every registered server that has none. That is the
+    # whole fix when Claude Code knows the URL and only the credential is
+    # missing, which is the usual case after a host move.
+    if env_token:
+        found = [(iat, url, auth or env_token) for iat, url, auth in found]
+
+    found = sorted(found, key=lambda f: f[0], reverse=True)
+
+    # An explicit URL is tried before anything discovered, because it was named
+    # on purpose and the discovered ones are guesses.
+    if env_url:
+        found.insert(0, (2 ** 31, env_url, env_token))
+
     if not found:
-        raise SystemExit("no n8n MCP server in ~/.claude.json")
-    return sorted(found, key=lambda f: f[0], reverse=True)
+        raise SystemExit(
+            "no n8n MCP server. Register one with Claude Code, or set\n"
+            "N8N_MCP_URL and N8N_MCP_TOKEN in .env (see env_override).")
+    return found
 
 
 CANDIDATES = load_servers()

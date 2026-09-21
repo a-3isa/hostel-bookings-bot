@@ -18,16 +18,27 @@
  * Output: one item per message to send, so the Telegram node downstream just
  * loops. Zero items means no message at all.
  *
- * ONE report is left here: the debt report, Saturdays only (the start of the
- * working week here). Six mornings a week this node now returns nothing.
+ * ONE report goes out, every morning: 📋 تقرير اليوم, to REPORT_GROUP_CHAT_ID.
+ * Three sections —
  *
- * The daily digest — ☀️ تقرير اليوم, arrivals / departures / long open stays —
- * was switched off by the user on 2026-08-28. The trigger, both reads and this
- * node all stay: the same 08:00 run also drives the reconcile snapshot and the
- * mirror append that publishes dashboard-born bookings into the sheet, so this
- * is a report being silenced, not a branch being removed. To bring the digest
- * back, restore the block marked below — the collection loop is still here
- * because the debt report shares it.
+ *   🏠 الغرف المشغولة   every room with a guest in it right now, by apartment
+ *   🛫 مغادرة اليوم      whoever's تاريخ المغادرة is today
+ *   💰 العملاء المدينون  every booking with المتبقي > 0, plus the total
+ *
+ * Asked for on 2026-09-21, and it replaces the Saturday-only debt report: the
+ * debts are a section of the daily message now, not a message of their own.
+ * It is sent even when all three sections are empty — a report that only shows
+ * up when there is news cannot be told apart from a branch that has died, which
+ * is exactly what happened to this one between 2026-08-28 and now.
+ *
+ * The old ☀️ digest — arrivals and long open stays — stays switched off behind
+ * SEND_DAILY_DIGEST, where the user put it on 2026-08-28. Its departures
+ * section is what the new report's مغادرة اليوم grew out of, so flipping that
+ * flag back on would announce departures twice. Pick one.
+ *
+ * The trigger, both reads and this node also drive the reconcile snapshot and
+ * the mirror append that publishes dashboard-born bookings into the sheet, so
+ * the branch runs whatever this node decides to emit.
  */
 
 // The reports branch has its own Config: the Telegram trigger's Config node
@@ -37,7 +48,10 @@ const TZ = CFG.TIMEZONE || 'Africa/Cairo';
 const CHAT_ID = CFG.REPORT_GROUP_CHAT_ID;
 
 const LONG_STAY_DAYS = 30;
-const DEBT_WEEKDAY = 6;                       // 0 = Sunday … 6 = Saturday
+// Telegram rejects a message over 4096 characters outright, and a full house
+// plus a long debt list gets there. Sections are packed into as few messages as
+// fit under this, and a message is never split mid-line.
+const MAX_CHARS = 3500;
 
 // The daily digest, off since 2026-08-28 at the user's request. Flip to true to
 // bring it back; everything it needs is still computed below, because the debt
@@ -53,10 +67,16 @@ const S = {
   line_guest: '• {name} — {apartment} غرفة {room}',
   line_long: '• {name} — {apartment} غرفة {room} — منذ {arrival} ({days} يوم)',
   nothing: 'لا يوجد',
-  debt_title: '💰 *المبالغ المتبقية* — {date}',
   debt_line: '• {name} — {apartment} غرفة {room} — متبقي {amount}',
   debt_total: '\n*الإجمالي المتبقي: {total}*',
-  debt_none: '✅ لا توجد مبالغ متبقية.',
+  daily_title: '📋 *تقرير اليوم* — {date}',
+  occupied: '🏠 *الغرف المشغولة* ({n} غرفة / {g} نزيل)',
+  occ_apartment: '*{apartment}*',
+  occ_line: '  • غرفة {room} — {name} (منذ {arrival})',
+  occ_none: '🏠 *الغرف المشغولة* — لا يوجد',
+  dep_none: '🛫 *مغادرة اليوم* — لا يوجد',
+  debt_section: '💰 *العملاء المدينون* ({n})',
+  debt_section_none: '💰 *العملاء المدينون* — لا يوجد',
 };
 
 function t(key, vars) {
@@ -74,10 +94,34 @@ function todayIso() {
   }).format(new Date());
 }
 
-function weekdayInTz() {
-  const name = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' })
-    .format(new Date());
-  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(name);
+/**
+ * Lines -> as few messages as fit under MAX_CHARS, never splitting a line.
+ *
+ * Telegram refuses a message over 4096 characters outright: the send fails, and
+ * with it the whole report, on exactly the busy morning when the report matters
+ * most. A full house plus a long debt list gets there.
+ *
+ * A single line longer than the limit is passed through rather than cut. It
+ * cannot be made to fit, and a truncated one would break the Markdown around a
+ * guest's name and fail the send anyway.
+ */
+function pack(lines) {
+  const out = [];
+  let buf = [];
+  let len = 0;
+  for (const line of lines) {
+    const cost = String(line).length + 1;
+    if (buf.length && len + cost > MAX_CHARS) {
+      out.push(buf.join('\n').trim());
+      buf = [];
+      len = 0;
+    }
+    buf.push(line);
+    len += cost;
+  }
+  const last = buf.join('\n').trim();
+  if (last) out.push(last);
+  return out;
 }
 
 function daysBetween(fromIso, toIso) {
@@ -146,6 +190,7 @@ const arrivals = [];
 const departures = [];
 const longStays = [];
 const debts = [];
+const occupied = [];
 
 for (const j of rows) {
   const name = esc(j['اسم المقيم']);
@@ -161,6 +206,24 @@ for (const j of rows) {
 
   if (arrival === today) arrivals.push(t('line_guest', { name, apartment, room }));
   if (departure && departure === today) departures.push(t('line_guest', { name, apartment, room }));
+
+  /**
+   * In the room right now.
+   *
+   * Arrived on or before today, and either open-ended or leaving after today.
+   * The guest whose تاريخ المغادرة IS today is deliberately not counted here —
+   * they are listed one section down, under مغادرة اليوم, and counting them in
+   * both would make the room look taken by someone who is on their way out.
+   *
+   * A booking with neither an end nor a live =TODAY()-J is not counted either:
+   * without عدد الليالي there is nothing to say when it ends, and guessing
+   * "still here" would keep a stay from 2024 on the list forever.
+   *
+   * The dates are ISO, so a string compare is a date compare.
+   */
+  if (arrival !== '' && arrival <= today && (isOpen || (departure && departure > today))) {
+    occupied.push({ apartment, room, name, arrival });
+  }
 
   const age = daysBetween(arrival, today);
   if (isOpen && age !== null && age > LONG_STAY_DAYS) {
@@ -187,17 +250,62 @@ if (SEND_DAILY_DIGEST && (arrivals.length || departures.length || longStays.leng
   messages.push({ chat_id: CHAT_ID, text: parts.join('\n').trim(), parse_mode: 'Markdown' });
 }
 
-// ── Debt report, Saturdays ──
-if (weekdayInTz() === DEBT_WEEKDAY) {
-  debts.sort((a, b) => b.amount - a.amount);          // biggest first
-  const total = debts.reduce((sum, x) => sum + x.amount, 0);
-  const parts = [t('debt_title', { date: today }), ''];
-  if (debts.length) {
-    parts.push(...debts.map(x => x.line), t('debt_total', { total: Math.round(total * 100) / 100 }));
+// ── The daily report ── 🏠 occupied rooms · 🛫 today's departures · 💰 debts ──
+//
+// Sent every morning, whatever it finds. The debts used to be a message of
+// their own, on Saturdays; they are the third section of this one now.
+{
+  const parts = [t('daily_title', { date: today }), ''];
+
+  // 🏠 Occupied, grouped by apartment. Sorted by apartment, then by room
+  // NUMERICALLY — plain string order puts room 10 between 1 and 2, and the
+  // room numbers on this sheet run past 9.
+  if (occupied.length) {
+    occupied.sort((a, b) =>
+      a.apartment.localeCompare(b.apartment, 'ar') ||
+      (parseNum(a.room) === null || parseNum(b.room) === null
+        ? String(a.room).localeCompare(String(b.room), 'ar')
+        : parseNum(a.room) - parseNum(b.room)));
+    // One room can hold more than one guest (a family books a bed each under
+    // its own name), so the headline counts both: distinct rooms, and people.
+    // `apartment|room` is the room's identity — a bare room number is not
+    // unique across apartments.
+    const roomKeys = {};
+    for (const o of occupied) roomKeys[o.apartment + '|' + o.room] = true;
+    parts.push(t('occupied', { n: Object.keys(roomKeys).length, g: occupied.length }));
+    let apartment = null;
+    for (const o of occupied) {
+      if (o.apartment !== apartment) {
+        apartment = o.apartment;
+        parts.push(t('occ_apartment', { apartment }));
+      }
+      parts.push(t('occ_line', { room: o.room, name: o.name, arrival: o.arrival }));
+    }
+    parts.push('');
   } else {
-    parts.push(t('debt_none'));
+    parts.push(t('occ_none'), '');
   }
-  messages.push({ chat_id: CHAT_ID, text: parts.join('\n').trim(), parse_mode: 'Markdown' });
+
+  // 🛫 Departures
+  if (departures.length) {
+    parts.push(t('departures', { n: departures.length }), ...departures, '');
+  } else {
+    parts.push(t('dep_none'), '');
+  }
+
+  // 💰 Debts, biggest first, with the total
+  if (debts.length) {
+    debts.sort((a, b) => b.amount - a.amount);
+    const total = debts.reduce((sum, x) => sum + x.amount, 0);
+    parts.push(t('debt_section', { n: debts.length }), ...debts.map(x => x.line),
+               t('debt_total', { total: Math.round(total * 100) / 100 }));
+  } else {
+    parts.push(t('debt_section_none'));
+  }
+
+  for (const text of pack(parts)) {
+    messages.push({ chat_id: CHAT_ID, text, parse_mode: 'Markdown' });
+  }
 }
 
 return messages.map(json => ({ json }));
