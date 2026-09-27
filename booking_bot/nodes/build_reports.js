@@ -73,10 +73,10 @@ const S = {
   // A "·" between the apartment and the room on the departure line: the word
   // غرفة came off it on 2026-09-21, and "انبي 3 4" reads as one number when the
   // apartment name ends in a digit — which half of them do. The room lines need
-  // no separator, their apartment is a heading above them, and the debt line
-  // carries no room at all.
+  // no separator, their apartment is a heading above them — the debt lines too,
+  // since 2026-09-27.
   nothing: 'لا يوجد',
-  debt_line: '• {name} — {apartment}: {amount}',
+  debt_line: '  • {room} — {name} — {amount}',
   avail_title: '🏠 *تقرير الإتاحة* — {date}',
   debt_title: '💰 *تقرير المديونيات* — {date}',
   occupied: '🏠 *الغرف المشغولة* ({n} غرفة / {g} نزيل)',
@@ -290,9 +290,13 @@ for (const j of rows) {
   if (remaining !== null && remaining > 0) {
     debts.push({
       amount: remaining,
-      // Name, apartment and the amount — no room number and no "متبقي" (user,
-      // 2026-09-21). Who owes, where, how much.
-      line: t('debt_line', { name, apartment: esc(apartment), amount: remaining }),
+      // Raw, for sorting and the heading: the report walks apartments in
+      // registry order.
+      apartment,
+      room,
+      // Room, name and the amount under an apartment heading, the availability
+      // report's layout (user, 2026-09-27). No "متبقي": the title says it.
+      line: t('debt_line', { room: esc(room), name, amount: remaining }),
     });
   }
 }
@@ -432,8 +436,37 @@ if (SEND_DAILY_DIGEST && (arrivals.length || departures.length || longStays.leng
 {
   const parts = [t('debt_title', { date: today }), ''];
   if (debts.length) {
-    debts.sort((a, b) => b.amount - a.amount);
-    parts.push(t('debt_section', { n: debts.length }), ...debts.map(x => x.line));
+    // Apartment by apartment, in the availability report's order (user,
+    // 2026-09-24). Sorting the whole building by amount put انبي 1 between two
+    // ذاكر حسين guests, so collecting from one apartment meant reading the
+    // whole list. An apartment the registry has never heard of sorts after the
+    // ones it knows, by name, rather than landing in the middle of them.
+    //
+    // Inside an apartment, by room number — numerically, so 10 does not land
+    // between 1 and 2 (user, 2026-09-27). Amount, biggest first, only splits
+    // two guests sharing a room.
+    const rank = {};
+    for (const r of registry()) {
+      if (rank[r.apartment] === undefined) rank[r.apartment] = Object.keys(rank).length;
+    }
+    const at = a => (rank[a] === undefined ? 1e9 : rank[a]);
+    const byRoom = (a, b) => (parseNum(a) === null || parseNum(b) === null
+      ? String(a).localeCompare(String(b), 'ar')
+      : parseNum(a) - parseNum(b));
+    debts.sort((a, b) =>
+      at(a.apartment) - at(b.apartment) ||
+      a.apartment.localeCompare(b.apartment, 'ar') ||
+      byRoom(a.room, b.room) ||
+      b.amount - a.amount);
+    parts.push(t('debt_section', { n: debts.length }));
+    let apartment = null;
+    for (const d of debts) {
+      if (d.apartment !== apartment) {
+        apartment = d.apartment;
+        parts.push(t('occ_apartment', { apartment: esc(apartment) }));
+      }
+      parts.push(d.line);
+    }
   } else {
     parts.push(t('debt_section_none'));
   }
