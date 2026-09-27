@@ -345,16 +345,54 @@ check('debts are reported midweek', midweek.includes('💰 *العملاء ال�
 check('and the weekend says the same thing',
   weekend.includes('💰 *العملاء المدينون* (2)'), weekend);
 check('largest debt first', midweek.indexOf('مدين كبير') < midweek.indexOf('مدين صغير'), midweek);
-// A separator between apartment and room on the lines that carry both inline.
-// Without it "انبي 3 4" reads as one number, and half the apartment names end
-// in a digit.
-// Name, apartment, amount — no room number, no "متبقي" (user, 2026-09-21).
-check('a debt line is name, apartment and amount',
-  midweek.includes('• مدين كبير — ذاكر حسين: 1500'), midweek);
-check('no room number on a debt line', !midweek.includes('·'), midweek);
+// Apartment heading, then room — name — amount under it: the availability
+// report's layout (user, 2026-09-27). No "متبقي", the title says it.
+check('a debt line is room, name and amount',
+  midweek.includes('  • 1 — مدين كبير — 1500'), midweek);
+check('the apartment is a heading, once',
+  midweek.split('*ذاكر حسين*').length === 2 &&
+  midweek.indexOf('*ذاكر حسين*') < midweek.indexOf('مدين كبير'), midweek);
+check('no "متبقي" on a debt line', !midweek.includes('متبقي'), midweek);
 check('a settled booking is left out', !midweek.includes('خالص'), midweek);
 // The total line came off on 2026-09-21: the list is what gets acted on.
 check('no total under the list', !midweek.includes('الإجمالي'), midweek);
+
+// Grouped by apartment, in the registry's order, since 2026-09-24 — the same
+// order the availability report walks the building in. Amount only decides
+// between two guests in the SAME apartment.
+const spread = build([
+  row({ 'اسم المقيم': 'ب صغير', 'اسم الشقة': 'انبي 2', 'المتبقي': 100 }),
+  row({ 'اسم المقيم': 'ا كبير', 'اسم الشقة': 'انبي 1', 'المتبقي': 900 }),
+  row({ 'اسم المقيم': 'ب كبير', 'اسم الشقة': 'انبي 2', 'المتبقي': 800 }),
+  row({ 'اسم المقيم': 'ا صغير', 'اسم الشقة': 'انبي 1', 'المتبقي': 200 }),
+], WED, undefined, registry(['انبي 1', 1], ['انبي 2', 1]));
+const order = split(spread).debts;
+const seq = ['ا كبير', 'ا صغير', 'ب كبير', 'ب صغير'].map(n => order.indexOf(n));
+check('debts follow the registry apartment order, biggest first inside one',
+  seq.every((v, i) => v !== -1 && (i === 0 || seq[i - 1] < v)), order);
+check('each apartment heads its own guests',
+  order.indexOf('*انبي 1*') < seq[0] && seq[1] < order.indexOf('*انبي 2*') &&
+  order.indexOf('*انبي 2*') < seq[2], order);
+
+// Inside an apartment, room order — numeric, so 10 comes after 2 — whatever
+// the amounts (user, 2026-09-27).
+const debtRooms = split(build([
+  row({ 'اسم المقيم': 'غرفة عشرة', 'رقم الغرفة': '10', 'المتبقي': 9000 }),
+  row({ 'اسم المقيم': 'غرفة اثنين', 'رقم الغرفة': '2', 'المتبقي': 50 }),
+  row({ 'اسم المقيم': 'غرفة واحد', 'رقم الغرفة': '1', 'المتبقي': 10 }),
+], WED)).debts;
+const roomSeq = ['غرفة واحد', 'غرفة اثنين', 'غرفة عشرة'].map(n => debtRooms.indexOf(n));
+check('debts inside an apartment go by room number, numerically',
+  roomSeq.every((v, i) => v !== -1 && (i === 0 || roomSeq[i - 1] < v)), debtRooms);
+
+// A guest whose apartment the registry does not carry still gets reported —
+// after the apartments it knows, not wedged between them.
+const stray = split(build([
+  row({ 'اسم المقيم': 'غريب', 'اسم الشقة': 'شقة مجهولة', 'المتبقي': 5000 }),
+  row({ 'اسم المقيم': 'معروف', 'اسم الشقة': 'انبي 1', 'المتبقي': 10 }),
+], WED, undefined, registry(['انبي 1', 1]))).debts;
+check('an unknown apartment sorts last, not first',
+  stray.indexOf('معروف') !== -1 && stray.indexOf('معروف') < stray.indexOf('غريب'), stray);
 
 msgs = build([row({ 'المتبقي': 0 })], WED);
 check('an all-settled day still reports, positively',
