@@ -341,8 +341,8 @@ token:
 | `EXPENSE_TAB` | `مصروفات عامة` |
 | `GROUP_CHAT_ID` | `-5001910339` |
 | `EXPENSE_GROUP_CHAT_ID` | `-5072732996` |
-| `ADMIN_USERS` | `7941350507,@AbdulrahmanMohamed5,1226903540,5793725130` |
-| `CASHIER_USERS` | `@Seifgamal24,@seiiffseiif` |
+| `ADMIN_USERS` | `7941350507,627334825,1226903540,5793725130` |
+| `CASHIER_USERS` | `1430533008,5213695300` |
 | `TIMEZONE` | `Africa/Cairo` |
 
 `ADMIN_USERS` and `CASHIER_USERS` replace the old `BOOKING_USER_IDS` /
@@ -352,9 +352,22 @@ ids **or** `@usernames` (matched case-insensitively). Anyone on neither list get
 
 - **Admins** get the full menu: حجز / مصروف / تعديل حجز.
 - **Cashiers** get مصروف / إضافة مبلغ مدفوع only. The payment path asks for the
-  booking ID → the amount (added to what is already paid) → the payment method,
-  and any method other than `كاش` requires a receipt photo with no skip. It then
-  writes and posts to the group immediately — no field menu, no confirm step.
+  booking ID → the amount → the payment method → a receipt → a review card.
+  - The amount prompt shows what the whole booking has paid (its row and every
+    line, in pounds) against the price, and the remainder. يورو / دولار are
+    listed apart and never taken off the remainder.
+  - The amount is added to what is already paid. `0` is refused; a negative
+    amount (refund) is admin-only.
+  - غير مدفوع is not offered as the method of a payment.
+  - انستاباي and فودافون كاش need a receipt: a photo, or an image/PDF sent as
+    a file. A cashier cannot skip it; an admin can. Other methods need none.
+  - A payment in يورو / دولار is in that currency and always goes on a line of
+    its own, even on a booking that was never paid.
+  - The review card (✅ حفظ / ❌ إلغاء) shows the guest, the amount, the method
+    and the totals after the payment, and warns when pounds paid would exceed
+    the price. Nothing is written until ✅ حفظ.
+  - An admin taking the same shortcut gets the same card; an admin paying
+    through تعديل حجز gets the warning on the usual review screen.
 
 `brain.js` carries the same two lists as hard-coded defaults, so the bot keeps its
 access rules even if the Config node still has the old keys. Change both together.

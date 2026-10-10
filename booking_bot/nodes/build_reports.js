@@ -47,7 +47,22 @@
 
 // The reports branch has its own Config: the Telegram trigger's Config node
 // does not execute on a schedule run, and referencing an unexecuted node throws.
-const CFG = $('Report Config').first().json;
+//
+// This same code also runs as "Build Availability Report", on the chain the
+// 🏠 تقرير الإتاحة button fires (user, 2026-10-08: "a button in the bot to send
+// the availability message when needed"). That chain has its own twins of the
+// three nodes read here, because the schedule's own reads also feed the
+// snapshot and the mirror append, and a tap must not run those. Which branch
+// this is shows in which Config executed: the schedule's throws on a tap.
+const ON_DEMAND = (() => {
+  try { $('Report Config').first(); return false; } catch (e) { return true; }
+})();
+const NODE = ON_DEMAND
+  ? { config: 'Availability Config', formulas: 'Read Availability Formulas',
+      locations: 'Read Availability Locations' }
+  : { config: 'Report Config', formulas: 'Read Report Formulas',
+      locations: 'Read Report Locations' };
+const CFG = $(NODE.config).first().json;
 const TZ = CFG.TIMEZONE || 'Africa/Cairo';
 const CHAT_ID = CFG.REPORT_GROUP_CHAT_ID;
 
@@ -76,7 +91,7 @@ const S = {
   // no separator, their apartment is a heading above them — the debt lines too,
   // since 2026-09-27.
   nothing: 'لا يوجد',
-  debt_line: '  • {room} — {name} — {amount}',
+  debt_line: '{room}. {name}: {amount}',
   avail_title: '🏠 *تقرير الإتاحة* — {date}',
   debt_title: '💰 *تقرير المديونيات* — {date}',
   occupied: '🏠 *الغرف المشغولة* ({n} غرفة / {g} نزيل)',
@@ -171,7 +186,7 @@ const today = todayIso();
 
 // row_number → true when عدد الليالي is a live formula, i.e. the stay is open.
 const openByRow = {};
-for (const i of $('Read Report Formulas').all()) {
+for (const i of $(NODE.formulas).all()) {
   const j = i.json || {};
   openByRow[String(j.row_number)] =
     String(j['عدد الليالي'] === undefined ? '' : j['عدد الليالي']).trim().startsWith('=');
@@ -189,7 +204,7 @@ for (const i of $('Read Report Formulas').all()) {
 function registry() {
   let items;
   try {
-    items = $('Read Report Locations').all();
+    items = $(NODE.locations).all();
   } catch (e) {
     return [];
   }
@@ -433,7 +448,8 @@ if (SEND_DAILY_DIGEST && (arrivals.length || departures.length || longStays.leng
 // No total line: the user dropped it the same evening. The list is what gets
 // acted on, guest by guest, and a five-figure sum under it was a number nobody
 // chased.
-{
+// The button asks for availability only; the debts stay a morning message.
+if (!ON_DEMAND) {
   const parts = [t('debt_title', { date: today }), ''];
   if (debts.length) {
     // Apartment by apartment, in the availability report's order (user,

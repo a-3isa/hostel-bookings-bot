@@ -70,14 +70,15 @@ WORKFLOW_ID = load_workflow_id()
 # matched 7941350507 anyway. Both were already listed, so this narrows the entry
 # rather than widening access.
 #
-# @seiiffseiif is STILL A USERNAME and is the one remaining exposure. It appears
-# nowhere in the 858 retained executions (which begin 2026-08-15), so there is no
-# id to resolve it to — it predates this n8n instance; python_version/config.py
-# has it as the old EXPENSE_USERNAMES default. To close it, have that person send
-# /start and read the id off the resulting execution. Guessing is not an option:
-# a wrong number here grants or denies access to a live money system.
+# @seiiffseiif, the last entry matched by username, was removed on 2026-10-10.
+# It never appeared in the retained executions, so it could not be resolved to
+# an id. If that person still needs access, have them send /start and add the id
+# from that execution. Never guess one: a wrong number here grants or denies
+# access to a live money system.
+#
+# 5213695300 is محمد العشرى (no username), resolved from execution 6922.
 ADMIN_USERS = "7941350507,627334825,1226903540,5793725130"
-CASHIER_USERS = "1430533008,@seiiffseiif"
+CASHIER_USERS = "1430533008,5213695300"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")

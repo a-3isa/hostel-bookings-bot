@@ -99,14 +99,15 @@ TIMEZONE = "Africa/Cairo"
 # matched 7941350507 anyway. Both were already listed, so this narrows the entry
 # rather than widening access.
 #
-# @seiiffseiif is STILL A USERNAME and is the one remaining exposure. It appears
-# nowhere in the 858 retained executions (which begin 2026-08-15), so there is no
-# id to resolve it to — it predates this n8n instance; python_version/config.py
-# has it as the old EXPENSE_USERNAMES default. To close it, have that person send
-# /start and read the id off the resulting execution. Guessing is not an option:
-# a wrong number here grants or denies access to a live money system.
+# @seiiffseiif, the last entry matched by username, was removed on 2026-10-10.
+# It never appeared in the retained executions, so it could not be resolved to
+# an id. If that person still needs access, have them send /start and add the id
+# from that execution. Never guess one: a wrong number here grants or denies
+# access to a live money system.
+#
+# 5213695300 is محمد العشرى (no username), resolved from execution 6922.
 ADMIN_USERS = "7941350507,627334825,1226903540,5793725130"
-CASHIER_USERS = "1430533008,@seiiffseiif"
+CASHIER_USERS = "1430533008,5213695300"
 
 SESSION_TABLE = "bookings_bot_sessions"
 
@@ -477,6 +478,27 @@ def build():
             "query": read_source("read_locations.sql"), "options": {}},
            (760, 180), cred=POSTGRES_CRED, **lookup_settings)
 
+    # The suggested booking ID and expense number, each read only on the turn
+    # that asks for it — see deploy_graph.py, which owns the same two gates.
+    # The gates name their source because by here $json is the previous read's.
+    g.node("Needs Booking ID?", "n8n-nodes-base.if", 2.3,
+           {"conditions": flag_condition(
+               "={{ $('Load Session').first().json.state === 'BOOKING_ID' }}",
+               "needs-booking-id"),
+            "looseTypeValidation": True, "options": {}}, (560, 480))
+    g.node("Read Next Booking ID", "n8n-nodes-base.postgres", 2.6,
+           {"operation": "executeQuery",
+            "query": read_source("read_next_booking_id.sql"), "options": {}},
+           (760, 480), cred=POSTGRES_CRED, executeOnce=True, **lookup_settings)
+    g.node("Needs Expense Number?", "n8n-nodes-base.if", 2.3,
+           {"conditions": flag_condition(
+               "={{ ($('Telegram Trigger').first().json.callback_query || {}).data"
+               " === 'choice_expense' }}", "needs-expense-number"),
+            "looseTypeValidation": True, "options": {}}, (560, 640))
+    g.node("Read Expense Numbers", "n8n-nodes-base.googleSheets", 4.7,
+           sheets_read(EXPENSE_TAB, EXPENSE_KEY_RANGE), (760, 640),
+           cred=SHEETS_CRED, executeOnce=True, **lookup_settings)
+
     g.connect("Telegram Trigger", "Config")
     g.connect("Config", "Load Session")
     g.connect("Load Session", "Needs Bookings?")
@@ -488,8 +510,14 @@ def build():
 
     # ── The Brain ────────────────────────────────────────────────────────────
     g.node("Brain", "n8n-nodes-base.code", 2, {"jsCode": brain_source()}, (960, 300))
-    g.connect("Read Locations", "Brain")
-    g.connect("Needs Locations?", "Brain", index=1)
+    g.connect("Read Locations", "Needs Booking ID?")
+    g.connect("Needs Locations?", "Needs Booking ID?", index=1)
+    g.connect("Needs Booking ID?", "Read Next Booking ID", index=0)
+    g.connect("Needs Booking ID?", "Needs Expense Number?", index=1)
+    g.connect("Read Next Booking ID", "Needs Expense Number?")
+    g.connect("Needs Expense Number?", "Read Expense Numbers", index=0)
+    g.connect("Needs Expense Number?", "Brain", index=1)
+    g.connect("Read Expense Numbers", "Brain")
 
     # ── Answering the turn ───────────────────────────────────────────────────
     #

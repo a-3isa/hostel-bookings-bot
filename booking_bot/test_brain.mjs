@@ -24,11 +24,10 @@ const CONFIG = {
   EXPENSE_GROUP_CHAT_ID: '-5072732996',
   // The production lists, verbatim. Numeric ids everywhere an id is known — a
   // username can be released and re-registered, and the next person to claim a
-  // freed handle would inherit its role. @seiiffseiif is the one entry still
-  // matched by name, because that account appears nowhere in the retained
-  // execution history and there is no id to resolve it to.
+  // freed handle would inherit its role. The last name-matched entry,
+  // @seiiffseiif, was removed on 2026-10-10.
   ADMIN_USERS: '7941350507,627334825,1226903540,5793725130',
-  CASHIER_USERS: '1430533008,@seiiffseiif',
+  CASHIER_USERS: '1430533008,5213695300',
   TIMEZONE: 'Africa/Cairo',
 };
 
@@ -55,9 +54,23 @@ const REAL_ROOMS = { 'ذاكر حسين': 5, 'احمد فهيم': 5, 'انبي 3
 let locationRows = Object.entries(REAL_ROOMS).flatMap(([apt, n]) =>
   Array.from({ length: n }, (_, i) => ({ 'الشقة': apt, 'الغرفة': String(i + 1) })));
 
+// What "Read Next Booking ID" (Postgres) and "Read Expense Numbers" (the
+// expense tab) return. null means the node did not run this turn — the
+// default, so every older test sees the questions exactly as they always were.
+let nextBookingId = null;
+let expenseRows = null;
+
 function run(update) {
   const $ = (name) => {
     const map = { Config: CONFIG, 'Telegram Trigger': update, 'Load Session': sessionRow };
+    if (name === 'Read Next Booking ID') {
+      if (nextBookingId === null) throw new Error('Referenced node is unexecuted');
+      return { first: () => ({ json: { next_booking_id: nextBookingId } }) };
+    }
+    if (name === 'Read Expense Numbers') {
+      if (expenseRows === null) throw new Error('Referenced node is unexecuted');
+      return { all: () => expenseRows.map(j => ({ json: j })) };
+    }
     if (name === 'Read Locations') {
       // Gated the same way the graph gates it: unexecuted unless this turn draws
       // an apartment keyboard, and n8n throws when you reference such a node.
@@ -132,11 +145,8 @@ function buildWrite(filledRows) {
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 const USER = { id: 7941350507, first_name: 'Ahmed', last_name: 'Isa', username: 'ahmed' };
-// Admin listed by @username rather than by id — no username on the id list.
-// The username-matching path is still live for exactly one account, so it still
-// needs a test. No ADMIN is matched by name any more — @AbdulrahmanMohamed5 was
-// resolved to 627334825 on 2026-08-22 — so the case is exercised through the
-// cashier who could not be resolved.
+// The account that used to be let in by its @username alone. Nothing on either
+// list is matched by name any more (removed 2026-10-10), so this must be refused.
 const CASHIER_BY_NAME = { id: 313131, first_name: 'Seif', username: 'seiiffseiif' };
 const OTHER = { id: 111, first_name: 'Sara', username: 'someone' };
 // The cashier: expenses + adding a payment, nothing else.
@@ -181,38 +191,42 @@ check('unlisted user tapping a button gets nothing', r === null, r);
 
 r = run(msg('/start'));
 check('admin by id gets the full menu', r.reply.text === 'اختر العملية:', r.reply.text);
-check('admin menu has booking, expense, edit and payment',
+check('admin menu has booking, expense, edit, payment and availability',
   r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() ===
-  'choice_booking,choice_expense,choice_edit,choice_paid',
+  'choice_booking,choice_expense,choice_edit,choice_paid,choice_avail',
   r.reply.reply_markup.inline_keyboard);
 
 r = run(msg('/start', { id: 627334825, first_name: 'Abdulrahman' }));
 check('the admin resolved from @AbdulrahmanMohamed5 gets the full menu by id',
-  r.reply.reply_markup.inline_keyboard.length === 4, r.reply.reply_markup.inline_keyboard);
+  r.reply.reply_markup.inline_keyboard.length === 5, r.reply.reply_markup.inline_keyboard);
 
 r = run(msg('/start', CASHIER_BY_NAME));
-check('the one remaining @username still matches, and as a cashier',
+check('@seiiffseiif no longer grants anything', r.reply.text === '⛔ غير مصرح لك باستخدام هذا البوت.',
+  r.reply.text);
+
+r = run(msg('/start', { id: 5213695300, first_name: 'محمد', last_name: 'العشرى' }));
+check('محمد العشرى is a cashier by id, with no username',
   r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() ===
-  'choice_expense,choice_paid',
+  'choice_expense,choice_paid,choice_avail',
   r.reply.reply_markup.inline_keyboard);
 
 r = run(msg('/start', { id: 1430533008, first_name: 'seif', last_name: 'gamal' }));
 check('the cashier resolved from @Seifgamal24 matches by id, without a username',
   r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() ===
-  'choice_expense,choice_paid',
+  'choice_expense,choice_paid,choice_avail',
   r.reply.reply_markup.inline_keyboard);
 
 // The two people who were on the old BOOKING_USER_IDS / EXPENSE_USERNAMES lists.
 // Dropping either would silently lock a working receptionist out of the live bot.
 r = run(msg('/start', { id: 5793725130, first_name: 'Mostafa' }));
 check('the second receptionist kept full access',
-  r.reply.reply_markup.inline_keyboard.length === 4, r.reply.reply_markup.inline_keyboard);
+  r.reply.reply_markup.inline_keyboard.length === 5, r.reply.reply_markup.inline_keyboard);
 
 r = run(msg('/start', EXPUSER));
 check('cashier gets a two-option menu', r.reply.text === 'اختر العملية:', r.reply.text);
-check('cashier menu is expense + add-payment only',
+check('cashier menu is expense, add-payment and availability only',
   r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() ===
-  'choice_expense,choice_paid',
+  'choice_expense,choice_paid,choice_avail',
   r.reply.reply_markup.inline_keyboard);
 r = run(cb('choice_booking', EXPUSER));
 check('cashier cannot start a booking even with the raw callback', r.hasReply === false);
@@ -389,7 +403,7 @@ check('flow tagged booking', r.save.flow === 'booking');
 
 const aToJ = r.save.ranges[0].values[0];
 check('booking id blank stays blank (no apostrophe)', aToJ[0] === '');
-check('private id forced to text', aToJ[1] === "'A12345");
+check('private id as typed, no apostrophe', aToJ[1] === 'A12345', aToJ[1]);
 check('E left blank (retired الجنسية)', aToJ[4] === '');
 check('phone forced to text', aToJ[5] === "'01012345678");
 check('apartment resolved from index', aToJ[6] === 'انبي 3', aToJ[6]);
@@ -445,7 +459,7 @@ check('and the balance says it is still running',
   r.reply.text.includes('🧾 المتبقي: يُحسب تلقائياً'), r.reply.text);
 r = run(cb('save'));
 check('btype auto = بوكينج', r.save.ranges[0].values[0][3] === 'بوكينج');
-check('booking id forced to text', r.save.ranges[0].values[0][0] === "'BK-99");
+check('booking id as typed, no apostrophe', r.save.ranges[0].values[0][0] === 'BK-99');
 check('∞ nights becomes a live formula', r.save.ranges[0].values[0][8] === '=TODAY()-J{r}');
 const body2 = buildWrite(41);
 check('the {r} placeholder is resolved to the real row',
@@ -546,7 +560,7 @@ check('B = item', row[1] === 'كهرباء');
 check('C = amount', row[2] === 350.5);
 check('D = apartment blank for بدون/عام', row[3] === '');
 check('F = payment', row[5] === 'انستاباي');
-check('H = id forced to text', row[7] === "'E-77");
+check('H = id as typed, no apostrophe', row[7] === 'E-77', row[7]);
 check('expense group id', r.save.groupChatId === '-5072732996');
 
 // The Brain keeps the session on *_CONFIRM after emitting a save; the
@@ -700,7 +714,8 @@ check('notes edit returns to the menu', r.reply.text === '✏️ اختر ما �
 
 r = run(cb('ef_paid'));
 check('paid prompt says it ADDS and shows the current total',
-  r.reply.text.startsWith('💵 أدخل المبلغ المضاف (المدفوع حالياً: 1200):'), r.reply.text);
+  r.reply.text.startsWith('💵 أدخل المبلغ المضاف:\n💵 المدفوع حالياً: 1200 من 1200\n📉 المتبقي: 0'),
+  r.reply.text);
 check('brain survives the unexecuted lookup node', r.hasReply === true);
 r = run(msg('900'));
 check('paid change forces طريقة الدفع', r.reply.text === '💳 طريقة الدفع:', r.reply.text);
@@ -1129,23 +1144,41 @@ r = run(msg('NOPE', EXPUSER));
 check('unknown id rejected', r.reply.text.startsWith('❌ لا يوجد حجز'), r.reply.text);
 r = run(msg('77777', EXPUSER));                  // unique, paid = 1200
 check('found booking asks for the amount straight away — no field menu',
-  r.reply.text === '💵 أدخل المبلغ المدفوع (المدفوع حالياً: 1200):', r.reply.text);
+  r.reply.text === '💵 أدخل المبلغ المدفوع:\n💵 المدفوع حالياً: 1200 من 1200\n📉 المتبقي: 0',
+  r.reply.text);
 sheetRows = null;
 r = run(msg('abc', EXPUSER));
 check('non-numeric amount rejected', r.reply.text === '❌ أدخل رقماً صحيحاً:', r.reply.text);
 r = run(msg('800', EXPUSER));
 check('amount asks for the payment type', r.reply.text === '💳 طريقة الدفع:', r.reply.text);
-check('full payment list offered', r.reply.reply_markup.inline_keyboard.flat().length === 7);
+check('every real method offered, and not غير مدفوع',
+  r.reply.reply_markup.inline_keyboard.flat().length === 6 &&
+  !r.reply.reply_markup.inline_keyboard.flat().some(b => b.callback_data === 'xpay_unpaid'),
+  r.reply.reply_markup.inline_keyboard);
 r = run(cb('xpay_instapay', EXPUSER));                  // انستاباي
-check('non-cash demands a receipt', r.reply.text === '📎 أرسل صورة إيصال التحويل:', r.reply.text);
+check('a transfer demands a receipt', r.reply.text === '📎 أرسل صورة إيصال التحويل (صورة أو ملف):', r.reply.text);
 check('cashier receipt has no skip button', r.reply.reply_markup === undefined, r.reply.reply_markup);
 r = run(cb('xreceipt_skip', EXPUSER));
 check('the admin skip callback does not work here',
-  r.reply.text === '❌ لا بد من إرسال صورة الإيصال:' && r.hasSave === false, r.reply.text);
+  r.reply.text === '❌ لا بد من إرسال صورة الإيصال (صورة أو ملف):' && r.hasSave === false, r.reply.text);
 r = run(msg('حولت بالفعل', EXPUSER));
-check('text instead of a photo is rejected', r.reply.text === '❌ لا بد من إرسال صورة الإيصال:', r.reply.text);
+check('text instead of a photo is rejected', r.reply.text === '❌ لا بد من إرسال صورة الإيصال (صورة أو ملف):', r.reply.text);
 r = run(photo('PAYFILE99', EXPUSER));
-check('photo saves immediately — no confirm step', r.hasSave === true);
+check('the photo leads to a review card, not a save', r.hasSave === false && r.sessionState === 'PAID_CONFIRM',
+  [r.hasSave, r.sessionState]);
+check('the card shows the guest, the amount, the method and the new total',
+  r.reply.text.includes('➕ المبلغ: 800') &&
+  r.reply.text.includes('💳 الدفع: انستاباي') && r.reply.text.includes('📎 الإيصال: ✅ مرفق') &&
+  r.reply.text.includes('💵 المدفوع حالياً: 2000 من 1200'), r.reply.text);
+check('and warns that this pays past the price',
+  r.reply.text.includes('⚠️ المدفوع بعد هذه الدفعة (2000) أكبر من سعر الحجز (1200) بـ 800'), r.reply.text);
+check('the card has save and cancel',
+  r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() === 'pconfirm,pcancel');
+r = run(msg('تمام', EXPUSER));
+check('typing on the card points at the buttons and saves nothing',
+  r.hasSave === false && r.reply.text.startsWith('👆'), r.reply.text);
+r = run(cb('pconfirm', EXPUSER));
+check('save writes it', r.hasSave === true);
 // The cashier's payment follows the same rule as the admin's, deliberately: the
 // line a payment belongs on is a fact about the booking, not about who typed it.
 check('a new method gets its own line here too', r.save.flow === 'payment_line',
@@ -1173,7 +1206,10 @@ run(msg('/start', EXPUSER)); run(cb('choice_paid', EXPUSER)); run(msg('77777', E
 sheetRows = null;
 run(msg('500', EXPUSER));
 r = run(cb('xpay_cash', EXPUSER));                  // كاش
-check('cash saves without asking for an image', r.hasSave === true);
+check('cash goes to the review card without asking for an image',
+  r.sessionState === 'PAID_CONFIRM' && r.hasSave === false, r.sessionState);
+r = run(cb('pconfirm', EXPUSER));
+check('and saves from there', r.hasSave === true);
 check('no receipt on the payload', r.save.receiptFileId === '');
 check('cash payment recorded', r.save.fields['طريقة الدفع'] === 'كاش');
 
@@ -1185,7 +1221,8 @@ r = run(msg('55555', EXPUSER));
 check('picker shown', r.reply.text.startsWith('🔎 أكثر من حجز'), r.reply.text);
 r = run(cb('epick_2', EXPUSER));                 // Ahmed Mohamed, paid = 2000
 check('picking goes to the amount, not the field menu',
-  r.reply.text === '💵 أدخل المبلغ المدفوع (المدفوع حالياً: 2000):', r.reply.text);
+  r.reply.text === '💵 أدخل المبلغ المدفوع:\n💵 المدفوع حالياً: 2000 من 5000\n📉 المتبقي: 3000',
+  r.reply.text);
 
 section('admin edit is unaffected by the cashier rules');
 resetSession();
@@ -1300,9 +1337,143 @@ run(msg('/start', EXPUSER)); run(cb('choice_paid', EXPUSER)); run(msg('77777', E
 sheetRows = null;
 run(msg('300', EXPUSER));
 r = run(cb('xpay_cash', EXPUSER));
-check('cashier saves immediately, no checkout question', r.hasSave === true);
+check('cashier gets the review card, no checkout question',
+  r.sessionState === 'PAID_CONFIRM', r.sessionState);
+r = run(cb('pconfirm', EXPUSER));
+check('and saves from it', r.hasSave === true);
 check('cashier never touches عدد الليالي', !('عدد الليالي' in r.save.fields),
   Object.keys(r.save.fields));
+
+// ─── Add-payment rules (2026-10-10) ───────────────────────────────────────────
+
+// 500 كاش on its own row, 300 انستاباي and €50 on lines, priced at 1500.
+const MIXED = [{
+  'بوكنج ID': '', 'ID': '42424', 'اسم المقيم': 'كريم', 'اسم الشقة': 'انبي 2',
+  'رقم الغرفة': 1, 'تاريخ البداية': '2026-10-01', 'اجمالي سعر الحجز': 1500,
+  'اجمالي ما تم دفعه': 500, 'طريقة الدفع': 'كاش', 'ملاحظات': '',
+  booking_id: 77,
+  lines: [{ seq: 2, row: 11, method: 'انستاباي', amount: 300 },
+          { seq: 3, row: 12, method: 'يورو', amount: 50 }],
+  block_end: 12, total_is_formula: false,
+}];
+// Never paid at all.
+const NEVER_PAID = [{
+  'بوكنج ID': '', 'ID': '42425', 'اسم المقيم': 'ليلى', 'اسم الشقة': 'انبي 2',
+  'رقم الغرفة': 2, 'تاريخ البداية': '2026-10-02', 'اجمالي سعر الحجز': 1000,
+  'اجمالي ما تم دفعه': 0, 'طريقة الدفع': 'غير مدفوع', 'ملاحظات': '',
+  booking_id: 78, lines: [], block_end: 2, total_is_formula: false,
+}];
+
+/** Open the add-payment shortcut on one booking, up to the amount prompt. */
+function payShortcut(rows, id, who = EXPUSER) {
+  resetSession();
+  sheetRows = rows;
+  run(msg('/start', who)); run(cb('choice_paid', who));
+  const res = run(msg(id, who));
+  sheetRows = null;
+  return res;
+}
+const docMsg = (fileId, mime, from = USER) => ({
+  message: { chat: CHAT, from, document: { file_id: fileId, mime_type: mime } },
+});
+
+section('add payment: the prompt shows the whole booking, not one row');
+r = payShortcut(MIXED, '42424');
+check('pounds across the row and its lines, against the price',
+  r.reply.text.includes('💵 المدفوع حالياً: 800 من 1500') && r.reply.text.includes('📉 المتبقي: 700'),
+  r.reply.text);
+check('euros listed apart and not taken off the remainder',
+  r.reply.text.includes('💱 مدفوع 50 يورو (لا يُحسب من المتبقي)'), r.reply.text);
+
+section('add payment: zero and refunds');
+r = run(msg('0', EXPUSER));
+check('zero is refused', r.reply.text === '❌ المبلغ لا يمكن أن يكون صفراً. أدخل المبلغ:', r.reply.text);
+check('and the amount is asked again', r.sessionState === 'EDIT_PAID', r.sessionState);
+r = run(msg('-100', EXPUSER));
+check('a cashier cannot refund', r.reply.text.startsWith('❌ الاسترداد (مبلغ بالسالب) للمسؤول فقط'),
+  r.reply.text);
+r = payShortcut(MIXED, '42424', USER);
+r = run(msg('-100'));
+check('an admin can', r.reply.text === '💳 طريقة الدفع:', r.reply.text);
+
+section('add payment: غير مدفوع is not a way to pay');
+payShortcut(MIXED, '42424');
+run(msg('100', EXPUSER));
+r = run(cb('xpay_unpaid', EXPUSER));
+check('a tap on it from an old card writes nothing and moves nowhere',
+  r.hasSave === false && r.hasReply === false && r.sessionState === 'EDIT_PAYMENT',
+  [r.hasSave, r.hasReply, r.sessionState]);
+
+section('add payment: euros stay euros');
+payShortcut(MIXED, '42424');
+run(msg('100', EXPUSER));
+r = run(cb('xpay_eur', EXPUSER));
+check('a cashier needs no receipt for foreign cash', r.sessionState === 'PAID_CONFIRM', r.sessionState);
+check('the card says 100 يورو, not 100',
+  r.reply.text.includes('➕ المبلغ: 100 يورو'), r.reply.text);
+check('the pounds paid do not move, the euros grow',
+  r.reply.text.includes('💵 المدفوع حالياً: 800 من 1500') &&
+  r.reply.text.includes('💱 مدفوع 150 يورو'), r.reply.text);
+check('no overpayment warning for foreign money', !r.reply.text.includes('⚠️'), r.reply.text);
+r = run(cb('pconfirm', EXPUSER));
+check('it joins the existing يورو line', r.save.flow === 'payment_line' &&
+  r.save.insert === false && r.save.row === 12, [r.save.flow, r.save.insert, r.save.row]);
+check('the group reads 100 يورو and the pounds total is unchanged',
+  r.save.groupText.includes('➕ المبلغ المضاف: 100 يورو') &&
+  r.save.groupText.includes('💵 اجمالي ما تم دفعه: 800'), r.save.groupText);
+
+payShortcut(NEVER_PAID, '42425');
+run(msg('100', EXPUSER)); run(cb('xpay_eur', EXPUSER));
+r = run(cb('pconfirm', EXPUSER));
+check('euros on a never-paid booking open a line, not the pounds row',
+  r.save.flow === 'payment_line' && r.save.insert === true, [r.save.flow, r.save.insert]);
+payShortcut(NEVER_PAID, '42425');
+run(msg('400', EXPUSER)); run(cb('xpay_cash', EXPUSER));
+r = run(cb('pconfirm', EXPUSER));
+check('pounds on a never-paid booking still fill its own row',
+  r.save.flow === 'edit' && r.save.fields['طريقة الدفع'] === 'كاش' &&
+  r.save.fields['اجمالي ما تم دفعه'] === 400, r.save.fields);
+
+section('add payment: Airbnb needs no receipt from a cashier');
+payShortcut(MIXED, '42424');
+run(msg('200', EXPUSER));
+r = run(cb('xpay_airbnb', EXPUSER));
+check('straight to the review card', r.sessionState === 'PAID_CONFIRM', r.sessionState);
+
+section('add payment: a receipt can be a file');
+r = payShortcut(MIXED, '42424');
+r = run(docMsg('PDF0', 'application/pdf', EXPUSER));
+check('a file is ignored while the amount is being asked', r === null, r);
+run(msg('300', EXPUSER));
+r = run(cb('xpay_vcash', EXPUSER));
+check('فودافون كاش asks for the receipt', r.reply.text.startsWith('📎'), r.reply.text);
+r = run(docMsg('ZIP1', 'application/zip', EXPUSER));
+check('a file that is not an image or PDF is not a receipt', r === null, r);
+r = run(docMsg('PDF1', 'application/pdf', EXPUSER));
+check('a PDF is accepted', r.sessionState === 'PAID_CONFIRM' &&
+  r.reply.text.includes('📎 الإيصال: ✅ مرفق'), r.reply.text);
+r = run(cb('pconfirm', EXPUSER));
+check('and sent on as a document', r.save.receiptFileId === 'PDF1' &&
+  r.save.receiptKind === 'document', [r.save.receiptFileId, r.save.receiptKind]);
+payShortcut(MIXED, '42424');
+run(msg('300', EXPUSER)); run(cb('xpay_vcash', EXPUSER)); run(photo('PIC1', EXPUSER));
+r = run(cb('pconfirm', EXPUSER));
+check('a photo is still sent as a photo', r.save.receiptKind === 'photo', r.save.receiptKind);
+
+section('add payment: the review card can be cancelled');
+payShortcut(MIXED, '42424');
+run(msg('100', EXPUSER)); run(cb('xpay_cash', EXPUSER));
+r = run(cb('pcancel', EXPUSER));
+check('cancel saves nothing and ends the session',
+  r.hasSave === false && r.sessionState === '' && r.reply.text.startsWith('تم الإلغاء'),
+  [r.hasSave, r.sessionState, r.reply.text]);
+
+section('add payment: the admin review warns about overpaying too');
+payOn(SPLIT, 'xpay_cash', 400);
+r = run(cb('xleft_no'));
+check('the summary carries the warning',
+  r.reply.text.includes('⚠️ المدفوع بعد هذه الدفعة (2600) أكبر من سعر الحجز (600) بـ 2000'),
+  r.reply.text);
 
 // ─── Every option, every field ────────────────────────────────────────────────
 
@@ -1645,7 +1816,7 @@ check('expense group post is balanced', balanced(r.save.groupText), r.save.group
 check('the SHEET keeps the raw text, unescaped',
   r.save.fields['البند'] === 'كهرباء 50_60 *عاجل*' &&
   r.save.fields['ملاحظات'] === 'راجع الفاتورة_2' &&
-  r.save.fields['الرقم'] === "'E_1",
+  r.save.fields['الرقم'] === 'E_1',
   [r.save.fields['البند'], r.save.fields['ملاحظات'], r.save.fields['الرقم']]);
 
 resetSession();
@@ -1665,7 +1836,7 @@ check('booking confirm survives Markdown metacharacters', balanced(r.reply.text)
 r = run(cb('save'));
 check('booking group post is balanced', balanced(r.save.groupText), r.save.groupText);
 check('the SHEET keeps the raw booking text',
-  r.save.fields['ملاحظات'] === 'ملاحظة_مهمة *جدا*' && r.save.fields['بوكنج ID'] === "'BK_7*7",
+  r.save.fields['ملاحظات'] === 'ملاحظة_مهمة *جدا*' && r.save.fields['بوكنج ID'] === 'BK_7*7',
   [r.save.fields['ملاحظات'], r.save.fields['بوكنج ID']]);
 
 // Sheet values flow back out through the edit diff, so they need it too.
@@ -1762,6 +1933,97 @@ r = run(cb('save'));
 check('the button still works afterwards', r.hasSave === true, r.reply);
 
 sheetRows = null;
+
+// ─── Suggested booking ID and expense number ─────────────────────────────────
+
+section('suggested numbers: ✅ takes the offered one');
+nextBookingId = 119;
+expenseRows = [{ 'الرقم': '1' }, { 'الرقم': "'2" }, { 'الرقم': '٣' }, { 'الرقم': '' },
+  { 'الرقم': '29801011234567' }];   // a pasted national number must not count
+resetSession();
+run(msg('/start')); run(cb('choice_booking'));
+r = run(cb('bid_skip'));
+check('the ID question names the suggestion', r.reply.text.includes('119'), r.reply.text);
+check('✅ button carries it', r.reply.reply_markup.inline_keyboard[0][0].text === '✅ 119'
+  && r.reply.reply_markup.inline_keyboard[0][0].callback_data === 'pid_ok',
+  JSON.stringify(r.reply.reply_markup));
+check('skip is still there', r.reply.reply_markup.inline_keyboard[1][0].callback_data === 'pid_skip');
+r = run(cb('pid_ok'));
+check('✅ moves on to the name', r.reply.text === '👤 اسم المقيم:', r.reply.text);
+check('and the ID is the suggested one', JSON.parse(r.sessionData).private_id === '119',
+  r.sessionData);
+
+resetSession();
+run(msg('/start')); run(cb('choice_booking')); run(cb('bid_skip'));
+r = run(msg('A777'));
+check('typing over the suggestion keeps what was typed',
+  JSON.parse(r.sessionData).private_id === 'A777', r.sessionData);
+
+resetSession();
+run(msg('/start', EXPUSER));
+r = run(cb('choice_expense', EXPUSER));
+check("expense question offers one past the highest in the tab",
+  r.reply.text.includes('المقترح 4'), r.reply.text);
+check('expense ✅ button', r.reply.reply_markup.inline_keyboard[0][0].callback_data === 'eid_ok');
+run(cb('eid_ok', EXPUSER)); run(msg('بند', EXPUSER)); run(msg('100', EXPUSER));
+run(cb('eapt_0', EXPUSER)); run(cb('epay_cash', EXPUSER));
+run(cb('ereceipt_skip', EXPUSER)); run(cb('enotes_skip', EXPUSER));
+r = run(cb('esave', EXPUSER));
+check('the expense number is written as a number, no apostrophe',
+  r.save.fields['الرقم'] === 4, JSON.stringify(r.save.fields['الرقم']));
+
+section('suggested numbers: an empty expense tab starts at 1');
+expenseRows = [{}];
+resetSession();
+run(msg('/start', EXPUSER));
+r = run(cb('choice_expense', EXPUSER));
+check('empty tab → 1', r.reply.text.includes('المقترح 1'), r.reply.text);
+
+section('suggested numbers: a failed read falls back to the plain question');
+nextBookingId = null;
+expenseRows = [{ error: 'The service is currently unavailable' }];
+resetSession();
+run(msg('/start', EXPUSER));
+r = run(cb('choice_expense', EXPUSER));
+check('plain expense question', r.reply.text === '🔢 رقم المصروف (إن وجد) أو اضغط تخطي:', r.reply.text);
+r = run(cb('eid_ok', EXPUSER));
+check('a stale ✅ with nothing offered stores no number',
+  JSON.parse(r.sessionData).exp_id === '', r.sessionData);
+expenseRows = null;
+
+section('ID cells: no apostrophe on a plain number');
+resetSession();
+run(msg('/start')); run(cb('choice_booking'));
+run(msg('4455667788'));           // booking.com reference
+run(msg('120'));
+run(msg('محمد علي'));
+run(msg('01012345678')); run(cb('ar_2_4'));
+run(cb('nights_3')); run(cb('cal_day_2026_08_15'));
+run(msg('4500')); run(cb('pay_cash')); run(msg('2000'));
+run(msg('ملاحظة'));
+r = run(cb('save'));
+check('ID is a number', r.save.fields['ID'] === 120, JSON.stringify(r.save.fields['ID']));
+check('بوكنج ID is a number', r.save.fields['بوكنج ID'] === 4455667788,
+  JSON.stringify(r.save.fields['بوكنج ID']));
+check('phone keeps its leading zero', r.save.fields['رقم الهاتف'] === "'01012345678",
+  r.save.fields['رقم الهاتف']);
+
+section('availability report on demand');
+resetSession();
+r = run(msg('/start'));
+r = run(cb('choice_avail'));
+check('admin tap raises the availability flag', r.hasAvailability === true, r.hasAvailability);
+check('and says it is on its way', r.reply.text === '🏠 جاري إرسال تقرير الإتاحة إلى الجروب.',
+  r.reply.text);
+check('and leaves no session behind', r.sessionState === '', r.sessionState);
+check('nothing is saved', r.hasSave === false);
+r = run(cb('choice_avail', EXPUSER));
+check('a cashier can send it too, from a card with no session', r.hasAvailability === true,
+  r.hasAvailability);
+r = run(cb('choice_avail', OTHER));
+check('a stranger cannot', r === null || r.hasAvailability !== true, r);
+r = run(msg('/start'));
+check('an ordinary turn does not fire the report', r.hasAvailability === false, r.hasAvailability);
 
 // ─── Result ───────────────────────────────────────────────────────────────────
 

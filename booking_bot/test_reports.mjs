@@ -345,10 +345,10 @@ check('debts are reported midweek', midweek.includes('💰 *العملاء ال�
 check('and the weekend says the same thing',
   weekend.includes('💰 *العملاء المدينون* (2)'), weekend);
 check('largest debt first', midweek.indexOf('مدين كبير') < midweek.indexOf('مدين صغير'), midweek);
-// Apartment heading, then room — name — amount under it: the availability
-// report's layout (user, 2026-09-27). No "متبقي", the title says it.
-check('a debt line is room, name and amount',
-  midweek.includes('  • 1 — مدين كبير — 1500'), midweek);
+// Apartment heading, then "room. name: amount" under it (user, 2026-09-27).
+// No "متبقي", the title says it.
+check('a debt line is "room. name: amount"',
+  midweek.split('\n').includes('1. مدين كبير: 1500'), midweek);
 check('the apartment is a heading, once',
   midweek.split('*ذاكر حسين*').length === 2 &&
   midweek.indexOf('*ذاكر حسين*') < midweek.indexOf('مدين كبير'), midweek);
@@ -421,6 +421,33 @@ msgs = buildDigest([row({ 'اسم المقيم': 'ضيف_مهم *جدا*', 'تا
 const balanced = (s) =>
   (s.match(/(?<!\\)\*/g) || []).length % 2 === 0 && (s.match(/(?<!\\)_/g) || []).length % 2 === 0;
 check('a guest name cannot break the message', balanced(msgs[0].text), msgs[0].text);
+
+section('on demand: the 🏠 تقرير الإتاحة button');
+{
+  // The button's chain: its own twins of the schedule's nodes, and Report
+  // Config never ran — n8n throws on a reference to it.
+  const rows = [
+    row({ 'اسم المقيم': 'ساكن', 'تاريخ البداية': '2026-08-10', 'تاريخ المغادرة': '2026-08-20',
+      'المتبقي': 500 }),
+  ].map((j, i) => ({ ...j, row_number: i + 2 }));
+  const $ = (name) => {
+    if (name === 'Read Availability Formulas') {
+      return { all: () => rows.map(j => ({ json: { row_number: j.row_number, 'عدد الليالي': 10 } })) };
+    }
+    if (name === 'Read Availability Locations') {
+      return { all: () => registry(['ذاكر حسين', 1], ['ذاكر حسين', 2]).map(json => ({ json })) };
+    }
+    if (name === 'Availability Config') return { first: () => ({ json: CONFIG }) };
+    throw new Error(`Referenced node is unexecuted: ${name}`);
+  };
+  const $input = { all: () => rows.map(json => ({ json })) };
+  const out = buildFn($, $input, frozenDate(WED)).map(i => i.json);
+  const text = out.map(m => m.text).join('\n');
+  check('sends the availability report', text.includes('🏠 *تقرير الإتاحة*'), text);
+  check('lists the guest and the free room', text.includes('ساكن') && text.includes('متاحه'), text);
+  check('and not the debt report', !text.includes('💰'), text);
+  check('to the reports group', out.every(m => m.chat_id === '-5057362381'), out);
+}
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all checks passed'}`);
 process.exit(failures ? 1 : 0);
