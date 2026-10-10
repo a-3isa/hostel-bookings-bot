@@ -64,6 +64,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 SHEET_ID = "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
 BOOKINGS_TAB = "إدخال الحجوزات"
+EXPENSE_TAB = "مصروفات عامة"
 # Kept for reference, no longer read by this script: the registry moved to the
 # `apartments`/`rooms` tables at Phase 4b. The tab itself stays — it is a report
 # people use, it just is not the bot's room registry any more.
@@ -187,6 +188,26 @@ def main():
             if c["type"] == "postgres"), None)
         print(f"live: {len(wf['nodes'])} nodes")
 
+    # The Sheets credential the live graph already uses. SHEETS_CRED's id dates
+    # from before the workflow was rebuilt, and binding a new node to it fails
+    # the whole batch ("credential ... not found", 2026-10-01).
+    global SHEETS_CRED
+    live_sheets = next((n["credentials"]["googleSheetsOAuth2Api"] for n in wf["nodes"]
+                        if (n.get("credentials") or {}).get("googleSheetsOAuth2Api", {}).get("id")),
+                       None)
+    if live_sheets:
+        SHEETS_CRED = ("googleSheetsOAuth2Api", live_sheets["id"],
+                       live_sheets.get("name", SHEETS_CRED[2]))
+    # Telegram's id went stale the same way (2026-10-08, adding Send
+    # Availability Report).
+    global TELEGRAM_CRED
+    live_tg = next((n["credentials"]["telegramApi"] for n in wf["nodes"]
+                    if (n.get("credentials") or {}).get("telegramApi", {}).get("id")),
+                   None)
+    if live_tg:
+        TELEGRAM_CRED = ("telegramApi", live_tg["id"],
+                         live_tg.get("name", TELEGRAM_CRED[2]))
+
     have = {n["name"] for n in wf["nodes"]}
     # Node TYPE, not just presence: a node whose type changed has to be replaced
     # rather than reconfigured, and "it exists" is not enough to tell.
@@ -295,8 +316,62 @@ def main():
     connect("Needs Bookings?", "Needs Locations?", index=1)
     connect("Read Bookings For Edit", "Needs Locations?")
     connect("Needs Locations?", "Read Locations", index=0)
-    connect("Needs Locations?", "Brain", index=1)
-    connect("Read Locations", "Brain")
+
+    # ── The suggested booking ID and expense number (2026-10-01) ──────────────
+    #
+    # Two more gated reads between the locations gate and the Brain, each for
+    # the one turn that asks its question: the booking ID is asked on the turn
+    # that answers بوكنج ID, the expense number on the tap of 💸 مصروف. The
+    # gates read Load Session / the trigger by name, because by here $json is
+    # whatever the previous read returned. executeOnce on both reads: the
+    # locations read hands on 26 items, and each would otherwise run 26 times.
+    #
+    # The booking ID comes from Postgres (it keeps counting across sheet resets);
+    # the expense number from the expense tab itself (it restarts with the tab).
+    for gate, expr, pos in (
+        ("Needs Booking ID?",
+         "={{ $('Load Session').first().json.state === 'BOOKING_ID' }}", [-64, 560]),
+        ("Needs Expense Number?",
+         "={{ ($('Telegram Trigger').first().json.callback_query || {}).data"
+         " === 'choice_expense' }}", [416, 560]),
+    ):
+        params = {"conditions": {
+            "options": {"caseSensitive": True, "leftValue": "",
+                        "typeValidation": "loose", "version": 1},
+            "conditions": [{"id": gate, "leftValue": expr, "rightValue": "",
+                            "operator": {"type": "boolean", "operation": "true",
+                                         "singleValue": True}}],
+            "combinator": "and"}, "looseTypeValidation": True, "options": {}}
+        if gate not in have:
+            add_node(gate, "n8n-nodes-base.if", 2.3, params, pos)
+            print(f"  + {gate}")
+        else:
+            ops.append({"type": "updateNodeParameters", "nodeName": gate,
+                        "parameters": params})
+    postgres_read("Read Next Booking ID", "read_next_booking_id.sql", [176, 480])
+    ops.append({"type": "setNodeSettings", "nodeName": "Read Next Booking ID",
+                "settings": {"executeOnce": True}})
+    if "Read Expense Numbers" not in have:
+        add_node("Read Expense Numbers", "n8n-nodes-base.googleSheets", 4.7,
+                 sheets_read(EXPENSE_TAB, "A1:H2000"), [656, 480], cred=SHEETS_CRED)
+        print("  + Read Expense Numbers")
+    # A failed read must still reach the Brain, which then asks the plain
+    # question; an empty tab must too, which is what alwaysOutputData is for.
+    ops.append({"type": "setNodeSettings", "nodeName": "Read Expense Numbers",
+                "settings": {"executeOnce": True, "alwaysOutputData": True,
+                             "onError": "continueRegularOutput",
+                             "retryOnFail": True, "maxTries": 2}})
+
+    disconnect("Needs Locations?", "Brain", index=1)
+    disconnect("Read Locations", "Brain")
+    connect("Needs Locations?", "Needs Booking ID?", index=1)
+    connect("Read Locations", "Needs Booking ID?")
+    connect("Needs Booking ID?", "Read Next Booking ID", index=0)
+    connect("Needs Booking ID?", "Needs Expense Number?", index=1)
+    connect("Read Next Booking ID", "Needs Expense Number?")
+    connect("Needs Expense Number?", "Read Expense Numbers", index=0)
+    connect("Needs Expense Number?", "Brain", index=1)
+    connect("Read Expense Numbers", "Brain")
 
     # ── Undo: park the pre-image instead of blanking `data` ───────────────────
     #
@@ -402,6 +477,72 @@ def main():
     # receptionist's confirmation that a save landed, and were never part of the
     # 08:00 schedule.
     connect("Build Reports", "Send Report")
+
+    # ── The availability report, on demand ────────────────────────────────────
+    #
+    # The 🏠 تقرير الإتاحة button (user, 2026-10-08: "a button in the bot to
+    # send the availability message when needed"). The Brain raises
+    # `hasAvailability`; this chain builds the same report the 08:00 schedule
+    # does, with the same code, and posts it to the same group.
+    #
+    # It has its own twins of the schedule's reads rather than wiring into
+    # Report Config, because Read Report Values also feeds the snapshot and the
+    # mirror append — a tap would have run the morning's real work as a side
+    # effect. build_reports.js tells the two chains apart by which Config ran,
+    # and sends only the availability report from this one.
+    if "Wants Availability?" not in have:
+        add_node("Wants Availability?", "n8n-nodes-base.if", 2.3,
+                 {"conditions": bw.flag_condition("={{ $json.hasAvailability }}",
+                                                  "wants-availability"),
+                  "looseTypeValidation": True, "options": {}},
+                 [1200, 1100])
+        print("  + Wants Availability?")
+    if "Availability Config" not in have:
+        add_node("Availability Config", "n8n-nodes-base.set", 3.4,
+                 {"assignments": {"assignments": [
+                     {"id": "tz", "name": "TIMEZONE", "value": "Africa/Cairo", "type": "string"},
+                     {"id": "grp", "name": "REPORT_GROUP_CHAT_ID",
+                      "value": REPORT_GROUP_CHAT_ID, "type": "string"},
+                 ]}, "options": {}},
+                 [1440, 1100])
+        print("  + Availability Config")
+    postgres_read("Read Availability Locations", "read_locations.sql", [1680, 1100])
+    for node, formula, pos in (("Read Availability Formulas", True, [1920, 1100]),
+                               ("Read Availability Values", False, [2160, 1100])):
+        if node not in have:
+            add_node(node, "n8n-nodes-base.googleSheets", 4.7,
+                     sheets_read(BOOKINGS_TAB, "A:U", formula=formula),
+                     pos, cred=SHEETS_CRED)
+            print(f"  + {node}")
+        else:
+            ops.append({"type": "updateNodeParameters", "nodeName": node,
+                        "parameters": sheets_read(BOOKINGS_TAB, "A:U", formula=formula)})
+        # One read per tap: the registry hands the formulas read one item per
+        # room, and the formulas read hands the values read one per row.
+        ops.append({"type": "setNodeSettings", "nodeName": node,
+                    "settings": {"executeOnce": True, "retryOnFail": True,
+                                 "maxTries": 2}})
+    if "Build Availability Report" not in have:
+        add_node("Build Availability Report", "n8n-nodes-base.code", 2,
+                 {"jsCode": read_source("build_reports.js")}, [2400, 1100])
+        print("  + Build Availability Report")
+    else:
+        ops.append({"type": "updateNodeParameters", "nodeName": "Build Availability Report",
+                    "parameters": {"jsCode": read_source("build_reports.js")}})
+        print("  ~ Build Availability Report code")
+    if "Send Availability Report" not in have:
+        add_node("Send Availability Report", "n8n-nodes-base.telegram", 1.2,
+                 {"chatId": "={{ $json.chat_id }}", "text": "={{ $json.text }}",
+                  "additionalFields": {"appendAttribution": False, "parse_mode": "Markdown"}},
+                 [2640, 1100], cred=TELEGRAM_CRED)
+        print("  + Send Availability Report")
+    connect("Brain", "Wants Availability?")
+    connect("Wants Availability?", "Availability Config", index=0)
+    connect("Availability Config", "Read Availability Locations")
+    connect("Read Availability Locations", "Read Availability Formulas")
+    connect("Read Availability Formulas", "Read Availability Values")
+    connect("Read Availability Values", "Build Availability Report")
+    connect("Build Availability Report", "Send Availability Report")
 
     # ── Phase 2: dual-write to Supabase ──────────────────────────────────────
     #
@@ -647,6 +788,45 @@ def main():
         for node in ("Read Unmirrored Bookings", "Append Mirror Row", "Mark Mirrored"):
             ops.append({"type": "setNodeSettings", "nodeName": node,
                         "settings": {"onError": "continueRegularOutput"}})
+
+    # ── A payment receipt sent as a file ──────────────────────────────────────
+    #
+    # The add-payment flow takes an image or PDF sent as a FILE as well as a
+    # photo (2026-10-10). A file's id is refused by sendPhoto, so the Brain
+    # marks `save.receiptKind` and files go out through sendDocument instead.
+    # Every other flow leaves receiptKind unset and keeps the photo path.
+    if "Receipt Is Document?" not in have:
+        add_node("Receipt Is Document?", "n8n-nodes-base.if", 2.3, {
+            "conditions": {
+                "options": {"caseSensitive": True, "leftValue": "",
+                            "typeValidation": "loose", "version": 1},
+                "conditions": [{
+                    "id": "receipt-is-document",
+                    "leftValue": "={{ $('Brain').first().json.save.receiptKind }}",
+                    "rightValue": "document",
+                    "operator": {"type": "string", "operation": "equals"}}],
+                "combinator": "and"},
+            "looseTypeValidation": True, "options": {},
+        }, [2460, 780])
+        print("  + Receipt Is Document?")
+    if "Post Receipt File To Group" not in have:
+        photo_node = next(n for n in wf["nodes"] if n["name"] == "Post Receipt To Group")
+        params = json.loads(json.dumps(photo_node["parameters"]))
+        params["operation"] = "sendDocument"
+        add_node("Post Receipt File To Group", photo_node["type"], photo_node["typeVersion"],
+                 params, [2760, 900], cred=TELEGRAM_CRED)
+        print("  + Post Receipt File To Group")
+    # A setting op, not a key on addNode: the endpoint drops `onError` there
+    # (seen 2026-10-10). Same reason as the other posters — the save is done
+    # by now, and a failed post must not mark the execution failed.
+    if next((n for n in wf["nodes"] if n["name"] == "Post Receipt File To Group"),
+            {}).get("onError") != "continueRegularOutput":
+        ops.append({"type": "setNodeSettings", "nodeName": "Post Receipt File To Group",
+                    "settings": {"onError": "continueRegularOutput"}})
+    disconnect("Has Receipt?", "Post Receipt To Group", index=0)
+    connect("Has Receipt?", "Receipt Is Document?", index=0)
+    connect("Receipt Is Document?", "Post Receipt File To Group", index=0)
+    connect("Receipt Is Document?", "Post Receipt To Group", index=1)
 
     ops.extend(creds)          # credentials bind after their node exists
     if not ops:

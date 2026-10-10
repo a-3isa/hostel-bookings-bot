@@ -38,7 +38,7 @@ const ADMIN_USERS = parseUsers(
 const CASHIER_USERS = parseUsers(
   CFG.CASHIER_USERS !== undefined && CFG.CASHIER_USERS !== ''
     ? CFG.CASHIER_USERS
-    : '@Seifgamal24,@seiiffseiif'
+    : '1430533008,5213695300'
 );
 
 const TZ = CFG.TIMEZONE || 'Africa/Cairo';
@@ -74,6 +74,22 @@ const UNPAID_KEY = 'unpaid';
 
 /** The label غير مدفوع, read off PAYMENTS so the two can never drift apart. */
 const UNPAID_LABEL = (PAYMENTS.find(p => p.key === UNPAID_KEY) || {}).label || 'غير مدفوع';
+
+/**
+ * The methods a payment can actually arrive by. غير مدفوع is the absence of a
+ * payment, so offering it after an amount was typed let "500 غير مدفوع" open a
+ * line that said unpaid while holding 500 (ruled out 2026-10-10).
+ */
+const PAY_METHODS = PAYMENTS.filter(p => p.key !== UNPAID_KEY);
+
+/**
+ * Foreign currencies. An amount paid in يورو or دولار is in THAT currency — 100
+ * means €100, not 100 EGP — so it is never added to the pounds the price is
+ * set in, never subtracted from المتبقي, and always kept on a line of its own.
+ */
+const FOREIGN_KEYS = ['eur', 'usd'];
+const FOREIGN_LABELS = PAYMENTS.filter(p => FOREIGN_KEYS.indexOf(p.key) !== -1).map(p => p.label);
+function isForeign(method) { return FOREIGN_LABELS.indexOf(String(method || '').trim()) !== -1; }
 
 /**
  * Does this طريقة الدفع cell name a way money actually changed hands?
@@ -168,6 +184,8 @@ const S = {
   not_authorized: '⛔ غير مصرح لك باستخدام هذا البوت.',
 
   exp_ask_id: '🔢 رقم المصروف (إن وجد) أو اضغط تخطي:',
+  exp_ask_id_suggest:
+    '🔢 رقم المصروف: المقترح {n}\nاضغط ✅ للتأكيد، أو اكتب رقماً آخر، أو اضغط تخطي:',
   exp_ask_item: '📝 البند (وصف المصروف):',
   exp_ask_amount: '💰 المبلغ:',
   exp_ask_apartment: '🏠 الشقة:',
@@ -203,6 +221,9 @@ const S = {
   ask_booking_id: '🔖 أدخل رقم البوكينج (إن وجد) أو اضغط تخطي:',
   btn_skip: 'تخطي',
   ask_private_id: '🆔 أدخل الـ ID:',
+  ask_private_id_suggest:
+    '🆔 الـ ID: المقترح {n}\nاضغط ✅ للتأكيد، أو اكتب رقماً آخر، أو اضغط تخطي:',
+  btn_ok_ref: '✅ {n}',
   ask_name: '👤 اسم المقيم:',
   name_error: '❌ الاسم مطلوب. اكتب اسم المقيم:',
   ask_btype: '📑 نوع الحجز:',
@@ -268,7 +289,7 @@ const S = {
   // ── Edit / cancel an already-saved booking ──
   btn_edit_booking: '✏️ تعديل حجز',
   edit_ask_paid_add:
-    '💵 أدخل المبلغ المضاف (المدفوع حالياً: {current}):\n' +
+    '💵 أدخل المبلغ المضاف:\n{status}\n' +
     '↩️ للاسترداد أو تصحيح خطأ أدخل رقماً سالباً، مثل ‎-500',
   total_formula_replaced:
     '⚠️ السعر كان معادلة (سعر الليلة × عدد الليالي) وأصبح رقماً ثابتاً — '
@@ -346,10 +367,33 @@ const S = {
   del_note: 'ملغي',
   // ── Cashier: add a payment to an existing booking ──
   btn_add_paid: '💵 إضافة مبلغ مدفوع',
+  // ── On demand: the morning availability report, now ──
+  btn_availability: '🏠 تقرير الإتاحة',
+  avail_sent: '🏠 جاري إرسال تقرير الإتاحة إلى الجروب.',
   paid_ask_id: '🔎 أدخل الـ ID الخاص بالحجز:',
-  paid_ask_amount: '💵 أدخل المبلغ المدفوع (المدفوع حالياً: {current}):',
-  paid_ask_receipt: '📎 أرسل صورة إيصال التحويل:',
-  paid_receipt_error: '❌ لا بد من إرسال صورة الإيصال:',
+  paid_ask_amount: '💵 أدخل المبلغ المدفوع:\n{status}',
+  // What the booking has been paid across ALL its rows, not just its own one —
+  // a guest with 500 كاش on the row and 300 انستاباي on a line has paid 800.
+  pay_status_paid: '💵 المدفوع حالياً: {paid}',
+  pay_status_of: '💵 المدفوع حالياً: {paid} من {price}\n📉 المتبقي: {remaining}',
+  pay_status_foreign: '💱 مدفوع {amount} {currency} (لا يُحسب من المتبقي)',
+  paid_zero_error: '❌ المبلغ لا يمكن أن يكون صفراً. أدخل المبلغ:',
+  paid_refund_admin_only:
+    '❌ الاسترداد (مبلغ بالسالب) للمسؤول فقط. أدخل مبلغاً أكبر من صفر:',
+  paid_ask_receipt: '📎 أرسل صورة إيصال التحويل (صورة أو ملف):',
+  paid_receipt_error: '❌ لا بد من إرسال صورة الإيصال (صورة أو ملف):',
+  paid_confirm:
+    '🧾 *راجع الدفعة قبل الحفظ*\n\n' +
+    '👤 المقيم: {name}\n' +
+    '🆔 ID: {private_id}\n' +
+    '🏠 الشقة: {apartment}\n' +
+    '➕ المبلغ: {added}\n' +
+    '💳 الدفع: {method}\n' +
+    '📎 الإيصال: {receipt}\n\n' +
+    '{status}',
+  overpay_warning:
+    '⚠️ المدفوع بعد هذه الدفعة ({paid}) أكبر من سعر الحجز ({price}) بـ {over}. '
+    + 'تأكد من المبلغ قبل الحفظ.',
   paid_saved: '✅ تم تسجيل الدفعة.',
   paid_saved_no_group: '✅ تم تسجيل الدفعة.\n⚠️ تعذّر الإرسال للجروب.',
   paid_group_msg:
@@ -426,6 +470,14 @@ function grid(options, prefix, perRow) {
 
 function skipKb(cbData) {
   return { inline_keyboard: [[{ text: t('btn_skip'), callback_data: cbData }]] };
+}
+
+/** The suggested number as its own button, above the usual skip. */
+function suggestKb(n, okData, skipData) {
+  return { inline_keyboard: [
+    [{ text: t('btn_ok_ref', { n }), callback_data: okData }],
+    [{ text: t('btn_skip'), callback_data: skipData }],
+  ] };
 }
 
 function numKeyboard(lo, hi, prefix, extra, perRow) {
@@ -572,6 +624,24 @@ function num(v) {
 function txt(v) { return v ? `'${v}` : v; }
 
 /**
+ * An ID or a number column as the sheet should hold it. The ' marker txt()
+ * adds was showing in the cell editor as part of the ID ("the id was input
+ * with ' with it", 2026-10-01), and stored a counter as text. So a plain
+ * counter goes in as a number, and anything else as typed — except what the
+ * sheet would reinterpret (the write is USER_ENTERED): a leading zero it would
+ * drop, `1/5` it would turn into a date, `1E5` into a number, `+20…` or `=…`
+ * into a formula. Those still get the marker.
+ */
+function idCell(v) {
+  const s = String(v === undefined || v === null ? '' : v).trim();
+  if (!s) return '';
+  if (/^[1-9][0-9]{0,14}$/.test(s)) return Number(s);
+  if (/^[=+\-@]/.test(s) || /^[0-9\s.,\/:\-]+$/.test(s)
+      || /^[0-9.]+e[+\-]?[0-9]+$/i.test(s)) return txt(s);
+  return s;
+}
+
+/**
  * The guest's name, as typed. Anything is a name.
  *
  * This used to demand letters and spaces only, three characters minimum, and it
@@ -624,7 +694,14 @@ const photoSizes = (!cq && upd.message && upd.message.photo) ? upd.message.photo
 const photoFileId =
   photoSizes && photoSizes.length ? photoSizes[photoSizes.length - 1].file_id : null;
 
-if (!cq && !upd.message.text && !photoFileId) return [];   // stickers etc → ignore
+// A receipt can also arrive as a FILE: a screenshot sent uncompressed, or the
+// PDF a banking app exports. Only images and PDFs count, and only the payment
+// receipt step takes them — see the check after the session is loaded.
+const doc = (!cq && upd.message && upd.message.document) ? upd.message.document : null;
+const docFileId = doc && /^(image\/|application\/pdf$)/.test(String(doc.mime_type || ''))
+  ? doc.file_id : null;
+
+if (!cq && !upd.message.text && !photoFileId && !docFileId) return [];   // stickers etc → ignore
 
 const responsible =
   [from.first_name, from.last_name].filter(Boolean).join(' ') ||
@@ -674,6 +751,12 @@ function readSession(row) {
 const session = readSession(loadedRow);
 const d = session ? session.data : {};
 const state = session ? session.state : null;
+
+// A file with no text is a receipt or it is nothing. Anywhere but the payment
+// receipt step it would arrive as an empty message, and a state that takes free
+// text (notes, a name) would accept "" as the answer — so it is dropped there
+// exactly as it was before files were accepted at all.
+if (docFileId && !photoFileId && !upd.message.text && state !== 'EDIT_RECEIPT') return [];
 
 // "Read Bookings For Edit" only runs on the turns that need it, so on every
 // other turn the node is unexecuted and referencing it throws. That is the
@@ -731,6 +814,46 @@ function locationRegistry() {
     if (entry.rooms.indexOf(room) === -1) entry.rooms.push(room);
   }
   return byApartment.length ? byApartment : FALLBACK_REGISTRY;
+}
+
+/**
+ * The ID offered for a new booking: one past the previous one, from the
+ * database (read_next_booking_id.sql). Gated like the reads above — it runs
+ * only on the turn that asks for the ID — so anywhere else, or if the query
+ * failed, this is null and the question goes out as it always did.
+ */
+function nextBookingId() {
+  try {
+    const n = Number($('Read Next Booking ID').first().json.next_booking_id);
+    return Number.isInteger(n) && n > 0 ? String(n) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * The number offered for a new expense: one past the highest in the expense
+ * tab's الرقم column. From the sheet, not the database, because the expense
+ * numbering restarts with the tab ("Restart at 1 with the sheet", 2026-10-01),
+ * so an empty tab offers 1. A failed read offers nothing rather than a 1 that
+ * would collide with the rows it could not see.
+ */
+function nextExpenseNumber() {
+  let items;
+  try {
+    items = $('Read Expense Numbers').all();
+  } catch (e) {
+    return null;
+  }
+  let max = 0;
+  for (const i of items) {
+    const j = i.json || {};
+    if (j.error) return null;
+    const v = asciiDigits(String(j['الرقم'] === undefined ? '' : j['الرقم']))
+      .replace(/^'/, '').trim();
+    if (/^[0-9]{1,6}$/.test(v)) max = Math.max(max, Number(v));
+  }
+  return String(max + 1);
 }
 
 /**
@@ -852,6 +975,8 @@ const out = {
   // changes nothing (an ignored tap) leaves the session exactly as it was.
   sessionState: session ? session.state : '',
   sessionData: session ? JSON.stringify(session.data) : '{}',
+  // Fires the availability chain ("Wants Availability?" in the workflow).
+  hasAvailability: false,
 };
 
 function reply(text_, markup, markdown) {
@@ -1056,6 +1181,83 @@ function paidSoFar(dd) {
 }
 
 /**
+ * What the booking has been paid across its own row AND every line, in pounds,
+ * with foreign currency kept apart.
+ *
+ * paidSoFar() is the booking row's cell alone. Shown to a cashier as "المدفوع
+ * حالياً" it hid every line: 500 كاش on the row and 300 انستاباي underneath read
+ * as 500, and the cashier collected the 300 again.
+ *
+ * `price` is null when it is not a number the bot can compare against. The
+ * lookup hands over the evaluated total, so a nightly-rate booking still has one.
+ */
+function paymentTotals(dd) {
+  const method = String((dd.editNew && dd.editNew['طريقة الدفع']) ||
+    (dd.editOrig && dd.editOrig['طريقة الدفع']) || '').trim();
+  let egp = 0;
+  const foreign = {};
+  const add = (m, amount) => {
+    if (!amount) return;
+    if (isForeign(m)) foreign[m] = num((foreign[m] || 0) + amount);
+    else egp += amount;
+  };
+  add(method, paidSoFar(dd));
+  for (const l of (Array.isArray(dd.editLines) ? dd.editLines : [])) {
+    if (Number(l.row) === Number(dd.editRow)) continue;   // the row counted above
+    add(String(l.method || '').trim(), Number(l.amount) || 0);
+  }
+  const totalCol = 'اجمالي سعر الحجز';
+  const raw = (dd.editNew && dd.editNew[totalCol] !== undefined)
+    ? dd.editNew[totalCol] : (dd.editOrig ? dd.editOrig[totalCol] : '');
+  const price = String(raw === undefined ? '' : raw).trim().startsWith('=') ? null : parseNum(raw);
+  return { egp: num(egp), foreign, price: price === null ? null : num(price) };
+}
+
+/**
+ * The same, once the payment in this session has landed. A payment on the
+ * booking's own row is already inside editNew; one on a line is not, because a
+ * line is a separate write.
+ */
+function totalsAfterPayment(dd) {
+  const tt = paymentTotals(dd);
+  if (hasLinePayment(dd)) {
+    const added = Number(parseNum(dd.paidAdded) || 0);
+    if (isForeign(dd.payMethod)) tt.foreign[dd.payMethod] = num((tt.foreign[dd.payMethod] || 0) + added);
+    else tt.egp = num(tt.egp + added);
+  }
+  return tt;
+}
+
+/** "المدفوع حالياً: 800 من 1500 / المتبقي: 700", plus a line per foreign currency. */
+function paymentStatus(tt) {
+  const lines = [(tt.price !== null && tt.price > 0)
+    ? t('pay_status_of', { paid: tt.egp, price: tt.price, remaining: num(tt.price - tt.egp) })
+    : t('pay_status_paid', { paid: tt.egp })];
+  for (const cur of Object.keys(tt.foreign)) {
+    lines.push(t('pay_status_foreign', { amount: tt.foreign[cur], currency: cur }));
+  }
+  return lines.join('\n');
+}
+
+/** An amount as the group should read it: 100 يورو is not 100 pounds. */
+function moneyLabel(amount, method) {
+  return isForeign(method) ? `${num(amount)} ${String(method).trim()}` : String(num(amount));
+}
+
+/**
+ * A warning when this payment takes the pounds paid past the price. Not a block:
+ * a deposit or a guest paying ahead is real. A typo like 50000 for 5000 is
+ * also real, and this is the moment someone can still catch it.
+ */
+function overpayNote(dd) {
+  const added = Number(parseNum(dd.paidAdded) || 0);
+  if (added <= 0 || isForeign(dd.payMethod)) return '';
+  const tt = totalsAfterPayment(dd);
+  if (tt.price === null || !(tt.price > 0) || tt.egp <= tt.price) return '';
+  return t('overpay_warning', { paid: tt.egp, price: tt.price, over: num(tt.egp - tt.price) });
+}
+
+/**
  * True when a save was already fired for this session moments ago.
  *
  * The session is deliberately kept until the write succeeds, so a failed write
@@ -1138,7 +1340,13 @@ function paymentTarget(dd, method) {
   // An empty طريقة الدفع cell — or one that still says غير مدفوع — is filled,
   // never left blank with a line beneath it: that is not what anyone means by
   // two payment methods.
-  if (!hasMethod(own) || own === want) return { kind: 'booking', row: dd.editRow };
+  //
+  // Except for a foreign currency. The booking row's paid cell is in pounds and
+  // its المتبقي is price − paid, so €100 written there would be subtracted as
+  // 100 pounds. Euros and dollars only ever join a row already in that currency.
+  if (own === want || (!hasMethod(own) && !isForeign(want))) {
+    return { kind: 'booking', row: dd.editRow };
+  }
 
   const hit = lines.find((l) => String(l.method || '').trim() === want);
   if (hit) {
@@ -1169,7 +1377,7 @@ function applyPick(hit) {
   if (d.paidOnly) {
     // Cashier flow: the booking is found, so go straight to the amount. There is
     // no field menu for them — payment is the only thing they may touch.
-    reply(t('paid_ask_amount', { current: num(paidSoFar(d)) }));
+    reply(t('paid_ask_amount', { status: paymentStatus(paymentTotals(d)) }));
     setState('EDIT_PAID', d);
     return;
   }
@@ -1179,7 +1387,8 @@ function applyPick(hit) {
 /**
  * Where a completed edit step goes next.
  *
- *  - cashier: linear, saves as soon as the payment (and its receipt) is in;
+ *  - the add-payment shortcut (`paidOnly`, cashier or admin): linear, and once
+ *    the payment (and its receipt) is in, one review card before it is saved;
  *  - admin who just recorded a payment: asked whether the guest has left, since
  *    settling up is when a checkout actually gets noticed. That question is
  *    asked once per session (`leaveAsked`) and ends in a summary + approval
@@ -1187,7 +1396,7 @@ function applyPick(hit) {
  *  - anything else: back to the field menu.
  */
 function afterEditStep(dd) {
-  if (dd.paidOnly) { commitEdit(dd); return; }
+  if (dd.paidOnly) { showPaidConfirm(dd); return; }
   if (dd.paidTouched && !dd.leaveAsked) {
     reply(t('edit_ask_left'), {
       inline_keyboard: [[
@@ -1203,13 +1412,39 @@ function afterEditStep(dd) {
 
 /** Final review of everything this edit session changed, before it is written. */
 function showEditConfirm(dd) {
-  reply(t('edit_confirm_summary', { changes: changeLines(dd) }), {
+  const warn = overpayNote(dd);
+  reply(t('edit_confirm_summary', { changes: changeLines(dd) }) + (warn ? '\n\n' + warn : ''), {
     inline_keyboard: [
       [{ text: t('btn_confirm'), callback_data: 'xedone' }],
       [{ text: t('btn_cancel'), callback_data: 'xecancel' }],
     ],
   }, true);
   setState('EDIT_CONFIRM', dd);
+}
+
+/**
+ * The add-payment shortcut's review card. Until 2026-10-10 the shortcut saved
+ * the moment the method (or receipt) arrived, so a wrong tap — the wrong guest
+ * off the picker, 50000 for 5000 — was already in the sheet and the group, and
+ * only an admin could take it back out.
+ */
+function showPaidConfirm(dd) {
+  const warn = overpayNote(dd);
+  reply(t('paid_confirm', {
+    name: mdEscape(dd.editName || t('empty')),
+    private_id: mdEscape(dd.editPrivateId || t('empty')),
+    apartment: mdEscape((dd.editOrig && dd.editOrig['اسم الشقة']) || t('empty')),
+    added: moneyLabel(parseNum(dd.paidAdded) || 0, dd.payMethod),
+    method: mdEscape(dd.payMethod || t('empty')),
+    receipt: dd.editReceipt ? t('receipt_attached') : t('empty'),
+    status: paymentStatus(totalsAfterPayment(dd)),
+  }) + (warn ? '\n\n' + warn : ''), {
+    inline_keyboard: [
+      [{ text: t('btn_confirm'), callback_data: 'pconfirm' }],
+      [{ text: t('btn_cancel'), callback_data: 'pcancel' }],
+    ],
+  }, true);
+  setState('PAID_CONFIRM', dd);
 }
 
 function bookingLabel(rowJson) {
@@ -1346,9 +1581,8 @@ function commitPaymentLine(dd) {
   // booking's own row. The total is no longer among it — see the note above.
   const bookingFields = Object.assign({}, dd.editNew || {});
 
-  const bookingPaid = parseNum(dd.editOrig ? dd.editOrig[paidCol] : 0) || 0;
-  const linesPaid = (Array.isArray(dd.editLines) ? dd.editLines : [])
-    .reduce((s, l) => s + (Number(l.amount) || 0), 0);
+  // Pounds only. Summing every line's cell added €100 to the total as 100.
+  const paidAfter = totalsAfterPayment(dd).egp;
 
   dd.savingAt = Date.now();
   out.sessionData = JSON.stringify(dd);   // the lock must outlive this turn
@@ -1376,13 +1610,14 @@ function commitPaymentLine(dd) {
       ref: `${dd.editRow}:${dd.savingAt}`,
     },
     receiptFileId: dd.editReceipt || '',
+    receiptKind: dd.editReceipt ? (dd.editReceiptKind || 'photo') : '',
     groupChatId: CFG.GROUP_CHAT_ID,
     groupText: t('paid_group_msg', {
       name: mdEscape(dd.editName || t('empty')),
       private_id: mdEscape(dd.editPrivateId || t('empty')),
       apartment: mdEscape((dd.editOrig && dd.editOrig['اسم الشقة']) || t('empty')),
-      added: num(added),
-      paid: num(bookingPaid + linesPaid + added),
+      added: moneyLabel(added, dd.payMethod),
+      paid: paidAfter,
       payment: dd.payMethod,
       receipt: dd.editReceipt ? t('receipt_attached') : t('empty'),
       actor,
@@ -1475,6 +1710,9 @@ function commitEdit(dd) {
       }
       : null,
     receiptFileId: dd.editReceipt || '',
+    // 'document' sends the receipt with sendDocument — a file's id is refused
+    // by sendPhoto. Every other flow leaves this unset and keeps sendPhoto.
+    receiptKind: dd.editReceipt ? (dd.editReceiptKind || 'photo') : '',
     groupChatId: CFG.GROUP_CHAT_ID,
     // A payment leads the message whoever recorded it. The step is called
     // "إضافة دفعة" now, so the group should read as one — "0 ← 40" describes a
@@ -1485,8 +1723,10 @@ function commitEdit(dd) {
         name: mdEscape(dd.editName || t('empty')),
         private_id: mdEscape(dd.editPrivateId || t('empty')),
         apartment: mdEscape((dd.editOrig && dd.editOrig['اسم الشقة']) || t('empty')),
-        added: num(dd.paidAdded || 0),
-        paid: dd.editNew[paidCol],
+        added: moneyLabel(parseNum(dd.paidAdded) || 0, dd.payMethod),
+        // The whole booking in pounds, lines included — the same figure the
+        // review card showed — not this row's cell alone.
+        paid: totalsAfterPayment(dd).egp,
         payment: dd.editNew['طريقة الدفع'] || t('empty'),
         receipt: dd.editReceipt ? t('receipt_attached') : t('empty'),
         actor,
@@ -1511,7 +1751,12 @@ function commitEdit(dd) {
 }
 
 function startBooking() { reply(t('ask_booking_id'), skipKb('bid_skip')); setState('BOOKING_ID', {}); }
-function startExpense() { reply(t('exp_ask_id'), skipKb('eid_skip')); setState('EXP_ID', {}); }
+function startExpense() {
+  const n = nextExpenseNumber();
+  if (n) reply(t('exp_ask_id_suggest', { n }), suggestKb(n, 'eid_ok', 'eid_skip'));
+  else reply(t('exp_ask_id'), skipKb('eid_skip'));
+  setState('EXP_ID', { exp_id_suggest: n });
+}
 
 /**
  * Cashier's add-a-payment entry. It deliberately reuses the EDIT_FIND state:
@@ -1520,6 +1765,18 @@ function startExpense() { reply(t('exp_ask_id'), skipKb('eid_skip')); setState('
  * find anything. `paidOnly` on the session data is what makes it linear.
  */
 function startPaid() { reply(t('paid_ask_id')); setState('EDIT_FIND', { paidOnly: true }); }
+
+/**
+ * The 08:00 availability report, sent to the reports group now rather than
+ * tomorrow morning (user, 2026-10-08). The Brain only raises the flag: the
+ * report itself is built by nodes/build_reports.js on its own chain, off the
+ * same sheet the morning one reads. Nothing is asked, so there is no session.
+ */
+function sendAvailability() {
+  out.hasAvailability = true;
+  reply(t('avail_sent'));
+  endSession();
+}
 
 // ─── Entry points: /start and /cancel ─────────────────────────────────────────
 
@@ -1552,6 +1809,7 @@ if (cmd === '/start' || (cmd || '').startsWith('/start@')) {
         // booking, take the money, done. The cashier has had the shortcut
         // since the beginning and the admin, who does it more often, did not.
         [{ text: t('btn_add_paid'), callback_data: 'choice_paid' }],
+        [{ text: t('btn_availability'), callback_data: 'choice_avail' }],
       ],
     });
   } else {
@@ -1562,6 +1820,7 @@ if (cmd === '/start' || (cmd || '').startsWith('/start@')) {
       inline_keyboard: [
         [{ text: t('btn_add_expense'), callback_data: 'choice_expense' }],
         [{ text: t('btn_add_paid'), callback_data: 'choice_paid' }],
+        [{ text: t('btn_availability'), callback_data: 'choice_avail' }],
       ],
     });
   }
@@ -1590,6 +1849,7 @@ if (!state && cbData && cbData.indexOf('choice_') === 0) {
   else if (cbData === 'choice_paid' && (isAdmin || isCashier)) startPaid();
   else if (cbData === 'choice_booking' && isAdmin) startBooking();
   else if (cbData === 'choice_edit' && isAdmin) startEdit();
+  else if (cbData === 'choice_avail' && (isAdmin || isCashier)) sendAvailability();
   return [{ json: out }];
 }
 
@@ -1606,11 +1866,14 @@ switch (state) {
     else if (cbData === 'choice_paid' && (isAdmin || isCashier)) startPaid();
     else if (cbData === 'choice_booking' && isAdmin) startBooking();
     else if (cbData === 'choice_edit' && isAdmin) startEdit();
+    else if (cbData === 'choice_avail' && (isAdmin || isCashier)) sendAvailability();
     break;
 
   // ── Expense flow ──────────────────────────────────────────────────────────
   case 'EXP_ID':
-    d.exp_id = cbData === 'eid_skip' ? '' : (text || '').trim();
+    if (cbData === 'eid_ok' && d.exp_id_suggest) d.exp_id = d.exp_id_suggest;
+    else d.exp_id = cbData === 'eid_skip' ? '' : (text || '').trim();
+    delete d.exp_id_suggest;
     reply(t('exp_ask_item'));
     setState('EXP_ITEM', d);
     break;
@@ -1709,14 +1972,14 @@ switch (state) {
         'ملاحظات': d.exp_notes,
         'طريقة الدفع': d.exp_payment,
         'اسم المسئول': d.responsible || responsible,
-        'الرقم': txt(d.exp_id || ''),
+        'الرقم': idCell(d.exp_id),
       },
       // Legacy positional form, still consumed by the HTTP write path.
       ranges: [{
         range: 'A{r}:H{r}',
         values: [[
           now, d.exp_item, num(d.exp_amount), d.exp_apartment,
-          d.exp_notes, d.exp_payment, d.responsible || responsible, txt(d.exp_id || ''),
+          d.exp_notes, d.exp_payment, d.responsible || responsible, idCell(d.exp_id),
         ]],
       }],
       receiptFileId: d.exp_receipt || '',   // '' → group gets a plain text message
@@ -1732,7 +1995,13 @@ switch (state) {
   // ── Booking flow ──────────────────────────────────────────────────────────
   case 'BOOKING_ID':
     d.booking_id = cbData === 'bid_skip' ? '' : (text || '').trim();
-    reply(t('ask_private_id'), skipKb('pid_skip'));
+    d.private_id_suggest = nextBookingId();
+    if (d.private_id_suggest) {
+      reply(t('ask_private_id_suggest', { n: d.private_id_suggest }),
+        suggestKb(d.private_id_suggest, 'pid_ok', 'pid_skip'));
+    } else {
+      reply(t('ask_private_id'), skipKb('pid_skip'));
+    }
     setState('PRIVATE_ID', d);
     break;
 
@@ -1742,8 +2011,14 @@ switch (state) {
   // and this did not, so a guest with no papers meant typing a space to get
   // past a question that had no answer.
   case 'PRIVATE_ID':
-    if (cq && cbData !== 'pid_skip') break;
-    d.private_id = cbData === 'pid_skip' ? '' : text.trim();
+    if (cq && cbData !== 'pid_skip' && cbData !== 'pid_ok') break;
+    if (cbData === 'pid_ok') {
+      if (!d.private_id_suggest) break;
+      d.private_id = d.private_id_suggest;
+    } else {
+      d.private_id = cbData === 'pid_skip' ? '' : text.trim();
+    }
+    delete d.private_id_suggest;
     reply(t('ask_name'));
     setState('NAME', d);
     break;
@@ -1927,7 +2202,7 @@ switch (state) {
     // Legacy positional form, still consumed by the HTTP write path. Derived from
     // `fields` below so the two cannot drift apart.
     const aToJ = [
-      txt(d.booking_id), txt(d.private_id), d.name, d.btype,
+      idCell(d.booking_id), idCell(d.private_id), d.name, d.btype,
       '', txt(d.phone), d.apartment, Number(d.room),   // E (الجنسية) retired, kept blank
       nightsCell, d.arrival_date,
     ];
@@ -1943,8 +2218,8 @@ switch (state) {
       // by the sheet and are deliberately absent here, so the node never writes
       // them and their formulas survive.
       fields: {
-        'بوكنج ID': txt(d.booking_id),
-        'ID': txt(d.private_id),
+        'بوكنج ID': idCell(d.booking_id),
+        'ID': idCell(d.private_id),
         'اسم المقيم': d.name,
         'نوع الحجز': d.btype,
         'الجنسية': '',                                  // retired, kept blank
@@ -2045,7 +2320,7 @@ switch (state) {
         setState('EDIT_TOTAL', d);
         break;
       case 'ef_paid':
-        reply(t('edit_ask_paid_add', { current: num(paidSoFar(d)) }));
+        reply(t('edit_ask_paid_add', { status: paymentStatus(paymentTotals(d)) }));
         setState('EDIT_PAID', d);
         break;
       case 'ef_payment': reply(t('ask_payment'), keyGrid(PAYMENTS, 'xpay_')); setState('EDIT_PAYMENT', d); break;
@@ -2108,8 +2383,14 @@ switch (state) {
     if (cq) break;
     const v = parseNum(text);
     if (v === null) { reply(t('num_error')); break; }
-    // Negative is allowed — a refund, or undoing a mistyped payment. The total
-    // may not go below zero though; that is always an error, not a credit.
+    // Zero is not a payment. It used to pass, and EDIT_PAYMENT reads "no money"
+    // as a method RELABEL — so a cashier typing 0 and tapping انستاباي rewrote
+    // the method on someone's booking with no payment and no receipt.
+    if (v === 0) { reply(t('paid_zero_error')); break; }
+    // Negative is allowed — a refund, or undoing a mistyped payment — for an
+    // admin. A cashier records money coming in, not going out. The total may
+    // not go below zero either way; that is always an error, not a credit.
+    if (v < 0 && !isAdmin) { reply(t('paid_refund_admin_only')); break; }
     const current = paidSoFar(d);
     const total = current + v;
     if (total < 0) { reply(t('edit_paid_below_zero', { current: num(current) })); break; }
@@ -2119,7 +2400,7 @@ switch (state) {
     // depends on the method, and the method is the next turn — write it now and
     // a payment in a second method adds to the booking's own row before
     // anything has decided that is where it belongs.
-    reply(t('ask_payment'), keyGrid(PAYMENTS, 'xpay_'));
+    reply(t('ask_payment'), keyGrid(PAY_METHODS, 'xpay_'));
     setState('EDIT_PAYMENT', d);
     break;
   }
@@ -2132,6 +2413,12 @@ switch (state) {
 
     // Now that the method is known, the money can be put on the right row.
     const added = Number(parseNum(d.paidAdded) || 0);
+
+    // A relabel (no money) is an admin correcting a record. Money with
+    // غير مدفوع is a contradiction — the keyboard no longer offers it, and a
+    // tap on an old card is ignored rather than written.
+    if (!added && !isAdmin) break;
+    if (added && payKey === UNPAID_KEY) break;
 
     /*
      * No money means this is a RELABEL, not an allocation.
@@ -2196,20 +2483,21 @@ switch (state) {
       }
       d.lineTotal = num(lineTotal);
     }
-    // Admins attach a receipt for the two transfer methods and may skip it. The
-    // cashier is recording someone else's money, so anything that is not cash
-    // needs proof, and there is no skip.
+    // A receipt is asked for the two transfer methods only. Admins may skip
+    // it; a cashier is recording someone else's money, so there is no skip.
     //
-    // Keyed on the ROLE, not on `paidOnly`. Those were the same thing until
+    // Until 2026-10-10 a cashier needed proof for anything but كاش, which made
+    // Airbnb, يورو and دولار impossible to record: an Airbnb payout has no
+    // screenshot, and foreign cash in hand has none either.
+    //
+    // The skip is keyed on the ROLE, not on `paidOnly`. Those were the same thing until
     // 2026-08-18, when the admin menu gained its own payment shortcut — which
     // also sets `paidOnly`, because that flag means "linear, save as soon as
     // the money is in" and not "this user is a cashier". Left as it was, an
     // admin taking the shortcut would have been held to the cashier's rule and
     // been unable to record a transfer they had no photo for.
     const strictReceipt = !isAdmin;
-    const needsReceipt = strictReceipt
-      ? payKey !== CASH_KEY
-      : RECEIPT_PAYMENT_KEYS.indexOf(payKey) !== -1;
+    const needsReceipt = RECEIPT_PAYMENT_KEYS.indexOf(payKey) !== -1;
     if (needsReceipt) {
       if (strictReceipt) reply(t('paid_ask_receipt'));
       else reply(t('ask_receipt'), skipKb('xreceipt_skip'));
@@ -2222,7 +2510,8 @@ switch (state) {
 
   case 'EDIT_RECEIPT':
     // Same role test as the prompt that led here — see EDIT_PAYMENT above.
-    if (photoFileId) d.editReceipt = photoFileId;
+    if (photoFileId) { d.editReceipt = photoFileId; d.editReceiptKind = 'photo'; }
+    else if (docFileId) { d.editReceipt = docFileId; d.editReceiptKind = 'document'; }
     else if (cbData === 'xreceipt_skip' && isAdmin) d.editReceipt = '';
     else if (!isAdmin) { reply(t('paid_receipt_error')); break; }
     else { reply(t('receipt_error'), skipKb('xreceipt_skip')); break; }
@@ -2283,6 +2572,15 @@ switch (state) {
     if (!Object.keys(d.editNew || {}).length && !hasLinePayment(d)) {
       endSession(); reply(t('edit_no_changes')); break;
     }
+    commitEdit(d);
+    break;
+  }
+
+  // The add-payment shortcut's review card — see showPaidConfirm().
+  case 'PAID_CONFIRM': {
+    if (waitingForButton()) break;
+    if (cbData === 'pcancel') { endSession(); reply(t('cancelled')); break; }
+    if (cbData !== 'pconfirm') break;
     commitEdit(d);
     break;
   }
@@ -2446,6 +2744,7 @@ if (out.hasSave && out.save) {
     buttons.push([{ text: t('btn_add_expense'), callback_data: 'choice_expense' }]);
     buttons.push([{ text: t('btn_add_paid'), callback_data: 'choice_paid' }]);
   }
+  buttons.push([{ text: t('btn_availability'), callback_data: 'choice_avail' }]);
   const card = (body) => ({
     chat_id: chatId,
     text: body,
