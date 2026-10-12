@@ -24,7 +24,9 @@ number, so it keeps tracking L − M as payments land.
 | `test_workflow.py` | The generated graph still matches what the JS expects. |
 | `deploy_graph.py` | Adds the reports / shadow / reconcile / mirror branch to a live workflow. |
 | `push_brain.py` | Pushes `brain.js` and the Config access lists into a live workflow. |
-| `test_brain.mjs` | 379 offline assertions driving every flow end to end. |
+| `test_brain.mjs` | Offline assertions driving every flow end to end (600+). |
+| `ai_intent.py` | The AI edit's model contract: JSON schema, prompt, model id. |
+| `eval_ai_intents.py`, `ai_eval_cases.json` | Live check of that prompt against real phrasing (needs `ANTHROPIC_API_KEY`). |
 
 Edit the `.js` files, then:
 
@@ -32,6 +34,36 @@ Edit the `.js` files, then:
 node booking_bot/test_brain.mjs        # the state machine, offline
 python booking_bot/push_brain.py       # deploy (see below)
 ```
+
+## AI edit
+
+Admins get a 🤖 button that takes a change to a saved booking in plain words and
+shows what it would do before anything is written. Three nodes sit in front of
+`Brain`:
+
+```
+… -> Needs Expense Number? / Read Expense Numbers -> Needs AI? -> AI Extract -> Brain
+                                                          \-------------------^   (every other turn)
+Anthropic Chat Model --ai_languageModel--> AI Extract
+```
+
+`Needs AI?` is true for a text message that is not a `/command`, while the session
+is in `AI_TEXT`. `AI Extract` is an Information Extractor with an Anthropic Chat
+Model sub-node; it returns a small JSON request (`ai_intent.SCHEMA`) and nothing
+else — no tools, no writes. `brain.js` checks every field (`readAiIntent`), finds the
+booking in the rows it already loaded, applies the change through the same setters
+the edit menu uses, and draws the usual `EDIT_CONFIRM` card. **Confirm** is the
+unchanged `commitEdit` path.
+
+- The schema and prompt live in `ai_intent.py`; `test_ai_intent.py` keeps its payment
+  keys equal to `brain.js`'s.
+- `AI_TEXT` and `AI_PICK` are in `BOOKING_STATES` and `LOCATION_STATES` in both
+  `build_workflow.py` and `deploy_graph.py`.
+- It needs an **Anthropic** credential in n8n, created in the UI (it cannot be made
+  over MCP). Until one exists `deploy_graph.py` skips the branch and the Brain tells
+  the admin the AI is unavailable.
+- `ANTHROPIC_API_KEY=… python booking_bot/eval_ai_intents.py` asks the real API to
+  read the phrases in `ai_eval_cases.json`; add the ones your staff actually type.
 
 ## Deployed instance
 
