@@ -647,7 +647,7 @@ check('skipped receipt → empty file id', r.save.receiptFileId === '');
 // ─── Edit an already-saved booking ────────────────────────────────────────────
 
 // booking_id / lines / block_end / total_is_formula come from
-// read_bookings_for_edit.sql alongside the sheet's own columns. They are what a
+// nodes/build_bookings_lookup.js alongside the sheet's own columns. They are what a
 // payment uses to find its line: `lines` is every continuation row the booking
 // already occupies, `block_end` the last row it owns.
 const SHEET = [

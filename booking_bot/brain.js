@@ -854,8 +854,8 @@ function locationRegistry() {
 }
 
 /**
- * The ID offered for a new booking: one past the previous one, from the
- * database (read_next_booking_id.sql). Gated like the reads above — it runs
+ * The ID offered for a new booking: one past the highest the bookings tab holds
+ * (nodes/compute_next_booking_id.js). Gated like the reads above — it runs
  * only on the turn that asks for the ID — so anywhere else, or if the query
  * failed, this is null and the question goes out as it always did.
  */
@@ -1755,7 +1755,7 @@ function loadEditBooking(hit) {
   d.editName = hit.json['اسم المقيم'] || '';
   d.editPrivateId = hit.json['ID'] || '';
   // Everything a payment needs to find its own line. The lookup carries these
-  // alongside the sheet's columns; see read_bookings_for_edit.sql. A booking
+  // alongside the sheet's columns; see nodes/build_bookings_lookup.js. A booking
   // with no lines yet simply has none, and the first payment in a second method
   // opens line 2.
   d.bookingId = hit.json.booking_id || null;
@@ -2811,7 +2811,7 @@ switch (state) {
      * number freezes it on the day it was typed, and nobody notices until the
      * guest checks out short.
      *
-     * `total_is_formula` has been fetched by read_bookings_for_edit.sql since
+     * `total_is_formula` has been fetched by the bookings lookup since
      * the lines were built, with a comment explaining exactly this, and until
      * 2026-08-21 nothing read it. supabase/mirror.py avoids the same trap with
      * sheet_owned_keys and webui/lib/publish.js with priceCell; the bot was the
