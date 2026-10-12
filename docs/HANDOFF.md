@@ -3,9 +3,9 @@
 ## 2026-10-12 — AI edit: type a change, review it, confirm it
 
 **LIVE since 2026-10-12, but not yet exercised by a real Telegram message.**
-Workflow `hzMYegbL3yifl7KN`, activeVersionId `2c426156-87d8-4d28-a48a-02f7e94a1f39`
+Workflow `hzMYegbL3yifl7KN`, activeVersionId `4555ef7a-38f1-4d4e-a1dc-f71038a6d6f8`
 (first publish was `f8bb6716…`; republished the same day for the registry-gate fix
-below), 72 nodes, live Brain byte-identical to `booking_bot/brain.js`, Anthropic credential
+below and again for finding a booking by name), 72 nodes, live Brain byte-identical to `booking_bot/brain.js`, Anthropic credential
 `dObKg3UcZAYjhPLY` bound to `Anthropic Chat Model` (`claude-haiku-5-5` is in its
 model list, so the key authenticates). What is left is the first real pass — see
 the end of this entry. Spec: `docs/superpowers/specs/2026-10-12-ai-booking-edit-design.md`,
@@ -53,6 +53,18 @@ in the message always wins over a name.
   and add-payment flows are exposed in exactly the same way. Run
   `python supabase/reindex.py` (report) and `--apply` after any hand edit of the
   sheet, **before** using the bot on the affected bookings.
+  *Repaired the same day.* Row 41 (ID 29) was put back to paid 504 / انستاباي /
+  system id 2343 and row 42 (ID 30) set to paid 4210 (the +2800 that was meant),
+  four cells in all, re-checked immediately before writing and read back after;
+  then `reindex.py --apply` re-pointed 17 bookings and adopted two hand-typed rows
+  (2 and 53, now bookings 2360 and 2361). A second `reindex.py` report shows re-point
+  0, adopt 0, nothing in the database missing from the sheet. **Not yet run:**
+  `backfill.py --reconcile` (the permission layer blocked it in that session).
+  **Left for a person:** nine orphan ids in rows 3-11 (U says 36, 1017, 1098, 1099,
+  1967, 2076, 2078, 2084, 1110 — no such booking) and ID 27's two hand-added lines
+  (rows 38-39, U `2340-2` / `2340-3`) which the database has no payments for.
+  The group chat also received a "payment 2800" message for ID 30 from the
+  misdirected Confirm.
 - `AI_TEXT` and `AI_PICK` must be in `BOOKING_STATES` and `LOCATION_STATES` in
   **both** `build_workflow.py` and `deploy_graph.py`; a test pins that they match.
 - Room moves and stay changes warn about clashes (`findConflicts`, same strings as
