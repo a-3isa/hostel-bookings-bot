@@ -29,8 +29,30 @@ typed text, today's date, the apartment names and the payment-method keys.
 rows it already has, does the arithmetic, and draws the card. The schema and the
 prompt live in `booking_bot/ai_intent.py` and nowhere else.
 
+**The booking can be named by ID or by the guest's name.** With no ID the model fills
+`guest_name` and `brain.js` (`findByName`) matches it against the rows it already has:
+spaces, alef/ya/ta-marbuta variants and case are ignored ("عبد النبي" finds
+"عبدالنبي"), the same name ranks first, then names that start with it, then names
+that contain it, newest arrival first. One match goes straight to the card; several
+open the `AI_PICK` picker (`ID · name · apartment/room · arrival`, ❌ on a cancelled
+booking, at most 10 with a "showing the latest 10 of N" line); none says so. An ID
+in the message always wins over a name.
+
 **Landmines**
 
+- **The edit lookup trusts stored row numbers, and they had drifted (found
+  2026-10-12).** `read_bookings_for_edit.sql` gives Brain `bookings.sheet_row` and
+  every write goes to that row. After the sheet was edited by hand (rows inserted
+  near row 11 and extra lines under ID 27) and `reindex.py` was not run, 15 of the
+  43 bookings pointed one row off. The first live AI Confirm ("pay 2800" for ID 30)
+  therefore wrote to **row 41, which is ID 29**, setting its paid to 4210 and method
+  to كاش and stamping system id 2344 into its column U, while ID 30 on row 42 stayed
+  1410. The workflow reported success at every step because it did write a row.
+  This is the HANDOFF's older warning ("a row inserted between a bot write and the
+  next reindex puts money on the wrong guest") happening again, and the manual edit
+  and add-payment flows are exposed in exactly the same way. Run
+  `python supabase/reindex.py` (report) and `--apply` after any hand edit of the
+  sheet, **before** using the bot on the affected bookings.
 - `AI_TEXT` and `AI_PICK` must be in `BOOKING_STATES` and `LOCATION_STATES` in
   **both** `build_workflow.py` and `deploy_graph.py`; a test pins that they match.
 - Room moves and stay changes warn about clashes (`findConflicts`, same strings as

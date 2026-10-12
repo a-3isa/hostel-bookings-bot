@@ -55,6 +55,10 @@ booking in the rows it already loaded, applies the change through the same sette
 the edit menu uses, and draws the usual `EDIT_CONFIRM` card. **Confirm** is the
 unchanged `commitEdit` path.
 
+- The booking is named by its **ID or by the guest's name**. A name is matched in
+  `brain.js` (spaces, alef/ya/ta-marbuta variants and case ignored; "عبد النبي" finds
+  "عبدالنبي"); one match goes straight to the card, several open a picker (ID, name,
+  room, arrival, ❌ if cancelled; at most 10, newest first), none says so.
 - The schema and prompt live in `ai_intent.py`; `test_ai_intent.py` keeps its payment
   keys equal to `brain.js`'s.
 - `AI_TEXT` and `AI_PICK` are in `BOOKING_STATES` and `LOCATION_STATES` in both

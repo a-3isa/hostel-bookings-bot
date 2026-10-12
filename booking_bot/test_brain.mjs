@@ -2455,6 +2455,101 @@ r = run(msg('/start '));                              // trailing space: not the
 check('the same for a /start with trailing junk', r.reply.text.startsWith('🤖 اكتب التعديل المطلوب') ||
   r.reply.text === 'اختر العملية:', r.reply.text);
 
+// ── Finding a booking by the guest's name (2026-10-12) ───────────────────────
+
+const nameRow = (id, name, apt, room, arrival, extra = {}) => ({
+  'بوكنج ID': '', 'ID': String(id), 'اسم المقيم': name, 'اسم الشقة': apt, 'رقم الغرفة': room,
+  'تاريخ البداية': arrival, 'عدد الليالي': 2, 'اجمالي سعر الحجز': 1000, 'اجمالي ما تم دفعه': 100,
+  'طريقة الدفع': 'كاش', 'ملاحظات': '', booking_id: 600 + Number(id), lines: [], block_end: 0,
+  total_is_formula: false, ...extra,
+});
+const AI_NAMES = [
+  nameRow(41, 'عبدالنبي', 'انبي 2', 1, '2026-10-06'),                 // row 2
+  nameRow(42, 'عبد النبي محمد', 'انبي 3', 2, '2026-10-08'),           // row 3
+  nameRow(43, 'أحمد علي', 'ذاكر حسين', 1, '2026-10-02'),              // row 4
+  nameRow(44, 'احمد حسن', 'ذاكر حسين', 2, '2026-10-03'),              // row 5
+  nameRow(45, 'محمد', 'انبي 3', 1, '2026-10-04'),                     // row 6
+  nameRow(46, 'محمد خالد', 'انبي 3', 2, '2026-10-09'),                // row 7
+  nameRow(47, 'محمد', 'انبي 2', 2, '2026-10-12'),                     // row 8: same name, later stay
+  nameRow(48, 'محمد', 'انبي 2', 3, '2026-10-01', { 'ملاحظات': 'ملغي' }),  // row 9: cancelled
+  ...Array.from({ length: 12 }, (_, i) =>                             // rows 10..21: twelve Saras
+    nameRow(50 + i, 'سارة منير', 'ابو حديد 11', 1 + (i % 4), `2026-10-${String(1 + i).padStart(2, '0')}`)),
+];
+const nameSay = (text, output) => aiSay(text, { output });
+const pickIds = (res) => res.reply.reply_markup.inline_keyboard.map(row => row[0].text.match(/ID (\d+)/)[1]);
+
+section('ai edit by name: one match goes straight to the card');
+aiOpen();
+r = nameSay('hana ali paid 100 cash', { guest_name: 'hana ali', payment: { amount: 100, method: 'cash' } });
+check('an English name, any case, finds the booking and the card names it',
+  r.reply.text.includes('Hana Ali') && r.reply.text.includes('ID 31') && r.sessionState === 'EDIT_CONFIRM',
+  [r.reply.text, r.sessionState]);
+aiOpen();
+r = nameSay('Hana paid 100', { guest_name: 'Hana', payment: { amount: 100, method: 'cash' } });
+check('and so does the start of a name', r.reply.text.includes('ID 31'), r.reply.text);
+
+section('ai edit by name: the same typing, spaced or not, and the alef variants');
+aiOpen(USER, AI_NAMES);
+r = nameSay('حجز عبد النبي دفع 400 كاش', { guest_name: 'عبد النبي', payment: { amount: 400, method: 'cash' } });
+check('"عبد النبي" with a space finds "عبدالنبي" written without one — and the longer name too',
+  r.reply.text.startsWith('🔎 أكثر من حجز بهذا الاسم') && pickIds(r).join() === '41,42', [r.reply.text, pickIds(r)]);
+aiOpen(USER, AI_NAMES);
+r = nameSay('حجز احمد دفع 100 كاش', { guest_name: 'احمد', payment: { amount: 100, method: 'cash' } });
+check('"احمد" finds both "أحمد علي" and "احمد حسن"', pickIds(r).sort().join() === '43,44', pickIds(r));
+aiOpen(USER, AI_NAMES);
+r = nameSay('حجز أحمد علي دفع 100 كاش', { guest_name: 'أحمد علي', payment: { amount: 100, method: 'cash' } });
+check('a full name with the alef the sheet has is one booking, straight to the card',
+  r.reply.text.includes('ID 43') && r.sessionState === 'EDIT_CONFIRM', [r.reply.text, r.sessionState]);
+
+section('ai edit by name: several bookings under one name are all listed, then the user chooses');
+aiOpen(USER, AI_NAMES);
+r = nameSay('حجز محمد دفع 50 كاش', { guest_name: 'محمد', payment: { amount: 50, method: 'cash' } });
+check('they are all shown, in a list headed for names rather than "same number"',
+  r.reply.text.startsWith('🔎 أكثر من حجز بهذا الاسم') && r.sessionState === 'AI_PICK', [r.reply.text, r.sessionState]);
+check('exact matches first (newest stay first), then the longer names',
+  pickIds(r).join() === '47,45,48,46,42', pickIds(r));
+check('each button carries the ID, the name, the room and the arrival',
+  r.reply.reply_markup.inline_keyboard[0][0].text === 'ID 47 · محمد · انبي 2/2 · 2026-10-12',
+  r.reply.reply_markup.inline_keyboard[0][0].text);
+check('a cancelled booking is listed, marked ❌',
+  r.reply.reply_markup.inline_keyboard[2][0].text.endsWith('❌') &&
+  !r.reply.reply_markup.inline_keyboard[0][0].text.includes('❌'), r.reply.reply_markup.inline_keyboard[2][0].text);
+check('the buttons carry the sheet rows', r.reply.reply_markup.inline_keyboard[0][0].callback_data === 'epick_8',
+  r.reply.reply_markup.inline_keyboard[0][0].callback_data);
+r = run(cb('epick_6'));                                   // ID 45
+check('choosing one applies the request that was typed, to that booking',   // the request survives the picker
+  r.reply.text.includes('ID 45') && r.reply.text.includes('اجمالي ما تم دفعه: 100 ← 150') &&
+  r.reply.text.startsWith('🤖 فهمت: «حجز محمد دفع 50 كاش»'), r.reply.text);
+r = run(cb('xedone'));
+check('and Confirm writes that booking\'s row', r.save.row === 6 && r.save.fields['اجمالي ما تم دفعه'] === 150,
+  [r.save.row, r.save.fields]);
+
+section('ai edit by name: no match, an ID wins, a number in the name field, a one-letter name');
+aiOpen(USER, AI_NAMES);
+r = nameSay('حجز زيزو دفع 50 كاش', { guest_name: 'زيزو', payment: { amount: 50, method: 'cash' } });
+check('a name nobody has says so, with the name, and stays in AI_TEXT',
+  r.reply.text.startsWith('❌ لا يوجد حجز باسم «زيزو»') && r.sessionState === 'AI_TEXT', [r.reply.text, r.sessionState]);
+aiOpen();
+r = nameSay('حجز 31 محمد دفع 50 كاش', { booking_id: '31', guest_name: 'محمد', payment: { amount: 50, method: 'cash' } });
+check('when the message has an ID and a name the ID decides', r.reply.text.includes('Hana Ali') && r.sessionState === 'EDIT_CONFIRM',
+  [r.reply.text, r.sessionState]);
+aiOpen();
+r = nameSay('حجز ٣١ دفع 50 كاش', { guest_name: '٣١', payment: { amount: 50, method: 'cash' } });
+check('an ID the model put in the name field is still an ID', r.reply.text.includes('Hana Ali'), r.reply.text);
+aiOpen(USER, AI_NAMES);
+r = nameSay('حجز م دفع 50 كاش', { guest_name: 'م', payment: { amount: 50, method: 'cash' } });
+check('a one-letter "name" is not searched (it would match everyone)', r.reply.text.startsWith('❓ لم أفهم الطلب'), r.reply.text);
+r = nameSay('حجز 99', { guest_name: 'محمد' });
+check('a name with nothing to change is still "not understood"', r.reply.text.startsWith('❓ لم أفهم الطلب'), r.reply.text);
+
+section('ai edit by name: a long list is capped, newest first, and says so');
+aiOpen(USER, AI_NAMES);
+r = nameSay('حجز سارة دفع 50 كاش', { guest_name: 'سارة', payment: { amount: 50, method: 'cash' } });
+check('ten buttons for twelve Saras', r.reply.reply_markup.inline_keyboard.length === 10, r.reply.reply_markup.inline_keyboard.length);
+check('the latest arrivals, newest first', pickIds(r).join() === '61,60,59,58,57,56,55,54,53,52', pickIds(r));
+check('with a line saying how many are shown and to narrow the name',
+  r.reply.text.includes('أحدث 10 من 12'), r.reply.text);
+
 // ─── Result ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all checks passed'}`);

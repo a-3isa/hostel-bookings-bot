@@ -29,5 +29,15 @@
   {"text": "paid 400 cash",
    "want": {"unclear": "*"}},
   {"text": "what is the weather like",
-   "want": {"unclear": "*"}}
+   "want": {"unclear": "*"}},
+  {"text": "حجز عبدالنبي دفع 400 كاش",
+   "want": {"guest_name": "عبدالنبي", "booking_id": null, "payment": {"amount": 400, "method": "cash"}}},
+  {"text": "حجز عبد النبي دفع ٢٨٠٠ جنيه كاش",
+   "want": {"guest_name": "عبد النبي", "booking_id": null, "payment": {"amount": 2800, "method": "cash"}}},
+  {"text": "booking Hana Ali extend 2 nights",
+   "want": {"guest_name": "Hana Ali", "booking_id": null, "stay": {"kind": "extend", "nights": 2}}},
+  {"text": "حجز 30 عبدالنبي دفع 400 كاش",
+   "want": {"booking_id": "30", "payment": {"amount": 400, "method": "cash"}}},
+  {"text": "محمد خالد غادر النهاردة",
+   "want": {"guest_name": "محمد خالد", "booking_id": null, "stay": {"kind": "leave"}}}
 ]
