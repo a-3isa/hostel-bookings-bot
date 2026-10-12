@@ -25,24 +25,22 @@ What it sets up:
     confirmation, so the availability check has rows to look at.
   * "Needs Locations?" / "Read Locations": the availability tab A3:B, read only
     on the turns that draw an apartment keyboard.
-  * A schedule branch: Report Schedule -> Report Config -> Read Report Locations
-    -> Read Report Formulas -> Read Report Values -> Build Reports -> Send Report.
+  * A schedule branch: Report Schedule -> Report Config -> Fetch Report Locations
+    -> Read Report Locations -> Read Report Formulas -> Read Report Values ->
+    Build Reports -> Send Report.
+  * No Postgres (2026-10-12), by `sheet_only_ops`: sessions are Data Table nodes,
+    the lookups are Sheets-API reads turned into rows by Code nodes, and the
+    shadow-write, snapshot, reconcile and mirror-append branches are removed. It
+    is the one place a node's TYPE is changed (remove, add, rewire), and it runs
+    in batches of 90 operations because the endpoint takes at most 100.
 
 The 08:00 schedule posts TWO messages to REPORT_GROUP_CHAT_ID: 🏠 تقرير
 الإتاحة — the occupied rooms, today's departures and the empty rooms — and
 💰 تقرير المديونيات, the outstanding balances. Asked for on 2026-09-21 (one
 message at first, split in two later the same day), and both are built by
-`nodes/build_reports.js`.
-
-The reconcile's own wire into `Send Report` stays cut, as it has been since
-2026-08-28: that message arrived every morning whether or not anything
-disagreed, and nobody asked for it back. The old ☀️ digest stays switched off
-inside `nodes/build_reports.js` for the same reason.
-
-The branch itself still runs end to end, because it carries the day's real work:
-the sheet reads, the snapshot, the discrepancy view and the mirror append that
-publishes dashboard-born bookings into the sheet. Silencing it is a matter of
-connections, never of deleting the branch or the trigger.
+`nodes/build_reports.js`. The old ☀️ digest stays switched off inside that file:
+it arrived every morning whether or not there was anything in it, and nobody
+asked for it back.
 
 Per-booking announcements are unaffected — `Post To Group` is a different node,
 a different chat and a different trigger.
@@ -132,6 +130,17 @@ def apply_offline(wf, ops):
             node.setdefault("id", node["name"].lower().replace(" ", "-").replace("?", ""))
             wf["nodes"].append(node)
             nodes[node["name"]] = node
+        elif kind == "removeNode":
+            # Like the endpoint, this takes the node's own wires with it, in both
+            # directions: nothing is left pointing at a node that is gone.
+            name = op["nodeName"]
+            wf["nodes"] = [n for n in wf["nodes"] if n["name"] != name]
+            nodes.pop(name, None)
+            conns.pop(name, None)
+            for spec in conns.values():
+                for branches in spec.values():
+                    for br in branches:
+                        br[:] = [c for c in br if c["node"] != name]
         elif kind == "removeConnection":
             ctype = op.get("connectionType", "main")
             branches = conns.get(op["source"], {}).get(ctype, [])
@@ -156,17 +165,159 @@ def apply_offline(wf, ops):
     return wf
 
 
-def read_settings(name):
-    """Node-level settings for the two Postgres lookups the gates feed.
+# Nodes that existed only to feed the database. Removing a node takes its wires with
+# it, so nothing is left pointing at them. (Write Line Id is NOT here: it stamps the
+# marker build_reports.js uses to tell a payment line from a guest.)
+RETIRED = ["Build Shadow Write", "Shadow Write", "Read Booking Id", "Write Booking Id",
+           "Build Snapshot SQL", "Write Snapshot", "Read Discrepancies", "Build Reconcile Message",
+           "Read Unmirrored Bookings", "Append Mirror Row", "Mark Mirrored"]
 
-    Read Locations runs once: on the AI turns it follows Read Bookings For Edit and
-    would otherwise run its query once per booking row (see build_workflow.py).
+# Nodes whose TYPE changes (Postgres -> Data Table / Code). updateNodeParameters
+# cannot change a node's type, so each is removed and added again, wires restored.
+RETYPED = ["Load Session", "Save Session", "Clear Session", "Read Bookings For Edit", "Read Locations",
+           "Read Next Booking ID", "Read Report Locations", "Read Availability Locations"]
+
+# The lookups: (gate, gate output, fetch nodes in order, the Code node, what follows it).
+# Each fetch chain goes between a gate and its Code node. The report entries have no
+# Postgres twin to replace on a fresh file, so there the Code node is created too.
+FETCHES = [
+    ("Needs Bookings?", 0, ["Fetch Bookings Formulas", "Fetch Bookings Values"],
+     "Read Bookings For Edit", "Needs Locations?"),
+    ("Needs Locations?", 0, ["Fetch Locations"], "Read Locations", "Needs Booking ID?"),
+    ("Needs Booking ID?", 0, ["Fetch Booking Ids"], "Read Next Booking ID", "Needs Expense Number?"),
+    ("Report Config", 0, ["Fetch Report Locations"], "Read Report Locations", "Read Report Formulas"),
+    ("Availability Config", 0, ["Fetch Availability Locations"], "Read Availability Locations",
+     "Read Availability Formulas"),
+]
+
+# Where a node new to the live graph goes when the generator does not place it.
+EXTRA_POSITIONS = {
+    "Fetch Report Locations": [-960, 960], "Read Report Locations": [-840, 960],
+    "Fetch Availability Locations": [1560, 1240], "Read Availability Locations": [1680, 1240],
+}
+
+
+def batches(ops, size=90):
+    """The endpoint takes at most 100 operations per call, each call atomic."""
+    return [ops[i:i + size] for i in range(0, len(ops), size)]
+
+
+def sheet_only_ops(wf, target, sheets_cred, prior_ops=()):
+    """Operations that turn `wf` into the sheet-only bot (no Postgres anywhere).
+
+    `target` is the graph build_workflow.py builds. `prior_ops` are operations the
+    caller has already queued for `wf`: they are applied to a private copy first, so
+    this sees the nodes they add (the report chains are created by main(), not by the
+    generator). Returns only the NEW operations.
+
+    Idempotent: on a graph that is already migrated it returns parameter and setting
+    updates and nothing structural. `sheets_cred` is (type, id, name) of the live
+    Google credential, embedded in each HTTP node it adds — setNodeCredential refuses
+    googleSheetsOAuth2Api on an HTTP node, an addNode that carries it does not (plan
+    Task 1). None (offline) adds the nodes bare, to be bound in the UI.
     """
-    settings = {"alwaysOutputData": True, "onError": "continueRegularOutput",
-                "retryOnFail": True, "maxTries": 2}
-    if name == "Read Locations":
-        settings["executeOnce"] = True
-    return settings
+    sim = json.loads(json.dumps(wf))
+    apply_offline(sim, list(prior_ops))
+    want = {n["name"]: n for n in target["nodes"]}
+    specs = bw.lookup_node_specs()
+    new_ops = []
+
+    def emit(op):
+        new_ops.append(op)
+        apply_offline(sim, [op])
+
+    def present():
+        return {n["name"]: n for n in sim["nodes"]}
+
+    def has_edge(src, tgt, index=0, kind="main"):
+        brs = sim["connections"].get(src, {}).get(kind, [])
+        return index < len(brs) and any(c["node"] == tgt for c in brs[index])
+
+    def link(src, tgt, index=0, kind="main"):
+        if has_edge(src, tgt, index, kind):
+            return
+        op = {"type": "addConnection", "source": src, "target": tgt,
+              "sourceIndex": index, "targetIndex": 0}
+        if kind != "main":
+            op["connectionType"] = kind
+        emit(op)
+
+    def unlink(src, tgt, index=0):
+        if has_edge(src, tgt, index):
+            emit({"type": "removeConnection", "source": src, "target": tgt,
+                  "sourceIndex": index, "targetIndex": 0})
+
+    def spec_of(name):
+        """(type, typeVersion, parameters, settings, needs sheets credential)."""
+        if name in specs:
+            ntype, tv, params, settings, cred = specs[name]
+            return ntype, tv, params, dict(settings), bool(cred)
+        n = want[name]
+        keep = ("alwaysOutputData", "executeOnce", "onError", "retryOnFail", "maxTries", "waitBetweenTries")
+        return n["type"], n["typeVersion"], n["parameters"], {k: n[k] for k in keep if k in n}, False
+
+    def add(name):
+        ntype, tv, params, settings, wants_sheets = spec_of(name)
+        pos = (want.get(name) or {}).get("position") or EXTRA_POSITIONS.get(name) or [0, 0]
+        node = {"name": name, "type": ntype, "typeVersion": tv,
+                "parameters": json.loads(json.dumps(params)), "position": list(pos)}
+        if wants_sheets and sheets_cred:
+            node["credentials"] = {sheets_cred[0]: {"id": sheets_cred[1], "name": sheets_cred[2]}}
+        emit({"type": "addNode", "node": node})
+        if settings:        # addNode does not carry node-level settings
+            emit({"type": "setNodeSettings", "nodeName": name, "settings": settings})
+
+    def refresh(name):
+        ntype, tv, params, settings, _ = spec_of(name)
+        emit({"type": "updateNodeParameters", "nodeName": name, "parameters": params})
+        if settings:
+            emit({"type": "setNodeSettings", "nodeName": name, "settings": settings})
+
+    # 1. Retire the database feeders first, so every edge read below is already clean.
+    for name in RETIRED:
+        if name in present():
+            emit({"type": "removeNode", "nodeName": name})
+
+    # 2. Retype Postgres -> Data Table / Code. A gate's wire straight to a lookup is
+    #    not restored: step 3 puts the fetch in front of it.
+    gate_wires = {(gate, idx, reader) for gate, idx, _, reader, _ in FETCHES}
+    for name in RETYPED:
+        if name not in present():
+            continue
+        if present()[name]["type"] == spec_of(name)[0]:
+            refresh(name)
+            continue
+        inc = [(s, i, k) for s, spec in sim["connections"].items() for k, brs in spec.items()
+               for i, br in enumerate(brs) for c in br if c["node"] == name]
+        out = [(i, c["node"], k) for k, brs in sim["connections"].get(name, {}).items()
+               for i, br in enumerate(brs) for c in br]
+        emit({"type": "removeNode", "nodeName": name})
+        add(name)
+        for src, i, k in inc:
+            if (src, i, name) not in gate_wires and src in present():
+                link(src, name, i, k)
+        for i, tgt, k in out:
+            if tgt in present():
+                link(name, tgt, i, k)
+
+    # 3. The fetches, and the wires that put them between a gate and its Code node.
+    for gate, idx, fetches, reader, downstream in FETCHES:
+        if gate not in present():
+            continue
+        for f in fetches:
+            if f in present():
+                refresh(f)
+            else:
+                add(f)
+        if reader not in present():       # a fresh file: no Postgres twin to retype
+            add(reader)
+        chain = [gate] + fetches + [reader]
+        for a, b in zip(chain, chain[1:]):
+            link(a, b, idx if a == gate else 0)
+        unlink(gate, reader, idx)
+        if downstream and downstream in present():
+            link(reader, downstream)
+    return new_ops
 
 
 def ai_branch_ops(have, conns, anthropic):
@@ -250,7 +401,6 @@ def main():
         # No credential ids offline: they are bound in the UI after the import,
         # and inventing an id here would produce a node that silently fails to
         # authenticate rather than one n8n asks you to fix.
-        pg = {"id": None, "name": "Supabase Postgres"}
         anthropic = {"id": None, "name": "Anthropic account"}
         print(f"offline: {os.path.basename(OFFLINE_IN)}, {len(wf['nodes'])} nodes")
     else:
@@ -260,10 +410,7 @@ def main():
         pb.select_server()
         wf = json.loads(pb.call_tool("get_workflow_details",
                                      {"workflowId": pb.WORKFLOW_ID}))["workflow"]
-        # Fetched once and shared: since Phase 4b the two reads are Postgres
-        # nodes too, not just the shadow write.
         live_creds = json.loads(pb.call_tool("list_credentials", {"limit": 100}))["data"]
-        pg = next((c for c in live_creds if c["type"] == "postgres"), None)
         anthropic = next((c for c in live_creds if c["type"] == "anthropicApi"), None)
         print(f"live: {len(wf['nodes'])} nodes")
 
@@ -288,9 +435,6 @@ def main():
                          live_tg.get("name", TELEGRAM_CRED[2]))
 
     have = {n["name"] for n in wf["nodes"]}
-    # Node TYPE, not just presence: a node whose type changed has to be replaced
-    # rather than reconfigured, and "it exists" is not enough to tell.
-    have_type = {n["name"]: n["type"] for n in wf["nodes"]}
     conns = wf.get("connections", {})
 
     ops = []
@@ -328,6 +472,13 @@ def main():
         ops.append({"type": "updateNodeParameters", "nodeName": "Config",
                     "parameters": {"assignments": {"assignments": assigns}}})
         print("  + Config.REPORT_GROUP_CHAT_ID")
+    # The registry tab the Telegram branch's Fetch Locations reads (2026-10-12).
+    if not any(a["name"] == "AVAILABILITY_TAB" for a in assigns):
+        assigns.append({"id": "avail_tab", "name": "AVAILABILITY_TAB",
+                        "value": AVAILABILITY_TAB, "type": "string"})
+        ops.append({"type": "updateNodeParameters", "nodeName": "Config",
+                    "parameters": {"assignments": {"assignments": assigns}}})
+        print("  + Config.AVAILABILITY_TAB")
 
     # ── The availability check needs rows on the NOTES turn ───────────────────
     ops.append({"type": "updateNodeParameters", "nodeName": "Needs Bookings?",
@@ -347,44 +498,12 @@ def main():
                   "looseTypeValidation": True, "options": {}},
                  [-544, 560])
         print("  + Needs Locations?")
-    # ── The two reads, from Postgres since Phase 4b ───────────────────────────
+    # ── The lookups are sheet reads (sheet_only_ops, below) ───────────────────
     #
-    # Both used to be googleSheets nodes; the swap is what removed the ~0.4–2 s
-    # mid-conversation wait. Their SQL aliases the sheet's own Arabic headers, so
-    # brain.js consumes them unchanged — see the .sql files for why each query is
-    # shaped the way it is.
-    #
-    # alwaysOutputData is load-bearing, the same lesson as *Read Discrepancies*:
-    # a query returning no rows would otherwise stop the branch before the Brain
-    # ever ran, and the bot would answer nothing at all.
-    def postgres_read(name, sql_file, pos):
-        settings = read_settings(name)
-        params = {"operation": "executeQuery", "query": read_source(sql_file),
-                  "options": {}}
-        if name not in have:
-            if not pg:
-                print(f"  ! {name} skipped — no postgres credential")
-                return
-            add_node(name, "n8n-nodes-base.postgres", 2.6, params, pos,
-                     cred=("postgres", pg["id"], pg["name"]))
-            print(f"  + {name}  (credential: {pg['name']})")
-        else:
-            # Updating parameters cannot change a node's TYPE. A node still left
-            # as googleSheets from before Phase 4b would take an executeQuery
-            # `query` parameter it has no idea what to do with, and the result
-            # runs but reads nothing. Say so rather than reporting success.
-            live = next((n for n in wf["nodes"] if n["name"] == name), {})
-            if not live.get("type", "").endswith("postgres"):
-                print(f"  ! {name} is a {live.get('type', '?')} node, not postgres —"
-                      " delete it and re-run, or rebuild from build_workflow.py")
-                return
-            ops.append({"type": "updateNodeParameters", "nodeName": name,
-                        "parameters": params})
-            print(f"  ~ {name} query")
-        ops.append({"type": "setNodeSettings", "nodeName": name, "settings": settings})
-
-    postgres_read("Read Bookings For Edit", "read_bookings_for_edit.sql", [-304, 240])
-    postgres_read("Read Locations", "read_locations.sql", [-304, 480])
+    # Bookings, the room registry and the next booking ID are fetched from the
+    # Sheets API in the turn that needs them and turned into rows by a Code node.
+    # They were Postgres reads until 2026-10-12, and the wires from their gates are
+    # made by sheet_only_ops() once every node it needs exists.
 
     def disconnect(src, tgt, index=0):
         """Drop a connection only if it is actually there — n8n errors otherwise,
@@ -399,7 +518,6 @@ def main():
     disconnect("Read Bookings For Edit", "Brain", index=0)
     connect("Needs Bookings?", "Needs Locations?", index=1)
     connect("Read Bookings For Edit", "Needs Locations?")
-    connect("Needs Locations?", "Read Locations", index=0)
 
     # ── The suggested booking ID and expense number (2026-10-01) ──────────────
     #
@@ -410,8 +528,8 @@ def main():
     # whatever the previous read returned. executeOnce on both reads: the
     # locations read hands on 26 items, and each would otherwise run 26 times.
     #
-    # The booking ID comes from Postgres (it keeps counting across sheet resets);
-    # the expense number from the expense tab itself (it restarts with the tab).
+    # The booking ID comes from the bookings tab's own ID column (the numbering
+    # restarts with the month); the expense number from the expense tab itself.
     for gate, expr, pos in (
         ("Needs Booking ID?",
          "={{ $('Load Session').first().json.state === 'BOOKING_ID' }}", [-64, 560]),
@@ -432,9 +550,6 @@ def main():
         else:
             ops.append({"type": "updateNodeParameters", "nodeName": gate,
                         "parameters": params})
-    postgres_read("Read Next Booking ID", "read_next_booking_id.sql", [176, 480])
-    ops.append({"type": "setNodeSettings", "nodeName": "Read Next Booking ID",
-                "settings": {"executeOnce": True}})
     if "Read Expense Numbers" not in have:
         add_node("Read Expense Numbers", "n8n-nodes-base.googleSheets", 4.7,
                  sheets_read(EXPENSE_TAB, "A1:H2000"), [656, 480], cred=SHEETS_CRED)
@@ -450,7 +565,6 @@ def main():
     disconnect("Read Locations", "Brain")
     connect("Needs Locations?", "Needs Booking ID?", index=1)
     connect("Read Locations", "Needs Booking ID?")
-    connect("Needs Booking ID?", "Read Next Booking ID", index=0)
     connect("Needs Booking ID?", "Needs Expense Number?", index=1)
     connect("Read Next Booking ID", "Needs Expense Number?")
     connect("Needs Expense Number?", "Read Expense Numbers", index=0)
@@ -483,10 +597,10 @@ def main():
         print("  + Report Config")
     # The room registry, for 🔓 الغرف الفارغة. The bookings tab only knows which
     # rooms are slept in; naming the empty ones needs the list of rooms that
-    # exist, which is the same query the Telegram branch's Read Locations runs.
+    # exist, which is the same read the Telegram branch's Read Locations runs
+    # (Fetch Report Locations -> Read Report Locations, added by sheet_only_ops).
     # It sits at the HEAD of the chain: one item in from Report Config is one
-    # query, whereas hanging it off either sheet read would fire it once per row.
-    postgres_read("Read Report Locations", "read_locations.sql", [-840, 960])
+    # read, whereas hanging it off either sheet read would fire it once per row.
     if "Read Report Formulas" not in have:
         add_node("Read Report Formulas", "n8n-nodes-base.googleSheets", 4.7,
                  sheets_read(BOOKINGS_TAB, "A:U", formula=True),
@@ -500,12 +614,9 @@ def main():
                  sheets_read(BOOKINGS_TAB, "A:U"),
                  [-480, 800], cred=SHEETS_CRED, settings={"executeOnce": True})
         print("  + Read Report Values (executeOnce)")
-    # Both report reads widened A:T -> A:U so the snapshot carries column U, the
-    # booking id. That is what lets the daily reconcile key on the BOOKING
-    # rather than on the row it happens to sit on: an inserted row renumbers
-    # every row beneath it, and keying on sheet_row turned that into a wall of
-    # differences that were not real. Nothing else about the reports changes —
-    # they address columns by header name, so an extra one is inert.
+    # Both report reads cover A:U, which includes column U: build_reports.js reads
+    # the `<row>-<seq>` marker there to tell a payment line from a guest. They
+    # address columns by header name, so the extra one is inert for the rest.
     for node, formula in (("Read Report Formulas", True), ("Read Report Values", False)):
         if node in have:
             ops.append({"type": "updateNodeParameters", "nodeName": node,
@@ -535,18 +646,13 @@ def main():
     # times — 26 Sheets calls for one report, and a rate limit on a busy day.
     ops.append({"type": "setNodeSettings", "nodeName": "Read Report Formulas",
                 "settings": {"executeOnce": True}})
-    # "Read Locations" used to be re-pinned to the الإتاحة range here. Since
-    # Phase 4b it is a Postgres node owned by postgres_read() above, and leaving
-    # this line in would quietly turn it back into a Sheets read on the next
-    # deploy — reintroducing the mid-conversation wait and nothing else.
 
     connect("Report Schedule", "Report Config")
-    # Report Config -> Read Report Locations -> Read Report Formulas. The direct
-    # wire is cut first: leaving it would fire the formulas read twice, once from
-    # each parent, and the second run would overwrite the first's items.
+    # Report Config -> Fetch Report Locations -> Read Report Locations -> Read Report
+    # Formulas (the three middle wires come from sheet_only_ops). The direct wire is
+    # cut first: leaving it would fire the formulas read twice, once from each
+    # parent, and the second run would overwrite the first's items.
     disconnect("Report Config", "Read Report Formulas")
-    connect("Report Config", "Read Report Locations")
-    connect("Read Report Locations", "Read Report Formulas")
     connect("Read Report Formulas", "Read Report Values")
     connect("Read Report Values", "Build Reports")
     # The daily report is POSTED again (user, 2026-09-21: "every day a message
@@ -592,7 +698,7 @@ def main():
                  ]}, "options": {}},
                  [1440, 1100])
         print("  + Availability Config")
-    postgres_read("Read Availability Locations", "read_locations.sql", [1680, 1100])
+    # Its registry (Fetch / Read Availability Locations) is added by sheet_only_ops.
     for node, formula, pos in (("Read Availability Formulas", True, [1920, 1100]),
                                ("Read Availability Values", False, [2160, 1100])):
         if node not in have:
@@ -624,256 +730,9 @@ def main():
         print("  + Send Availability Report")
     connect("Brain", "Wants Availability?")
     connect("Wants Availability?", "Availability Config", index=0)
-    connect("Availability Config", "Read Availability Locations")
-    connect("Read Availability Locations", "Read Availability Formulas")
     connect("Read Availability Formulas", "Read Availability Values")
     connect("Read Availability Values", "Build Availability Report")
     connect("Build Availability Report", "Send Availability Report")
-
-    # ── Phase 2: dual-write to Supabase ──────────────────────────────────────
-    #
-    # Hangs off "Clear Session", which runs only after the sheet write actually
-    # succeeded, and in parallel with the existing path — so the receptionist's
-    # ✅ does not wait on Postgres and cannot be turned into an error by it.
-    if "Build Shadow Write" not in have:
-        add_node("Build Shadow Write", "n8n-nodes-base.code", 2,
-                 {"jsCode": read_source("build_shadow_write.js")}, [3056, 448])
-        print("  + Build Shadow Write")
-    else:
-        ops.append({"type": "updateNodeParameters", "nodeName": "Build Shadow Write",
-                    "parameters": {"jsCode": read_source("build_shadow_write.js")}})
-        print("  ~ Build Shadow Write code")
-
-    if pg:
-        if "Shadow Write" not in have:
-            add_node("Shadow Write", "n8n-nodes-base.postgres", 2.6,
-                     {"operation": "executeQuery", "query": "={{ $json.sql }}",
-                      "options": {}},
-                     [3296, 448],
-                     cred=("postgres", pg["id"], pg["name"]),
-                     # The whole point of the trust period: Supabase being down,
-                     # asleep or wrong must never surface to a receptionist.
-                     settings={"onError": "continueRegularOutput", "retryOnFail": True,
-                               "maxTries": 2, "alwaysOutputData": True})
-            print(f"  + Shadow Write  (credential: {pg['name']})")
-        connect("Clear Session", "Build Shadow Write")
-        connect("Build Shadow Write", "Shadow Write")
-        ops.append({"type": "setNodeSettings", "nodeName": "Shadow Write",
-                    "settings": {"onError": "continueRegularOutput",
-                                 "retryOnFail": True, "maxTries": 2}})
-
-        # ── Stamp the booking's id back into column U ─────────────────────────
-        #
-        # The first write that goes Postgres -> sheet, and the seed of the
-        # mirror. Column U is the stable key (write_sheet_ids.py put it there),
-        # but a row the bot appends has no id in it until something writes one —
-        # which until now meant waiting for reindex.py to be run by hand.
-        #
-        # The flow test is baked into the SQL rather than costing an IF node:
-        # the expression renders to `and true` or `and false`, and `and false`
-        # returns no rows, which stops the branch before the Sheets write. That
-        # matters because expenses live on a different tab and their sheet_row
-        # numbering overlaps the bookings tab's — writing row 5's id onto the
-        # expenses sheet would be a quiet corruption.
-        id_sql = (
-            "=select sheet_row as row_number, id::text as \"معرف النظام\""
-            " from bookings where sheet_row ="
-            " {{ $('Build Shadow Write').first().json.sheet_row }}"
-            " and {{ ['booking','edit','cancel']"
-            ".includes($('Build Shadow Write').first().json.flow) }};")
-        if "Read Booking Id" not in have:
-            add_node("Read Booking Id", "n8n-nodes-base.postgres", 2.6,
-                     {"operation": "executeQuery", "query": id_sql, "options": {}},
-                     [3536, 448], cred=("postgres", pg["id"], pg["name"]))
-            print("  + Read Booking Id")
-        else:
-            ops.append({"type": "updateNodeParameters", "nodeName": "Read Booking Id",
-                        "parameters": {"operation": "executeQuery", "query": id_sql,
-                                       "options": {}}})
-            print("  ~ Read Booking Id query")
-
-        # An HTTP PUT on U{row}, not the Sheets node — see values_put_id in
-        # build_workflow.py for the 721 ms / 24,606 ms measurement that decided
-        # it. The node is replaced rather than reconfigured, since a type cannot
-        # be edited in place.
-        if "Write Booking Id" not in have:
-            add_node("Write Booking Id", "n8n-nodes-base.httpRequest", 4.2,
-                     bw.values_put_id("BOOKINGS_TAB"), [3776, 448], cred=SHEETS_CRED)
-            print("  + Write Booking Id")
-        elif have_type.get("Write Booking Id") != "n8n-nodes-base.httpRequest":
-            ops.append({"type": "removeNode", "nodeName": "Write Booking Id"})
-            add_node("Write Booking Id", "n8n-nodes-base.httpRequest", 4.2,
-                     bw.values_put_id("BOOKINGS_TAB"), [3776, 448], cred=SHEETS_CRED)
-            print("  ~ Write Booking Id -> httpRequest")
-
-        connect("Shadow Write", "Read Booking Id")
-        connect("Read Booking Id", "Write Booking Id")
-        # Neither may ever surface to a receptionist: the ✅ has already been
-        # sent by the time this branch runs, and a missing id in U is something
-        # reindex.py fixes on its next pass.
-        for node in ("Read Booking Id", "Write Booking Id"):
-            ops.append({"type": "setNodeSettings", "nodeName": node,
-                        "settings": {"onError": "continueRegularOutput",
-                                     "retryOnFail": True, "maxTries": 2}})
-    else:
-        print("\n  ! No Postgres credential in n8n, so the shadow write is not wired up.")
-        print("    Create one (Credentials -> New -> Postgres) and re-run this script:")
-        print("      Host     aws-1-eu-west-1.pooler.supabase.com")
-        print("      Database postgres")
-        print("      User     postgres.<project-ref>")
-        print("      Password <the one in SUPABASE_DB_URL>")
-        print("      Port     6543          SSL: require\n")
-
-    # ── Phase 3: the daily reconcile ─────────────────────────────────────────
-    #
-    # Hangs off the same read the reports already do, so it costs no extra Sheets
-    # call: snapshot the sheet, ask the database where the two disagree, post the
-    # answer. It posts even when clean — a report that only appears on trouble is
-    # indistinguishable from one that has quietly stopped running.
-    if pg:
-        for name, src, pos in (("Build Snapshot SQL", "build_snapshot_sql.js", [-240, 1040]),
-                               ("Build Reconcile Message", "build_reconcile_message.js", [480, 1040])):
-            if name not in have:
-                add_node(name, "n8n-nodes-base.code", 2, {"jsCode": read_source(src)}, pos)
-                print(f"  + {name}")
-            else:
-                ops.append({"type": "updateNodeParameters", "nodeName": name,
-                            "parameters": {"jsCode": read_source(src)}})
-                print(f"  ~ {name} code")
-
-        if "Write Snapshot" not in have:
-            add_node("Write Snapshot", "n8n-nodes-base.postgres", 2.6,
-                     {"operation": "executeQuery", "query": "={{ $json.sql }}", "options": {}},
-                     [0, 1040], cred=("postgres", pg["id"], pg["name"]),
-                     settings={"onError": "continueRegularOutput", "alwaysOutputData": True})
-            print("  + Write Snapshot")
-        if "Read Discrepancies" not in have:
-            add_node("Read Discrepancies", "n8n-nodes-base.postgres", 2.6,
-                     {"operation": "executeQuery",
-                      "query": "select * from reconcile_bookings order by sheet_row;",
-                      "options": {}},
-                     [240, 1040], cred=("postgres", pg["id"], pg["name"]),
-                     # alwaysOutputData: agreement returns no rows, and without
-                     # this the branch would stop and never post the all-clear.
-                     settings={"onError": "continueRegularOutput", "alwaysOutputData": True})
-            print("  + Read Discrepancies")
-
-        # addNode does not carry node-level settings, so pin them separately —
-        # the same trap executeOnce fell into. alwaysOutputData on Read
-        # Discrepancies is load-bearing: agreement returns zero rows, and without
-        # it the branch simply stops and the all-clear is never posted. A report
-        # that only appears on trouble cannot be told apart from a dead one.
-        for node in ("Write Snapshot", "Read Discrepancies", "Shadow Write"):
-            ops.append({"type": "setNodeSettings", "nodeName": node,
-                        "settings": {"onError": "continueRegularOutput",
-                                     "alwaysOutputData": True}})
-
-        connect("Read Report Values", "Build Snapshot SQL")
-        connect("Build Snapshot SQL", "Write Snapshot")
-        connect("Write Snapshot", "Read Discrepancies")
-        connect("Read Discrepancies", "Build Reconcile Message")
-        # The morning reconcile is no longer POSTED either (same ruling). Only
-        # the Telegram hop is cut: Build Reconcile Message still runs, still
-        # builds the text, and still hands its one item to Read Unmirrored —
-        # which is what publishes dashboard-born bookings into the sheet, and
-        # which stops dead if this node ever returns nothing. That is why the
-        # message is disconnected rather than switched off inside the node.
-        #
-        # The comparison itself is untouched: the snapshot is still written and
-        # `reconcile_bookings` still holds every difference, so a disagreement is
-        # one query away instead of arriving unasked at 08:00.
-        disconnect("Build Reconcile Message", "Send Report")
-
-        # ── Phase 4c: publish DB-born bookings into the sheet ─────────────────
-        #
-        # A booking created in the web UI has no sheet row, so it is invisible to
-        # the spreadsheet, to the nine tabs of formulas that read it, and to the
-        # daily report. This appends those rows once a day, right after the
-        # reconcile, so nobody has to remember to run the mirror by hand.
-        #
-        # Only the APPEND half of mirror.py runs here on purpose. Updating
-        # existing rows needs the hand-edit guard (mirror_payload) and the
-        # formula-cell protection, and those stay in the script until they have
-        # been watched for a while — appending a row that does not exist yet can
-        # not overwrite anybody's work.
-        #
-        # `mirrored_at is null` is what stops it appending the same booking every
-        # morning: the row number is not known here (an append does not report
-        # where it landed), so the stamp is the marker, and `reindex.py` learns
-        # the real sheet_row from column U on its next pass.
-        if "Read Unmirrored Bookings" not in have:
-            add_node("Read Unmirrored Bookings", "n8n-nodes-base.postgres", 2.6,
-                     {"operation": "executeQuery", "options": {},
-                      "query": read_source("read_unmirrored.sql")},
-                     [720, 1200], cred=("postgres", pg["id"], pg["name"]))
-            print("  + Read Unmirrored Bookings")
-        else:
-            ops.append({"type": "updateNodeParameters",
-                        "nodeName": "Read Unmirrored Bookings",
-                        "parameters": {"operation": "executeQuery", "options": {},
-                                       "query": read_source("read_unmirrored.sql")}})
-            print("  ~ Read Unmirrored Bookings query")
-
-        # update, NOT append. Google's append writes a full-width row and blanks
-        # every column the mapping does not mention, which would destroy the
-        # per-row formulas in N, P, R and S on whichever row it landed on. K
-        # survives an append because it is an array formula; those four are not.
-        # The row number is computed in the query instead.
-        mirror_write = {
-            "operation": "update",
-            "documentId": {"__rl": True, "mode": "id", "value": SHEET_ID},
-            "sheetName": {"__rl": True, "mode": "name", "value": BOOKINGS_TAB},
-            "columns": {"mappingMode": "autoMapInputData",
-                        "matchingColumns": ["row_number"],
-                        "attemptToConvertTypes": False,
-                        "convertFieldsToString": True},
-            "options": {},
-        }
-        if "Append Mirror Row" not in have:
-            add_node("Append Mirror Row", "n8n-nodes-base.googleSheets", 4.7,
-                     mirror_write, [960, 1200], cred=SHEETS_CRED)
-            print("  + Append Mirror Row")
-        else:
-            ops.append({"type": "updateNodeParameters",
-                        "nodeName": "Append Mirror Row",
-                        "parameters": mirror_write})
-            print("  ~ Append Mirror Row writes one row, never appends")
-
-        # One query, defined once. The two branches used to disagree: the fresh
-        # install wrote `sheet_row` and the update path did NOT, so every
-        # re-run of this script silently removed it from a node that already
-        # existed.
-        #
-        # That mattered because read_unmirrored.sql picks the target row as
-        # `(select max(sheet_row) from bookings) + row_number()`. Drop the
-        # write-back and the mirrored booking keeps `sheet_row IS NULL`, so the
-        # max never advances — and two bookings mirrored on two different
-        # mornings both aim at max + 1. Day two's update lands on day one's
-        # guest. The `mirrored_at is null` guard stops the SAME booking being
-        # re-appended; it cannot stop two different ones colliding.
-        mark_mirrored = {
-            "operation": "executeQuery", "options": {},
-            "query": "update bookings set mirrored_at = now(),"
-                     " sheet_row = {{ $json.row_number }}"
-                     " where id = {{ $json.booking_id }};",
-        }
-        if "Mark Mirrored" not in have:
-            add_node("Mark Mirrored", "n8n-nodes-base.postgres", 2.6, mark_mirrored,
-                     [1200, 1200], cred=("postgres", pg["id"], pg["name"]))
-            print("  + Mark Mirrored")
-        else:
-            ops.append({"type": "updateNodeParameters", "nodeName": "Mark Mirrored",
-                        "parameters": mark_mirrored})
-            print("  ~ Mark Mirrored writes sheet_row back")
-
-        connect("Build Reconcile Message", "Read Unmirrored Bookings")
-        connect("Read Unmirrored Bookings", "Append Mirror Row")
-        connect("Append Mirror Row", "Mark Mirrored")
-        # Nothing here may break the reconcile that runs before it, and an empty
-        # result is the normal case — most mornings there is nothing to publish.
-        for node in ("Read Unmirrored Bookings", "Append Mirror Row", "Mark Mirrored"):
-            ops.append({"type": "setNodeSettings", "nodeName": node,
-                        "settings": {"onError": "continueRegularOutput"}})
 
     # ── A payment receipt sent as a file ──────────────────────────────────────
     #
@@ -914,6 +773,26 @@ def main():
     connect("Receipt Is Document?", "Post Receipt File To Group", index=0)
     connect("Receipt Is Document?", "Post Receipt To Group", index=1)
 
+    # ── No Postgres (2026-10-12) ──────────────────────────────────────────────
+    #
+    # Sessions become Data Table nodes, the lookups become sheet reads, and the
+    # shadow-write and reconcile branches are removed. It runs last of the graph
+    # edits so it sees the report chains' gates, which are added above, and it is
+    # idempotent: on a migrated workflow it only refreshes parameters.
+    sheet_ops = sheet_only_ops(wf, bw.workflow(bw.build()), None if offline else SHEETS_CRED,
+                               prior_ops=ops)
+    ops.extend(sheet_ops)
+    if offline:
+        specs = bw.lookup_node_specs()
+        offline_creds.extend((o["node"]["name"], specs[o["node"]["name"]][4][0], specs[o["node"]["name"]][4][2])
+                             for o in sheet_ops if o["type"] == "addNode" and o["node"]["name"] in specs
+                             and specs[o["node"]["name"]][4])
+    for o in sheet_ops:
+        if o["type"] == "addNode":
+            print(f"  + {o['node']['name']}")
+        elif o["type"] == "removeNode":
+            print(f"  - {o['nodeName']}")
+
     # ── The AI edit (2026-10-12) ──────────────────────────────────────────────
     #
     # The two gates above already carry AI_TEXT and AI_PICK. This adds the
@@ -948,9 +827,14 @@ def main():
                 print(f"  {name:24} {key} ({cname})")
         return
 
-    print(f"\napplying {len(ops)} operations…")
-    print(pb.call_tool("update_workflow",
-                       {"workflowId": pb.WORKFLOW_ID, "operations": ops})[:400])
+    # In batches, each atomic: the endpoint takes at most 100 operations a call and
+    # the no-Postgres migration is more than that. A failed batch leaves the draft
+    # half-migrated; nothing is live until --publish, and restore_workflow_version
+    # puts the recorded version back.
+    for i, batch in enumerate(batches(ops)):
+        print(f"\napplying operations {i * 90 + 1}-{i * 90 + len(batch)} of {len(ops)}…")
+        print(pb.call_tool("update_workflow",
+                           {"workflowId": pb.WORKFLOW_ID, "operations": batch})[:400])
 
     if "--publish" in sys.argv:
         print(pb.call_tool("publish_workflow", {"workflowId": pb.WORKFLOW_ID}))

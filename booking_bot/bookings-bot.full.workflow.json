@@ -86,6 +86,12 @@
               "type": "string"
             },
             {
+              "id": "avail_tab",
+              "name": "AVAILABILITY_TAB",
+              "value": "الإتاحة",
+              "type": "string"
+            },
+            {
               "id": "sheet",
               "name": "SHEET_ID",
               "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8",
@@ -111,26 +117,34 @@
     {
       "id": "load-session",
       "name": "Load Session",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
       "position": [
         -60,
         300
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "select state, data::text as data,\n       (extract(epoch from updated_at) * 1000)::bigint as updated_at\n  from bot_sessions\n where chat_id = $1;",
-        "options": {
-          "queryReplacement": "={{ String($('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query.message.chat.id) }}"
-        }
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings_bot_sessions"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ String($('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query.message.chat.id) }}"
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1
       },
-      "alwaysOutputData": true,
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
-        }
-      }
+      "alwaysOutputData": true
     },
     {
       "id": "needs-bookings",
@@ -203,29 +217,102 @@
       }
     },
     {
+      "id": "fetch-bookings-formulas",
+      "name": "Fetch Bookings Formulas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        20
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.BOOKINGS_TAB + '!A1:U2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "FORMULA"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "id": "fetch-bookings-values",
+      "name": "Fetch Bookings Values",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        360,
+        20
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.BOOKINGS_TAB + '!A1:U2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "UNFORMATTED_VALUE"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
       "id": "read-bookings-for-edit",
       "name": "Read Bookings For Edit",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         360,
         180
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "-- Phase 4b: the lookup and the availability check read Postgres, not Sheets.\n-- Column aliases reproduce the sheet's headers exactly, so brain.js consumes\n-- this the way it consumed the Sheets node and needs no change.\n--\n-- bookings_live, NOT bookings_model, and the reason matters. The model folds a\n-- guest's continuation lines into one booking, which is right for a report and\n-- wrong here: this feeds the EDIT path, which writes back to a sheet row by\n-- number. Offer مروان as one 2200 row and the next payment lands on line 22\n-- while line 23 still holds its 1600 — the sheet would double-count. So this\n-- stays line-for-line with the sheet, exactly as the Sheets node was: all 55\n-- lines, cancelled ones included, because findConflicts() skips those by their\n-- ملغي note and the edit flow can still reach them.\n--\n-- '=OPEN' is deliberate. An open-ended stay arrived from the FORMULA read as\n-- '=TODAY()-J5', and both findConflicts() and showValue() key off that leading\n-- '='. Keeping the sentinel keeps that contract; Phase 5 replaces it with the\n-- open_ended boolean and deletes the sniffing.\nselect\n  b.sheet_row                                          as row_number,\n  coalesce(b.booking_ref, '')                          as \"بوكنج ID\",\n  coalesce(b.guest_ref, '')                            as \"ID\",\n  coalesce(b.guest_name, '')                           as \"اسم المقيم\",\n  coalesce(b.booking_type, '')                         as \"نوع الحجز\",\n  coalesce(b.phone, '')                                as \"رقم الهاتف\",\n  coalesce(b.apartment_name, '')                       as \"اسم الشقة\",\n  coalesce(b.room_number, '')                          as \"رقم الغرفة\",\n  case when b.open_ended then '=OPEN'\n       else coalesce(b.effective_nights::text, '') end as \"عدد الليالي\",\n  coalesce(to_char(b.arrival, 'YYYY-MM-DD'), '')       as \"تاريخ البداية\",\n  coalesce(to_char(b.departure, 'YYYY-MM-DD'), '')     as \"تاريخ المغادرة\",\n  coalesce(trim(to_char(b.effective_total, 'FM999999999.##')), '')     as \"اجمالي سعر الحجز\",\n  coalesce(trim(to_char(b.paid, 'FM999999999.##')), '')                as \"اجمالي ما تم دفعه\",\n  coalesce(b.payment_method, '')                       as \"طريقة الدفع\",\n  coalesce(trim(to_char(b.effective_remaining, 'FM999999999.##')), '') as \"المتبقي\",\n  coalesce(b.notes, '')                                as \"ملاحظات\",\n  -- Everything below is for the payment path, and none of it is a sheet column.\n  -- brain.js reads these by their ASCII names; the Arabic aliases above are the\n  -- cells, these are facts about the booking.\n  b.id                                                 as booking_id,\n  -- A booking occupies one row per payment METHOD. A payment in a method that\n  -- is already here joins that row and its cell grows; only a method not yet on\n  -- the booking opens a new one. Without this the bot could only ever see the\n  -- booking's own row, so a second method overwrote the first — reported live\n  -- on 2026-08-14.\n  (select coalesce(jsonb_agg(jsonb_build_object(\n            'seq', l.line_seq, 'row', l.sheet_row, 'method', l.method,\n            'amount', coalesce(pay.amount, 0)) order by l.line_seq), '[]'::jsonb)\n     from booking_lines l\n     join lateral (select coalesce(sum(p.amount), 0) as amount\n                     from payments p\n                    where p.booking_id = l.booking_id\n                      and p.line_seq = l.line_seq) pay on true\n    where l.booking_id = b.id and l.sheet_row is not null) as lines,\n  -- The last sheet row this booking occupies. A new line is inserted directly\n  -- under it, which is where a person would put it.\n  greatest(b.sheet_row, coalesce((select max(l.sheet_row) from booking_lines l\n                                   where l.booking_id = b.id), 0)) as block_end,\n  -- Whether اجمالي سعر الحجز on this row is a live formula (`=650*I18`, a\n  -- nightly rate). If it is, the booking row's total is the sheet's and must not\n  -- be reduced when a line is split off — writing a scalar there would destroy\n  -- the rate. Same rule mirror.py applies through sheet_owned_keys.\n  (b.nightly_rate is not null)                         as total_is_formula\nfrom bookings_live b\norder by b.sheet_row;\n",
-        "options": {}
+        "jsCode": "/**\n * \"Read Bookings For Edit\" — the bookings tab as the Brain's lookup rows.\n *\n * This used to be a Postgres query (read_bookings_for_edit.sql) over a mirror that\n * only ever heard about the bot's own writes. The sheet is hand-edited and the\n * mirror was not, so the row number the query handed over drifted, and the bot\n * wrote the next payment onto the guest above or below. Reading the sheet in the\n * same turn removes that class of bug: the row number and the amounts are the\n * ones the bot is about to write against.\n *\n * Inputs are two Sheets-API `values.get` responses of A1:U2000, one rendered as\n * FORMULA and one as UNFORMATTED_VALUE (the HTTP nodes \"Fetch Bookings Formulas\"\n * and \"Fetch Bookings Values\"). The API, not the Sheets node: it returns rows from\n * row 1 with trailing empties trimmed and interior blanks kept, so a row's number\n * is its index + 1 — the Sheets node numbers rows from its own view of the range.\n *\n * A row is a BOOKING when it names a guest and is not a LINE. A LINE is a second\n * payment METHOD on the same booking: commitPaymentLine copies the identity columns\n * onto a row directly under the booking's block, leaves the price blank and fills\n * paid and method. Anything else — including the same guest on a later arrival, or\n * the same identity after a gap — is its own booking.\n *\n * The output keeps the sheet's own Arabic headers, so brain.js reads it as it read\n * the SQL: row_number, booking_id (the row: nothing outside this turn needs a\n * database id any more), lines, block_end and total_is_formula.\n */\n\nconst H = {\n  ref: 'بوكنج ID', id: 'ID', name: 'اسم المقيم', type: 'نوع الحجز', phone: 'رقم الهاتف',\n  apt: 'اسم الشقة', room: 'رقم الغرفة', nights: 'عدد الليالي', arrival: 'تاريخ البداية',\n  departure: 'تاريخ المغادرة', total: 'اجمالي سعر الحجز', paid: 'اجمالي ما تم دفعه',\n  method: 'طريقة الدفع', remaining: 'المتبقي', notes: 'ملاحظات',\n};\n\nconst blank = (v) => v === undefined || v === null || String(v).trim() === '';\nconst txt = (v) => (v === undefined || v === null ? '' : String(v));\n\n/** Rows of a values.get response as { row, cells: {header: value} }; row = index + 1. */\nfunction sheetRows(resp) {\n  const values = resp && Array.isArray(resp.values) ? resp.values : [];\n  if (!values.length) return [];\n  const head = values[0].map(h => txt(h).trim());\n  const out = [];\n  for (let i = 1; i < values.length; i++) {\n    const row = values[i] || [];\n    const cells = {};\n    head.forEach((h, c) => { if (h) cells[h] = row[c] === undefined ? '' : row[c]; });\n    out.push({ row: i + 1, cells });\n  }\n  return out;\n}\n\n/** A date cell as YYYY-MM-DD: a Sheets serial, or text in the sheet's own forms. */\nfunction isoDate(v) {\n  if (blank(v)) return '';\n  if (typeof v === 'number') {\n    return new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 86400000).toISOString().slice(0, 10);\n  }\n  const s = String(v).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}/.test(s)) return s.slice(0, 10);\n  const m = /^(\\d{1,2})[/.-](\\d{1,2})[/.-](\\d{4})$/.exec(s);\n  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;\n  if (/^\\d+(\\.\\d+)?$/.test(s)) return isoDate(Number(s));\n  return s;\n}\n\n/** Who the row is about; a line repeats its booking's. */\nconst keyOf = (v) => [v[H.id], v[H.name], v[H.apt], v[H.room], isoDate(v[H.arrival])]\n  .map(x => txt(x).trim()).join('\\u0001');\n\nfunction bookingItem(row, f, v) {\n  const nightsF = f[H.nights];\n  const open = typeof nightsF === 'string' && /^=\\s*TODAY\\s*\\(\\s*\\)/i.test(nightsF.trim());\n  const totalF = f[H.total];\n  return {\n    row_number: row,\n    [H.ref]: txt(v[H.ref]),\n    [H.id]: txt(v[H.id]),\n    [H.name]: txt(v[H.name]),\n    [H.type]: txt(v[H.type]),\n    [H.phone]: txt(v[H.phone]),\n    [H.apt]: txt(v[H.apt]),\n    [H.room]: v[H.room] === undefined ? '' : v[H.room],\n    [H.nights]: open ? '=OPEN' : (blank(v[H.nights]) ? '' : v[H.nights]),\n    [H.arrival]: isoDate(v[H.arrival]),\n    [H.departure]: isoDate(v[H.departure]),\n    [H.total]: v[H.total] === undefined ? '' : v[H.total],\n    [H.paid]: v[H.paid] === undefined ? '' : v[H.paid],\n    [H.method]: txt(v[H.method]),\n    [H.remaining]: v[H.remaining] === undefined ? '' : v[H.remaining],\n    [H.notes]: txt(v[H.notes]),\n    booking_id: row,\n    lines: [],\n    block_end: row,\n    // A nightly rate (=500*I10, =(650*I19)-2200) grows with the stay and must not be\n    // overwritten by a typed number. A typed constant (=12900, =1400+700) may be.\n    total_is_formula: typeof totalF === 'string' && totalF.trim().startsWith('=') && /\\bI\\d+\\b/i.test(totalF),\n  };\n}\n\nlet formulas = [];\nlet values = [];\ntry {\n  formulas = sheetRows($('Fetch Bookings Formulas').first().json);\n  values = sheetRows($('Fetch Bookings Values').first().json);\n} catch (e) {\n  return [];                           // a node that did not run, or an error item\n}\n\nconst valueCells = new Map(values.map(x => [x.row, x.cells]));\nconst out = [];\nlet cur = null;\nlet curKey = '';\nfor (const { row, cells } of formulas) {\n  const v = valueCells.get(row) || cells;\n  if (blank(v[H.name])) continue;      // an empty row, or one with no guest\n  const isLine = cur && row === cur.block_end + 1 && keyOf(v) === curKey\n    && blank(v[H.total]) && !(blank(v[H.paid]) && blank(v[H.method]));\n  if (isLine) {\n    cur.lines.push({\n      seq: cur.lines.length + 2, row, method: txt(v[H.method]).trim(), amount: Number(v[H.paid]) || 0,\n    });\n    cur.block_end = row;\n    continue;\n  }\n  cur = bookingItem(row, cells, v);\n  curKey = keyOf(v);\n  out.push(cur);\n}\nreturn out.map(json => ({ json }));\n"
       },
-      "alwaysOutputData": true,
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2,
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
-        }
-      }
+      "alwaysOutputData": true
     },
     {
       "id": "needs-locations",
@@ -298,30 +385,61 @@
       }
     },
     {
+      "id": "fetch-locations",
+      "name": "Fetch Locations",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        180
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.AVAILABILITY_TAB + '!A2:B2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "UNFORMATTED_VALUE"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500,
+      "executeOnce": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
       "id": "read-locations",
       "name": "Read Locations",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         760,
         180
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "-- The apartment/room registry, seeded from the الإتاحة tab and verified equal\n-- to it on 2026-08-09: 6 apartments, 26 rooms on both sides.\n--\n-- Aliases match the tab's own header row, so locationRegistry() reads this\n-- exactly as it read the Sheets node. Rooms sort numerically rather than by\n-- text, or room 10 would sit before room 2 on the keyboard.\nselect\n  a.name   as \"الشقة\",\n  r.number as \"الغرفة\"\nfrom rooms r\njoin apartments a on a.id = r.apartment_id\nwhere r.active and a.active\norder by a.id, length(r.number), r.number;\n",
-        "options": {}
+        "jsCode": "/**\n * The apartment / room registry, from the الإتاحة tab (A2:B).\n *\n * One body for the three nodes that need it — \"Read Locations\" (the Telegram\n * branch), \"Read Report Locations\" and \"Read Availability Locations\" — because it\n * reads only its direct input: the values.get response of the HTTP node in front.\n *\n * Row 2 of the tab is the header (الشقة / الغرفة) and row 3 holds a date label with\n * no room; neither is a room. Rooms keep the tab's order, which is already grouped\n * by apartment and ascending. brain.js's locationRegistry() and build_reports.js\n * read الشقة / الغرفة as text, exactly as they read the SQL this replaced.\n */\nconst resp = $input.first().json;\nconst values = resp && Array.isArray(resp.values) ? resp.values : [];\nconst cell = (v) => (v === undefined || v === null ? '' : String(v).trim());\nconst out = [];\nfor (const r of values) {\n  const apartment = cell(r[0]);\n  const room = cell(r[1]);\n  if (!apartment || !room || apartment === 'الشقة') continue;\n  out.push({ json: { 'الشقة': apartment, 'الغرفة': room } });\n}\nreturn out;\n"
       },
-      "executeOnce": true,
-      "alwaysOutputData": true,
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2,
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
-        }
-      }
+      "alwaysOutputData": true
     },
     {
       "id": "needs-booking-id",
@@ -359,30 +477,61 @@
       }
     },
     {
+      "id": "fetch-booking-ids",
+      "name": "Fetch Booking Ids",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        400
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.BOOKINGS_TAB + '!B1:B2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "UNFORMATTED_VALUE"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500,
+      "executeOnce": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
       "id": "read-next-booking-id",
       "name": "Read Next Booking ID",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         760,
         480
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "-- The ID the bot offers for the next booking: one past the previous one this\n-- month, so nobody has to remember it. Asked for on 2026-10-01.\n--\n-- The numbering restarts every month. When the bookings tab rolls over, the\n-- guests still staying are carried into the new month with their old ID marked\n-- `111**` (\"the ** means that the booking is from the past month, so now the\n-- new month begins and the id should reset\"). So only bookings created this\n-- calendar month, Cairo time, count, and a starred ID never does. The first\n-- booking of a month is offered 1.\n--\n-- ID is text typed by hand, so only plain counters count: Arabic-Indic digits\n-- are folded to ASCII first, the way brain.js reads them, and anything longer\n-- than six digits is left out — ID is sometimes a passport or national number,\n-- and one of those would push every suggestion into the millions. Cancelled\n-- bookings stay in: their number is still spent.\n--\n-- A suggestion, not an allocation: the receptionist can type another number,\n-- and two people starting at once are offered the same one.\nselect coalesce(max(ref::int), 0) + 1 as next_booking_id\n  from (select btrim(translate(guest_ref, '٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹',\n                                           '01234567890123456789')) as ref\n          from bookings\n         where created_at >= date_trunc('month', now() at time zone 'Africa/Cairo')\n                               at time zone 'Africa/Cairo') b\n where ref ~ '^[0-9]{1,6}$';\n",
-        "options": {}
+        "jsCode": "/**\n * \"Read Next Booking ID\" — the ID offered for the next booking: one past the\n * highest this month's tab holds, so nobody has to remember it.\n *\n * The numbering restarts every month, and the tab is one month, so \"this month\"\n * holds by construction. Guests carried over from last month keep their old ID\n * marked with stars (\"104**\"), which is not a plain counter and never counts; ID is\n * hand-typed text, so only 1-6 digit counters do (a passport or national number\n * would push every suggestion into the millions). Arabic-Indic digits are folded to\n * ASCII first, the way brain.js reads them. Cancelled bookings keep their number.\n *\n * A suggestion, not an allocation: the receptionist can type another number.\n * Input: the values.get response of B1:B2000 (row 1 is the \"ID\" header).\n */\nconst resp = $input.first().json;\nconst values = resp && Array.isArray(resp.values) ? resp.values : [];\nconst fold = (s) => String(s === undefined || s === null ? '' : s)\n  .replace(/[٠-٩]/g, ch => String(ch.charCodeAt(0) - 0x0660))\n  .replace(/[۰-۹]/g, ch => String(ch.charCodeAt(0) - 0x06F0))\n  .trim();\nlet max = 0;\nfor (let i = 1; i < values.length; i++) {         // row 1 is the header\n  const s = fold((values[i] || [])[0]);\n  if (/^[0-9]{1,6}$/.test(s)) max = Math.max(max, Number(s));\n}\nreturn [{ json: { next_booking_id: max + 1 } }];\n"
       },
-      "executeOnce": true,
-      "alwaysOutputData": true,
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2,
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
-        }
-      }
+      "alwaysOutputData": true
     },
     {
       "id": "needs-expense-number",
@@ -670,23 +819,79 @@
     {
       "id": "save-session",
       "name": "Save Session",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
       "position": [
         1160,
         480
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\nvalues ($1, $2, $3::jsonb, now())\non conflict (chat_id) do update\n   set state = excluded.state,\n       data = excluded.data,\n       updated_at = now();",
-        "options": {
-          "queryReplacement": "={{ [$json.chatId, $json.sessionState, $json.sessionData] }}"
-        }
-      },
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings_bot_sessions"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.chatId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "chat_id": "={{ $json.chatId }}",
+            "state": "={{ $json.sessionState }}",
+            "data": "={{ $json.sessionData }}",
+            "updated_at": "={{ Date.now() }}"
+          },
+          "matchingColumns": [
+            "chat_id"
+          ],
+          "schema": [
+            {
+              "id": "chat_id",
+              "displayName": "chat_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            }
+          ]
         }
       }
     },
@@ -1413,23 +1618,79 @@
     {
       "id": "clear-session",
       "name": "Clear Session",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
       "position": [
         2760,
         660
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\nvalues ($1, '', $2::jsonb, now())\non conflict (chat_id) do update\n   set state = '',\n       data = excluded.data,\n       updated_at = now();",
-        "options": {
-          "queryReplacement": "={{ [$('Brain').first().json.chatId, '{}'] }}"
-        }
-      },
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings_bot_sessions"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ $('Brain').first().json.chatId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "chat_id": "={{ $('Brain').first().json.chatId }}",
+            "state": "",
+            "data": "{}",
+            "updated_at": "={{ Date.now() }}"
+          },
+          "matchingColumns": [
+            "chat_id"
+          ],
+          "schema": [
+            {
+              "id": "chat_id",
+              "displayName": "chat_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            }
+          ]
         }
       }
     },
@@ -1552,25 +1813,6 @@
         800
       ],
       "id": "report-config"
-    },
-    {
-      "name": "Read Report Locations",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "-- The apartment/room registry, seeded from the الإتاحة tab and verified equal\n-- to it on 2026-08-09: 6 apartments, 26 rooms on both sides.\n--\n-- Aliases match the tab's own header row, so locationRegistry() reads this\n-- exactly as it read the Sheets node. Rooms sort numerically rather than by\n-- text, or room 10 would sit before room 2 on the keyboard.\nselect\n  a.name   as \"الشقة\",\n  r.number as \"الغرفة\"\nfrom rooms r\njoin apartments a on a.id = r.apartment_id\nwhere r.active and a.active\norder by a.id, length(r.number), r.number;\n",
-        "options": {}
-      },
-      "position": [
-        -840,
-        960
-      ],
-      "id": "read-report-locations",
-      "alwaysOutputData": true,
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2
     },
     {
       "name": "Read Report Formulas",
@@ -1736,25 +1978,6 @@
       "id": "availability-config"
     },
     {
-      "name": "Read Availability Locations",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "-- The apartment/room registry, seeded from the الإتاحة tab and verified equal\n-- to it on 2026-08-09: 6 apartments, 26 rooms on both sides.\n--\n-- Aliases match the tab's own header row, so locationRegistry() reads this\n-- exactly as it read the Sheets node. Rooms sort numerically rather than by\n-- text, or room 10 would sit before room 2 on the keyboard.\nselect\n  a.name   as \"الشقة\",\n  r.number as \"الغرفة\"\nfrom rooms r\njoin apartments a on a.id = r.apartment_id\nwhere r.active and a.active\norder by a.id, length(r.number), r.number;\n",
-        "options": {}
-      },
-      "position": [
-        1680,
-        1100
-      ],
-      "id": "read-availability-locations",
-      "alwaysOutputData": true,
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2
-    },
-    {
       "name": "Read Availability Formulas",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.7,
@@ -1858,213 +2081,6 @@
       "id": "send-availability-report"
     },
     {
-      "name": "Build Shadow Write",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "parameters": {
-        "jsCode": "/**\n * Turns a completed sheet write into one Postgres upsert — the \"Build Shadow\n * Write\" Code node.\n *\n * This runs only after the spreadsheet write has already succeeded, and its\n * output feeds a Postgres node whose onError is `continueRegularOutput`. During\n * the trust period the sheet is authoritative and Supabase is a shadow copy, so\n * the rule is absolute: **nothing here may fail a booking**. If Supabase is\n * down, asleep, or wrong, the receptionist still sees the normal ✅ and the\n * daily reconcile reports the missing row.\n *\n * Keyed on `sheet_row`, so a retry or a replay converges instead of duplicating.\n *\n * The row number lives on whichever Build * Row node ran, and referencing a node\n * that did not execute throws — hence the try/catch ladder, the same trick\n * brain.js uses for its gated Sheets reads.\n */\n\nconst brain = $('Brain').first().json;\nconst save = brain.save || {};\n\n/** The row the sheet write actually landed on. */\nfunction sheetRow() {\n  for (const node of ['Build Booking Row', 'Build Expense Row', 'Build Edit Row',\n                      'Build Line Rows']) {\n    try {\n      const n = $(node).first().json;\n      if (n && n.row_number) return Number(n.row_number);\n    } catch (e) { /* did not execute this turn */ }\n  }\n  return Number(save.row) || null;      // edit and cancel carry it on the payload\n}\n\nconst row = sheetRow();\nif (!row) return [];                    // nothing identifiable to mirror\n\nfunction sqlStr(v) {\n  if (v === undefined || v === null || v === '') return 'NULL';\n  return `'${String(v).replace(/'/g, \"''\")}'`;\n}\n\nfunction sqlNum(v) {\n  if (v === undefined || v === null || v === '') return 'NULL';\n  // The sheet stores IDs and phones text-forced with a leading apostrophe.\n  const n = Number(String(v).replace(/^'/, '').replace(/,/g, ''));\n  return Number.isFinite(n) ? String(n) : 'NULL';\n}\n\n/** Strip the ' that forces Sheets to keep leading zeros. */\nfunction plain(v) {\n  return v === undefined || v === null ? '' : String(v).replace(/^'/, '');\n}\n\nconst F = save.fields || {};\nconst flow = save.flow;\nlet sql = null;\n\nif (flow === 'booking' || flow === 'edit' || flow === 'cancel') {\n  // An open-ended stay is the one case where عدد الليالي holds a formula rather\n  // than a number. That is exactly what `open_ended` records, so the database\n  // never has to tell the two apart by reading the cell twice.\n  const nightsRaw = F['عدد الليالي'];\n  const isOpen = typeof nightsRaw === 'string' && nightsRaw.trim().startsWith('=');\n  const cols = [];\n  const set = [];\n\n  function put(col, value, quoted) {\n    if (value === undefined) return;\n    cols.push(`${col} = ${quoted}`);\n    set.push(`${col} = excluded.${col}`);\n  }\n\n  put('booking_ref', F['بوكنج ID'], sqlStr(plain(F['بوكنج ID'])));\n  put('guest_ref', F['ID'], sqlStr(plain(F['ID'])));\n  put('guest_name', F['اسم المقيم'], sqlStr(F['اسم المقيم']));\n  put('booking_type', F['نوع الحجز'], sqlStr(F['نوع الحجز']));\n  put('phone', F['رقم الهاتف'], sqlStr(plain(F['رقم الهاتف'])));\n  put('apartment_name', F['اسم الشقة'], sqlStr(F['اسم الشقة']));\n  put('room_number', F['رقم الغرفة'], sqlStr(F['رقم الغرفة']));\n  put('arrival', F['تاريخ البداية'], `${sqlStr(F['تاريخ البداية'])}::date`);\n  if (nightsRaw !== undefined) {\n    cols.push(`nights = ${isOpen ? 'NULL' : sqlNum(nightsRaw)}`);\n    set.push('nights = excluded.nights');\n    cols.push(`open_ended = ${isOpen ? 'true' : 'false'}`);\n    set.push('open_ended = excluded.open_ended');\n  }\n  // On an open stay the sheet cell is `=<rate>*I{row}`, so sqlNum would make it\n  // NULL. The rate itself is what the database stores — `nightly_rate` — and\n  // `bookings_live.effective_total` recomputes the running bill from it, which\n  // is exactly what the sheet's formula shows.\n  const totalRaw = F['اجمالي سعر الحجز'];\n  const rateMatch = typeof totalRaw === 'string' && /^=([0-9.]+)\\*I/.exec(totalRaw.trim());\n  if (rateMatch) {\n    cols.push(`nightly_rate = ${rateMatch[1]}`);\n    set.push('nightly_rate = excluded.nightly_rate');\n    cols.push('total = NULL');\n    set.push('total = excluded.total');\n  } else {\n    put('total', totalRaw, sqlNum(totalRaw));\n  }\n  put('paid', F['اجمالي ما تم دفعه'], `coalesce(${sqlNum(F['اجمالي ما تم دفعه'])}, 0)`);\n  put('payment_method', F['طريقة الدفع'], sqlStr(F['طريقة الدفع']));\n  put('notes', F['ملاحظات'], sqlStr(F['ملاحظات']));\n\n  if (save.receiptFileId) {\n    cols.push(`receipt_file_id = ${sqlStr(save.receiptFileId)}`);\n    set.push('receipt_file_id = excluded.receipt_file_id');\n  }\n  if (flow === 'cancel') {\n    cols.push('cancelled_at = now()');\n    set.push('cancelled_at = excluded.cancelled_at');\n  }\n  if (brain.actor || save.actor) {\n    cols.push(`created_by = ${sqlStr(brain.actor || save.actor)}`);\n  }\n\n  if (!cols.length) return [];\n  const names = cols.map(c => c.split(' = ')[0]);\n  const values = cols.map(c => c.slice(c.indexOf(' = ') + 3));\n  sql =\n    `insert into bookings (sheet_row, ${names.join(', ')}, source) values ` +\n    `(${row}, ${values.join(', ')}, 'bot') ` +\n    `on conflict (sheet_row) do update set ${set.join(', ')}, updated_at = now();`;\n\n  // ── The payment, as its own row ────────────────────────────────────────────\n  //\n  // One `payments` row per SHEET LINE, keyed on sheet_row. The sheet has a\n  // single cumulative paid cell per line, so that is the most this can honestly\n  // record — mirroring it line for line keeps the two in step and stays\n  // idempotent on a retry. Individual payments get their own rows after the\n  // flip, when the sheet is no longer the one holding the number.\n  //\n  // Without this the table goes stale the moment it is created: it was\n  // backfilled at 09:50 and the first live payment at 09:52 was already missing\n  // from it, which `reconcile_payments` duly reported.\n  const act = save.payment;\n  if (act && Number(act.added)) {\n    // ── A payment as an EVENT ────────────────────────────────────────────────\n    //\n    // The sheet holds one method per row, so a guest paying twice in two\n    // methods keeps the running total but loses the first label — confirmed\n    // live on row 59, where 'كاش' became 'انستاباي' while the amount added up\n    // correctly. This records what was actually paid this time, and how, so the\n    // database keeps both and nobody has to insert a row to say it.\n    //\n    // Its own row, never an upsert on the line: two payments against one line\n    // must be two rows. `client_ref` carries the bot's save-lock timestamp, so\n    // a double tap converges rather than paying twice.\n    const methodSql = sqlStr(act.method);\n    sql +=\n      ' insert into payments (booking_id, amount, method, currency, receipt_file_id, ' +\n      'paid_at, client_ref, source) select coalesce(b.merged_into, b.id), ' +\n      `${sqlNum(act.added)}, ${methodSql}, ` +\n      `case when ${methodSql} like '%دولار%' then 'USD' ` +\n      `when ${methodSql} like '%يورو%' then 'EUR' else 'EGP' end, ` +\n      `${sqlStr(save.receiptFileId)}, now(), ${sqlStr(act.ref)}, 'bot' ` +\n      `from bookings b where b.sheet_row = ${row} ` +\n      'on conflict (client_ref) do nothing;';\n  } else if (F['اجمالي ما تم دفعه'] !== undefined) {\n    // No payment act on the payload: a correction typed into the paid column,\n    // a correction, or a replay of an older session. Fall back to mirroring the\n    // line, which is what every row backfilled from the sheet looks like.\n    const paidSql = sqlNum(F['اجمالي ما تم دفعه']);\n    if (paidSql === 'NULL' || Number(paidSql) === 0) {\n      // Paid cleared — a correction. The line no longer records a\n      // payment, so neither may the table: both the mirrored line row and any\n      // payment acts recorded against that line go.\n      //\n      // A first payment made at booking time is keyed `new:<guest>:<ms>`, not\n      // `<row>:<ms>`, because the row did not exist yet — so zeroing the paid\n      // cell of a brand new booking leaves that act behind. The daily\n      // reconcile_payments reports it, which is the right place for something\n      // this rare to surface rather than a guess made here.\n      sql += ` delete from payments where sheet_row = ${row}` +\n             ` or client_ref like '${row}:%';`;\n    } else {\n      // booking_id resolves through merged_into: a continuation line's payment\n      // belongs to the booking it continues, not to the line.\n      // The method IS the currency: طريقة الدفع = دولار means the amount is\n      // dollars. Derived in SQL so it works whether the method came from this\n      // edit or fell back to the column.\n      const methodExpr =\n        F['طريقة الدفع'] === undefined ? 'b.payment_method' : sqlStr(F['طريقة الدفع']);\n      sql +=\n        ' insert into payments (booking_id, amount, method, currency, receipt_file_id, ' +\n        'paid_at, sheet_row, source) select coalesce(b.merged_into, b.id), ' +\n        // An edit that changes only the amount leaves the method field absent.\n        // Falling back to the column rather than to NULL, because the row was\n        // just upserted above and so already holds the current method — writing\n        // NULL here would erase how the guest paid.\n        `${paidSql}, ${methodExpr}, ` +\n        `case when ${methodExpr} like '%دولار%' then 'USD' ` +\n        `when ${methodExpr} like '%يورو%' then 'EUR' else 'EGP' end, ` +\n        `${sqlStr(save.receiptFileId)}, now(), ` +\n        `${row}, 'bot' from bookings b where b.sheet_row = ${row} ` +\n        'on conflict (sheet_row) do update set booking_id = excluded.booking_id, ' +\n        'amount = excluded.amount, method = excluded.method, ' +\n        'currency = excluded.currency, ' +\n        'receipt_file_id = coalesce(excluded.receipt_file_id, payments.receipt_file_id), ' +\n        'paid_at = excluded.paid_at;';\n    }\n  }\n} else if (flow === 'payment_line') {\n  // ── A payment on a line of its own ─────────────────────────────────────────\n  //\n  // The sheet write has already happened by the time this runs, so the database\n  // is being told what the sheet now says, in the same order the sheet learned\n  // it:\n  //\n  //   1. every row from the insert point down moved one row further down. This\n  //      goes FIRST and through negative numbers, because sheet_row is UNIQUE\n  //      and not deferrable — a single +1 pass collides with a row it has not\n  //      reached yet. Skipped entirely when no row was inserted.\n  //   2. the line itself, in booking_lines: which method it carries and which\n  //      row it occupies. `on conflict` because a second payment in that method\n  //      finds the line already there.\n  //   3. the payment, as its own row, tagged with the line it belongs to. Never\n  //      an upsert on the line — two payments on one line are two rows, which\n  //      is the whole reason booking_lines exists.\n  //   4. the booking's own total, when the sheet's was reduced to make room for\n  //      the line. Left alone when the sheet computes it from a nightly rate.\n  const act = save.payment || {};\n  const seq = Number(save.lineSeq);\n  const method = sqlStr(act.method || save.fields['طريقة الدفع']);\n  sql = '';\n\n  if (save.shiftFrom) {\n    const from = Number(save.shiftFrom);\n    for (const table of ['bookings', 'payments', 'booking_lines']) {\n      sql += ` update ${table} set sheet_row = -(sheet_row + 1)` +\n             ` where sheet_row >= ${from};` +\n             ` update ${table} set sheet_row = -sheet_row where sheet_row < 0;`;\n    }\n  }\n\n  sql +=\n    ' insert into booking_lines (booking_id, line_seq, method, currency, sheet_row)' +\n    ` select b.id, ${seq}, ${method},` +\n    ` case when ${method} like '%دولار%' then 'USD'` +\n    ` when ${method} like '%يورو%' then 'EUR' else 'EGP' end, ${row}` +\n    ` from bookings b where b.sheet_row = ${Number(save.bookingRow)}` +\n    ' on conflict (booking_id, line_seq) do update set method = excluded.method,' +\n    ' currency = excluded.currency, sheet_row = excluded.sheet_row;';\n\n  if (Number(act.added)) {\n    sql +=\n      ' insert into payments (booking_id, amount, method, currency, line_seq,' +\n      ' receipt_file_id, paid_at, client_ref, source) select b.id,' +\n      ` ${sqlNum(act.added)}, ${method},` +\n      ` case when ${method} like '%دولار%' then 'USD'` +\n      ` when ${method} like '%يورو%' then 'EUR' else 'EGP' end, ${seq},` +\n      ` ${sqlStr(save.receiptFileId)}, now(), ${sqlStr(act.ref)}, 'bot'` +\n      ` from bookings b where b.sheet_row = ${Number(save.bookingRow)}` +\n      ' on conflict (client_ref) do nothing;';\n  }\n\n  const bf = save.bookingFields || {};\n  if (bf['اجمالي سعر الحجز'] !== undefined) {\n    sql += ` update bookings set total = ${sqlNum(bf['اجمالي سعر الحجز'])},` +\n           ` updated_at = now() where sheet_row = ${Number(save.bookingRow)};`;\n  }\n  sql = sql.trim();\n} else if (flow === 'expense') {\n  sql =\n    'insert into expenses (sheet_row, expense_ref, item, amount, apartment_id, ' +\n    'apartment_name, notes, payment_method, responsible, receipt_file_id, spent_at, ' +\n    'source) values (' +\n    `${row}, ${sqlStr(plain(F['الرقم']))}, ${sqlStr(F['البند'])}, ${sqlNum(F['المبلغ'])}, ` +\n    // Resolved in SQL rather than here: the bot offers the apartment list from\n    // the same الإتاحة tab the registry is seeded from, so the name matches. If\n    // it ever does not, the reference is simply NULL and the name still records\n    // what was chosen.\n    `(select id from apartments where name = ${sqlStr(F['الشقة'])}), ` +\n    `${sqlStr(F['الشقة'])}, ${sqlStr(F['ملاحظات'])}, ${sqlStr(F['طريقة الدفع'])}, ` +\n    `${sqlStr(F['اسم المسئول'])}, ${sqlStr(save.receiptFileId)}, ` +\n    `${sqlStr(F['تاريخ'])}::timestamptz, 'bot') ` +\n    'on conflict (sheet_row) do update set expense_ref = excluded.expense_ref, ' +\n    'item = excluded.item, amount = excluded.amount, ' +\n    'apartment_id = excluded.apartment_id, ' +\n    'apartment_name = excluded.apartment_name, notes = excluded.notes, ' +\n    'payment_method = excluded.payment_method, responsible = excluded.responsible, ' +\n    'receipt_file_id = excluded.receipt_file_id, spent_at = excluded.spent_at;';\n}\n\nif (!sql) return [];\nreturn [{ json: { sheet_row: row, flow, sql } }];\n"
-      },
-      "position": [
-        3056,
-        448
-      ],
-      "id": "build-shadow-write"
-    },
-    {
-      "name": "Shadow Write",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "={{ $json.sql }}",
-        "options": {}
-      },
-      "position": [
-        3296,
-        448
-      ],
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2,
-      "alwaysOutputData": true,
-      "id": "shadow-write"
-    },
-    {
-      "name": "Read Booking Id",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "=select sheet_row as row_number, id::text as \"معرف النظام\" from bookings where sheet_row = {{ $('Build Shadow Write').first().json.sheet_row }} and {{ ['booking','edit','cancel'].includes($('Build Shadow Write').first().json.flow) }};",
-        "options": {}
-      },
-      "position": [
-        3536,
-        448
-      ],
-      "id": "read-booking-id",
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2
-    },
-    {
-      "name": "Write Booking Id",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "parameters": {
-        "method": "PUT",
-        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.BOOKINGS_TAB + '!U' + $json.row_number) }}",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "googleSheetsOAuth2Api",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "valueInputOption",
-              "value": "RAW"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ values: [[ $json['معرف النظام'] ]] }) }}",
-        "options": {}
-      },
-      "position": [
-        3776,
-        448
-      ],
-      "id": "write-booking-id",
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2
-    },
-    {
-      "name": "Build Snapshot SQL",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "parameters": {
-        "jsCode": "/**\n * Snapshot the spreadsheet into `sheet_snapshot` — the \"Build Snapshot SQL\" node.\n *\n * Runs on the daily schedule branch, reusing the two reads the reports already\n * do. Emits one statement: replace the snapshot wholesale, inside a transaction,\n * so the reconcile that follows can never see a half-loaded table.\n *\n * The snapshot records what the SHEET currently shows — evaluated numbers, not\n * formulas. `reconcile_bookings` then compares that against `bookings_live`,\n * whose effective_* columns reproduce the same arithmetic from the database\n * side. Any difference is a real one.\n */\n\nconst rows = $input.all().map(i => i.json);\n\n// Which rows are open-ended, from the FORMULA read. Not used to change what is\n// stored — the snapshot is deliberately \"what the sheet says\" — but a row whose\n// عدد الليالي is a formula has an evaluated night count that the database models\n// as NULL + open_ended, and bookings_live turns that back into the same number.\nconst openByRow = {};\nfor (const i of $('Read Report Formulas').all()) {\n  const j = i.json || {};\n  openByRow[String(j.row_number)] =\n    String(j['عدد الليالي'] === undefined ? '' : j['عدد الليالي']).trim().startsWith('=');\n}\n\nfunction s(v) {\n  if (v === undefined || v === null || v === '') return 'NULL';\n  return `'${String(v).replace(/^'/, '').replace(/'/g, \"''\")}'`;\n}\n\nfunction n(v) {\n  if (v === undefined || v === null || v === '') return 'NULL';\n  const x = Number(String(v).replace(/,/g, ''));\n  return Number.isFinite(x) ? String(x) : 'NULL';\n}\n\n/**\n * Column U as (booking id, line sequence), the same split `parse_sheet_id` in\n * supabase/backfill.py makes.\n *\n * `413` is the booking's own row and reads as line 1. `413-2` is its second\n * LINE — a payment in another method, on a row of its own because طريقة الدفع\n * holds one method.\n *\n * This node used to push column U through `n()`, which is `Number(...)`, so\n * `413-2` became NaN and was written as NULL — and it never wrote `line_seq`\n * at all, though `sheet_snapshot` has had the column since the lines were\n * built. With both NULL, `reconcile_bookings` gave the line its own group\n * (`row:41`), found no booking on that sheet_row because the line lives in\n * `booking_lines`, and emitted **missing in db** — every morning, for every\n * payment line on the tab, in the report the group actually reads.\n *\n * The hand-run Python reconcile has always got this right, which is why\n * \"reconcile: 0\" and the morning message disagreed.\n */\nfunction sheetId(raw) {\n  const m = String(raw === undefined || raw === null ? '' : raw).trim()\n    .match(/^(\\d+)(?:-(\\d+))?$/);\n  if (!m) return { id: 'NULL', seq: 'NULL' };\n  const seq = m[2] === undefined ? 1 : Number(m[2]);\n  // Sequences start at 1. `413-0` is a typo, not a line, and filing a payment\n  // under line zero puts it under a line no mirror will ever write.\n  if (seq < 1) return { id: 'NULL', seq: 'NULL' };\n  return { id: String(Number(m[1])), seq: String(seq) };\n}\n\n/**\n * A row REPEATING an id a named row above already holds is that booking's\n * continuation line, whether or not the suffix was ever typed.\n *\n * `sheetId` above reads `413-2` when the bot wrote the row. A line added by\n * hand never gets the suffix: the row is inserted under the booking and column\n * U is copied down with everything else, so it reads as a bare `413` on a\n * second row. Taken literally that says the booking lives on both.\n *\n * The morning reconcile got this wrong in two different ways at once. Rows 88\n * and 89 — خالد عاشور's cash line — both came through as line 1, so the fold\n * happened to sum them and nothing was reported. Row 18 — حسام's فودافون كاش\n * line, merged by hand with the guest cell left blank — was dropped entirely\n * by the `if (!name) continue` above, so its 3,500 was missing from the sheet\n * side and the booking was reported as differing every single morning, in the\n * message the group reads, while the hand-run Python reconcile said zero.\n *\n * `continuation_seq` in supabase/backfill.py is the same rule. Money is\n * required: a blank row that merely inherited a stamp is not a payment.\n */\nconst namedIds = new Set();\nconst topSeq = new Map();\n\nfunction money(j) {\n  return String(j['اجمالي ما تم دفعه'] ?? '').trim()\n      || String(j['اجمالي سعر الحجز'] ?? '').trim();\n}\n\nconst values = [];\nfor (const j of rows) {\n  const name = String(j['اسم المقيم'] || '').trim();\n  const row = Number(j.row_number);\n  if (!row) continue;\n  const id = sheetId(j['معرف النظام']);\n  const numericId = id.id === 'NULL' ? null : Number(id.id);\n\n  let seq = id.seq === 'NULL' ? null : Number(id.seq);\n  let isLine = false;\n  if (numericId !== null && seq === 1 && namedIds.has(numericId) && money(j)) {\n    seq = (topSeq.get(numericId) || 1) + 1;\n    isLine = true;\n  }\n  // The formula-only tail is nameless AND is not a line. Testing the name alone\n  // is what dropped row 18.\n  if (!name && !isLine) continue;\n  if (numericId !== null) {\n    if (name && !isLine) namedIds.add(numericId);\n    topSeq.set(numericId, Math.max(topSeq.get(numericId) || 0, seq || 1));\n  }\n  // Column U — the booking's database id, written by the bot and by\n  // reindex.py. This is what lets the reconcile key on the BOOKING instead of\n  // the row it happens to occupy: inserting a row renumbers everything beneath\n  // it, and keying on sheet_row reported forty of those as differences once.\n  // Blank on a row nobody has stamped yet, and the reconcile falls back to\n  // sheet_row for those.\n  const key = { id: id.id, seq: seq === null ? 'NULL' : String(seq) };\n  values.push(\n    `(${row}, ${s(name)}, ${s(j['اسم الشقة'])}, ${s(j['رقم الغرفة'])}, ` +\n    `${s(j['تاريخ البداية'])}::date, ${n(j['عدد الليالي'])}, ` +\n    `${n(j['اجمالي سعر الحجز'])}, ${n(j['اجمالي ما تم دفعه'])}, ` +\n    `${s(j['طريقة الدفع'])}, ${s(j['ملاحظات'])}, ${key.id}, ${key.seq})`\n  );\n}\n\nif (!values.length) return [];             // never blank the snapshot on a bad read\n\nconst sql =\n  'begin; delete from sheet_snapshot; ' +\n  'insert into sheet_snapshot (sheet_row, guest_name, apartment_name, room_number, ' +\n  'arrival, nights, total, paid, payment_method, notes, booking_id, line_seq) values ' +\n  values.join(', ') + '; commit;';\n\nreturn [{ json: { rows: values.length, open_rows: Object.values(openByRow).filter(Boolean).length, sql } }];\n"
-      },
-      "position": [
-        -240,
-        1040
-      ],
-      "id": "build-snapshot-sql"
-    },
-    {
-      "name": "Build Reconcile Message",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "parameters": {
-        "jsCode": "/**\n * Turn the reconcile query into the morning message — \"Build Reconcile Message\".\n *\n * This is the report that earns the flip. It answers one question: does the\n * database still agree with the spreadsheet?\n *\n * It used to post every morning, matching or not: a report that only appears\n * when something is wrong is indistinguishable from one that has quietly stopped\n * running, and that was the whole point of the trust period. The trust period is\n * over — on 2026-08-28 the user asked for the daily messages to stop, and\n * `deploy_graph.py` disconnected this node from \"Send Report\".\n *\n * The node still runs, and still returns exactly ONE item. Do not \"optimise\" it\n * into returning nothing on a clean morning: \"Read Unmirrored Bookings\" hangs\n * off this output, and that is what publishes dashboard-born bookings into the\n * sheet. An empty return here silently stops them appearing at all.\n *\n * The text it builds now goes nowhere. It is left in place because reconnecting\n * one wire is how the report comes back, and because the same text is what any\n * manual `select * from reconcile_bookings` has to be read against.\n */\n\nconst CFG = $('Report Config').first().json;\nconst CHAT_ID = CFG.REPORT_GROUP_CHAT_ID;\n\n// \"Read Discrepancies\" returns nothing at all when the two agree; n8n then hands\n// this node a single empty item rather than an empty list.\nconst rows = $input.all()\n  .map(i => i.json)\n  .filter(j => j && j.sheet_row !== undefined && j.sheet_row !== null);\n\nconst checked = (() => {\n  try { return Number($('Build Snapshot SQL').first().json.rows) || 0; } catch (e) { return 0; }\n})();\n\nconst MAX_LINES = 20;\n\nfunction esc(v) {\n  return String(v === undefined || v === null ? '' : v).replace(/([_*[\\]`])/g, '\\\\$1');\n}\n\nfunction show(v) {\n  if (v === undefined || v === null || v === '') return '—';\n  // Postgres hands dates back as ISO timestamps, and the UTC shift makes them\n  // read a day early. Only the date part is meaningful here.\n  const iso = /^(\\d{4}-\\d{2}-\\d{2})T/.exec(String(v));\n  return esc(iso ? iso[1] : v);\n}\n\n/** Only the fields that actually differ, so the line says what is wrong. */\nfunction diffs(r) {\n  const pairs = [\n    ['الاسم', r.sheet_guest, r.db_guest],\n    ['الشقة', r.sheet_apt, r.db_apt],\n    ['الغرفة', r.sheet_room, r.db_room],\n    ['البداية', r.sheet_arrival, r.db_arrival],\n    ['الليالي', r.sheet_nights, r.db_nights],\n    ['الاجمالي', r.sheet_total, r.db_total],\n    ['المدفوع', r.sheet_paid, r.db_paid],\n  ];\n  return pairs\n    .filter(([, a, b]) => String(a === null || a === undefined ? '' : a) !==\n                          String(b === null || b === undefined ? '' : b))\n    .map(([label, a, b]) => `${label}: ${show(a)} ≠ ${show(b)}`)\n    .join('، ');\n}\n\nlet text;\nif (!rows.length) {\n  text = `✅ *مطابقة* — ${checked} حجز، لا فروق بين الشيت وقاعدة البيانات.`;\n} else {\n  const missingDb = rows.filter(r => r.problem === 'missing in db');\n  const missingSheet = rows.filter(r => r.problem === 'missing in sheet');\n  const differs = rows.filter(r => r.problem === 'differs');\n\n  const parts = [`⚠️ *فروق بين الشيت وقاعدة البيانات* — ${rows.length} من ${checked}`, ''];\n\n  if (missingDb.length) {\n    parts.push(`❌ *في الشيت وغير موجود في قاعدة البيانات* (${missingDb.length})`);\n    parts.push(...missingDb.slice(0, MAX_LINES).map(\n      r => `• صف ${r.sheet_row}: ${show(r.sheet_guest)}`));\n    parts.push('');\n  }\n  if (missingSheet.length) {\n    parts.push(`❌ *في قاعدة البيانات وغير موجود في الشيت* (${missingSheet.length})`);\n    parts.push(...missingSheet.slice(0, MAX_LINES).map(\n      r => `• صف ${r.sheet_row}: ${show(r.db_guest)}`));\n    parts.push('');\n  }\n  if (differs.length) {\n    parts.push(`✏️ *قيم مختلفة* (${differs.length})`);\n    parts.push(...differs.slice(0, MAX_LINES).map(\n      r => `• صف ${r.sheet_row} ${show(r.sheet_guest || r.db_guest)} — ${diffs(r)}`));\n  }\n  if (rows.length > MAX_LINES) {\n    // esc() this too: the view name contains an underscore, which Telegram reads\n    // as the start of an italic run and then rejects the whole message with a\n    // 400. Escaping only the dynamic values is not enough — the literals count.\n    parts.push('', `… وغيرها. الفروق كاملة في ${esc('reconcile_bookings')}.`);\n  }\n  text = parts.join('\\n').trim();\n}\n\nreturn [{ json: { chat_id: CHAT_ID, text, parse_mode: 'Markdown' } }];\n"
-      },
-      "position": [
-        480,
-        1040
-      ],
-      "id": "build-reconcile-message"
-    },
-    {
-      "name": "Write Snapshot",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "={{ $json.sql }}",
-        "options": {}
-      },
-      "position": [
-        0,
-        1040
-      ],
-      "onError": "continueRegularOutput",
-      "alwaysOutputData": true,
-      "id": "write-snapshot"
-    },
-    {
-      "name": "Read Discrepancies",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "select * from reconcile_bookings order by sheet_row;",
-        "options": {}
-      },
-      "position": [
-        240,
-        1040
-      ],
-      "onError": "continueRegularOutput",
-      "alwaysOutputData": true,
-      "id": "read-discrepancies"
-    },
-    {
-      "name": "Read Unmirrored Bookings",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
-      "parameters": {
-        "operation": "executeQuery",
-        "options": {},
-        "query": "-- Bookings the database has and the spreadsheet does not.\n--\n-- Everything the web UI creates lands here: it writes Postgres directly, so\n-- until something appends a row the booking is invisible to the sheet, to the\n-- 1,606 formulas in the other nine tabs, and to the daily report.\n--\n-- Column names are the sheet's own headers, so the Google Sheets node maps them\n-- by name; `booking_id` carries the id through for the update that follows and\n-- matches no header, so it is ignored on the way in.\n--\n-- `mirrored_at is null` is the guard against appending the same booking every\n-- morning. `mirrored_at` is the marker rather than sheet_row because it is what\n-- makes the query idempotent — a booking already published must not be picked\n-- up again tomorrow. The row itself IS computed here (see row_number below) and\n-- written back by `Mark Mirrored`; the older note saying otherwise described an\n-- append this branch stopped doing.\n--\n-- Formulas use INDIRECT(\"I\"&ROW()) rather than the I{row} the bot writes, for\n-- the same reason: nothing here knows the row number yet, and ROW() does.\nselect\n  b.id                                             as booking_id,\n  -- The row to write, computed here rather than appended.\n  --\n  -- Google's append writes a FULL-WIDTH row, blanking every column the mapping\n  -- does not mention — which would wipe the per-row formulas in N نسبة البرنامج,\n  -- P المتبقي, R تاريخ الإدخال and S صافي الدخل on the row it lands on. (K\n  -- survives an append because it is an array formula; the others are not.)\n  -- Updating a known row touches only the mapped columns, which is why the\n  -- bot's own booking writes have never damaged them.\n  --\n  -- The last row is taken across ALL THREE tables that remember one, not from\n  -- `bookings` alone. A continuation line's row lives in `booking_lines`, so a\n  -- booking on row 96 with its انستاباي line on 97 made `max(bookings)` answer\n  -- 96 — and the next mirrored booking would have been written straight over\n  -- row 97, which is somebody's money.\n  --\n  -- This is still the DATABASE's belief about the sheet, not the sheet's own\n  -- last row: a row typed by hand below everything the database knows is\n  -- invisible here. `reindex.py --apply` adopts such a row and is what makes\n  -- the two agree again; run it before trusting this branch after any hand\n  -- editing. The bot's own append asks the sheet directly, which is the\n  -- stronger answer and the one to move to if this ever writes over a row\n  -- again.\n  (select coalesce(max(r.sheet_row), 1) from (\n     select sheet_row from bookings\n     union all select sheet_row from payments\n     union all select sheet_row from booking_lines\n   ) r)\n    + row_number() over (order by b.id)            as row_number,\n  coalesce(nullif(b.booking_ref, ''), '')          as \"بوكنج ID\",\n  case when b.guest_ref is null or b.guest_ref = '' then ''\n       else '''' || b.guest_ref end                as \"ID\",\n  coalesce(b.guest_name, '')                       as \"اسم المقيم\",\n  coalesce(b.booking_type, '')                     as \"نوع الحجز\",\n  case when b.phone is null or b.phone = '' then ''\n       else '''' || b.phone end                    as \"رقم الهاتف\",\n  coalesce(b.apartment_name, '')                   as \"اسم الشقة\",\n  coalesce(b.room_number, '')                      as \"رقم الغرفة\",\n  case when b.open_ended then '=TODAY()-INDIRECT(\"J\"&ROW())'\n       else coalesce(b.nights::text, '') end       as \"عدد الليالي\",\n  coalesce(to_char(b.arrival, 'YYYY-MM-DD'), '')   as \"تاريخ البداية\",\n  case when b.open_ended and b.nightly_rate is not null\n         then '=' || trim(to_char(b.nightly_rate, 'FM999999999.##'))\n              || '*INDIRECT(\"I\"&ROW())'\n       else coalesce(trim(to_char(b.total, 'FM999999999.##')), '') end\n                                                   as \"اجمالي سعر الحجز\",\n  coalesce(trim(to_char(b.paid, 'FM999999999.##')), '') as \"اجمالي ما تم دفعه\",\n  coalesce(b.payment_method, '')                   as \"طريقة الدفع\",\n  coalesce(b.notes, '')                            as \"ملاحظات\",\n  b.id::text                                       as \"معرف النظام\"\nfrom bookings b\nwhere b.sheet_row is null\n  and b.mirrored_at is null\n  and b.cancelled_at is null\n  -- The sheet has one paid cell, and \"650 EGP + 40 USD\" is not a number that\n  -- fits in it. Left for a human, listed by mixed_currency_bookings.\n  and not exists (\n    select 1 from payments p\n    where p.booking_id = b.id\n    group by p.booking_id having count(distinct p.currency) > 1\n  )\norder by b.id;\n"
-      },
-      "position": [
-        720,
-        1200
-      ],
-      "id": "read-unmirrored-bookings",
-      "onError": "continueRegularOutput"
-    },
-    {
-      "name": "Append Mirror Row",
-      "type": "n8n-nodes-base.googleSheets",
-      "typeVersion": 4.7,
-      "parameters": {
-        "operation": "update",
-        "documentId": {
-          "__rl": true,
-          "mode": "id",
-          "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
-        },
-        "sheetName": {
-          "__rl": true,
-          "mode": "name",
-          "value": "إدخال الحجوزات"
-        },
-        "columns": {
-          "mappingMode": "autoMapInputData",
-          "matchingColumns": [
-            "row_number"
-          ],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": true
-        },
-        "options": {}
-      },
-      "position": [
-        960,
-        1200
-      ],
-      "id": "append-mirror-row",
-      "onError": "continueRegularOutput"
-    },
-    {
-      "name": "Mark Mirrored",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
-      "parameters": {
-        "operation": "executeQuery",
-        "options": {},
-        "query": "update bookings set mirrored_at = now(), sheet_row = {{ $json.row_number }} where id = {{ $json.booking_id }};"
-      },
-      "position": [
-        1200,
-        1200
-      ],
-      "id": "mark-mirrored",
-      "onError": "continueRegularOutput"
-    },
-    {
       "name": "Receipt Is Document?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
@@ -2120,6 +2136,106 @@
       ],
       "id": "post-receipt-file-to-group",
       "onError": "continueRegularOutput"
+    },
+    {
+      "name": "Fetch Report Locations",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent('الإتاحة' + '!A2:B2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "UNFORMATTED_VALUE"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "position": [
+        -960,
+        960
+      ],
+      "id": "fetch-report-locations",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500
+    },
+    {
+      "name": "Read Report Locations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "jsCode": "/**\n * The apartment / room registry, from the الإتاحة tab (A2:B).\n *\n * One body for the three nodes that need it — \"Read Locations\" (the Telegram\n * branch), \"Read Report Locations\" and \"Read Availability Locations\" — because it\n * reads only its direct input: the values.get response of the HTTP node in front.\n *\n * Row 2 of the tab is the header (الشقة / الغرفة) and row 3 holds a date label with\n * no room; neither is a room. Rooms keep the tab's order, which is already grouped\n * by apartment and ascending. brain.js's locationRegistry() and build_reports.js\n * read الشقة / الغرفة as text, exactly as they read the SQL this replaced.\n */\nconst resp = $input.first().json;\nconst values = resp && Array.isArray(resp.values) ? resp.values : [];\nconst cell = (v) => (v === undefined || v === null ? '' : String(v).trim());\nconst out = [];\nfor (const r of values) {\n  const apartment = cell(r[0]);\n  const room = cell(r[1]);\n  if (!apartment || !room || apartment === 'الشقة') continue;\n  out.push({ json: { 'الشقة': apartment, 'الغرفة': room } });\n}\nreturn out;\n"
+      },
+      "position": [
+        -840,
+        960
+      ],
+      "id": "read-report-locations",
+      "alwaysOutputData": true
+    },
+    {
+      "name": "Fetch Availability Locations",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent('الإتاحة' + '!A2:B2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "UNFORMATTED_VALUE"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "position": [
+        1560,
+        1240
+      ],
+      "id": "fetch-availability-locations",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500
+    },
+    {
+      "name": "Read Availability Locations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "jsCode": "/**\n * The apartment / room registry, from the الإتاحة tab (A2:B).\n *\n * One body for the three nodes that need it — \"Read Locations\" (the Telegram\n * branch), \"Read Report Locations\" and \"Read Availability Locations\" — because it\n * reads only its direct input: the values.get response of the HTTP node in front.\n *\n * Row 2 of the tab is the header (الشقة / الغرفة) and row 3 holds a date label with\n * no room; neither is a room. Rooms keep the tab's order, which is already grouped\n * by apartment and ascending. brain.js's locationRegistry() and build_reports.js\n * read الشقة / الغرفة as text, exactly as they read the SQL this replaced.\n */\nconst resp = $input.first().json;\nconst values = resp && Array.isArray(resp.values) ? resp.values : [];\nconst cell = (v) => (v === undefined || v === null ? '' : String(v).trim());\nconst out = [];\nfor (const r of values) {\n  const apartment = cell(r[0]);\n  const room = cell(r[1]);\n  if (!apartment || !room || apartment === 'الشقة') continue;\n  out.push({ json: { 'الشقة': apartment, 'الغرفة': room } });\n}\nreturn out;\n"
+      },
+      "position": [
+        1680,
+        1240
+      ],
+      "id": "read-availability-locations",
+      "alwaysOutputData": true
     }
   ],
   "connections": {
@@ -2160,7 +2276,7 @@
       "main": [
         [
           {
-            "node": "Read Bookings For Edit",
+            "node": "Fetch Bookings Formulas",
             "type": "main",
             "index": 0
           }
@@ -2168,6 +2284,28 @@
         [
           {
             "node": "Needs Locations?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Bookings Formulas": {
+      "main": [
+        [
+          {
+            "node": "Fetch Bookings Values",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Bookings Values": {
+      "main": [
+        [
+          {
+            "node": "Read Bookings For Edit",
             "type": "main",
             "index": 0
           }
@@ -2189,7 +2327,7 @@
       "main": [
         [
           {
-            "node": "Read Locations",
+            "node": "Fetch Locations",
             "type": "main",
             "index": 0
           }
@@ -2197,6 +2335,17 @@
         [
           {
             "node": "Needs Booking ID?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Locations": {
+      "main": [
+        [
+          {
+            "node": "Read Locations",
             "type": "main",
             "index": 0
           }
@@ -2218,7 +2367,7 @@
       "main": [
         [
           {
-            "node": "Read Next Booking ID",
+            "node": "Fetch Booking Ids",
             "type": "main",
             "index": 0
           }
@@ -2226,6 +2375,17 @@
         [
           {
             "node": "Needs Expense Number?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Booking Ids": {
+      "main": [
+        [
+          {
+            "node": "Read Next Booking ID",
             "type": "main",
             "index": 0
           }
@@ -2678,11 +2838,6 @@
             "node": "Should Format Row?",
             "type": "main",
             "index": 0
-          },
-          {
-            "node": "Build Shadow Write",
-            "type": "main",
-            "index": 0
           }
         ]
       ]
@@ -2709,28 +2864,6 @@
         ]
       ]
     },
-    "Report Config": {
-      "main": [
-        [
-          {
-            "node": "Read Report Locations",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Read Report Locations": {
-      "main": [
-        [
-          {
-            "node": "Read Report Formulas",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Read Report Formulas": {
       "main": [
         [
@@ -2747,11 +2880,6 @@
         [
           {
             "node": "Build Reports",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Build Snapshot SQL",
             "type": "main",
             "index": 0
           }
@@ -2774,28 +2902,6 @@
         [
           {
             "node": "Availability Config",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Availability Config": {
-      "main": [
-        [
-          {
-            "node": "Read Availability Locations",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Read Availability Locations": {
-      "main": [
-        [
-          {
-            "node": "Read Availability Formulas",
             "type": "main",
             "index": 0
           }
@@ -2835,105 +2941,6 @@
         ]
       ]
     },
-    "Build Shadow Write": {
-      "main": [
-        [
-          {
-            "node": "Shadow Write",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Shadow Write": {
-      "main": [
-        [
-          {
-            "node": "Read Booking Id",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Read Booking Id": {
-      "main": [
-        [
-          {
-            "node": "Write Booking Id",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Snapshot SQL": {
-      "main": [
-        [
-          {
-            "node": "Write Snapshot",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Write Snapshot": {
-      "main": [
-        [
-          {
-            "node": "Read Discrepancies",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Read Discrepancies": {
-      "main": [
-        [
-          {
-            "node": "Build Reconcile Message",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Reconcile Message": {
-      "main": [
-        [
-          {
-            "node": "Read Unmirrored Bookings",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Read Unmirrored Bookings": {
-      "main": [
-        [
-          {
-            "node": "Append Mirror Row",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Append Mirror Row": {
-      "main": [
-        [
-          {
-            "node": "Mark Mirrored",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Receipt Is Document?": {
       "main": [
         [
@@ -2946,6 +2953,72 @@
         [
           {
             "node": "Post Receipt To Group",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch Report Locations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Report Locations": {
+      "main": [
+        [
+          {
+            "node": "Read Report Locations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Report Locations": {
+      "main": [
+        [
+          {
+            "node": "Read Report Formulas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Availability Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch Availability Locations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Availability Locations": {
+      "main": [
+        [
+          {
+            "node": "Read Availability Locations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Availability Locations": {
+      "main": [
+        [
+          {
+            "node": "Read Availability Formulas",
             "type": "main",
             "index": 0
           }

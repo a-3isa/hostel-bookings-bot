@@ -264,7 +264,7 @@ def ai_model_params():
             "options": {"maxTokensToSample": 300}}
 
 
-def values_get(tab_expr, rng, render="UNFORMATTED_VALUE"):
+def values_get(tab_expr, rng, render="UNFORMATTED_VALUE", literal=False):
     """Read a range through the Sheets API itself, not through the Sheets node.
 
     Where the next row goes is arithmetic on the sheet's own row numbers, and
@@ -279,14 +279,17 @@ def values_get(tab_expr, rng, render="UNFORMATTED_VALUE"):
     the last occupied row and the next row is one below. That is what the Python
     bot did before any of this, and it never landed on an occupied row.
     """
+    # The tab name is Arabic with spaces, so it has to be encoded, and it comes from
+    # Config rather than being frozen here — the same value the writer uses, so the
+    # two cannot drift onto different tabs. `literal` names the tab outright instead,
+    # for the scheduled-report and availability-report chains: they never run
+    # `Config` (they have their own), and `$('Config')` there is "hasn't been
+    # executed".
+    tab = f"'{tab_expr}'" if literal else f"$('Config').first().json.{tab_expr}"
     return {
         "method": "GET",
-        # The tab name is Arabic with spaces, so it has to be encoded, and it
-        # comes from Config rather than being frozen here — the same value the
-        # writer uses, so the two cannot drift onto different tabs.
         "url": "=https://sheets.googleapis.com/v4/spreadsheets/"
-               f"{SHEET_ID}/values/{{{{ encodeURIComponent($('Config').first()"
-               f".json.{tab_expr} + '!{rng}') }}}}",
+               f"{SHEET_ID}/values/{{{{ encodeURIComponent({tab} + '!{rng}') }}}}",
         # setNodeCredential refuses this credential type on an HTTP node, but an
         # addNode that carries `credentials` inline binds it (proved 2026-10-12, plan
         # Task 1) — which is how deploy_graph.py adds these nodes.
@@ -363,8 +366,8 @@ FETCH_SETTINGS = dict(onError="continueRegularOutput", retryOnFail=True, maxTrie
 LOOKUP_CODE_SETTINGS = dict(alwaysOutputData=True)
 
 
-def fetch_params(tab_expr, rng, render="UNFORMATTED_VALUE"):
-    p = values_get(tab_expr, rng, render)
+def fetch_params(tab_expr, rng, render="UNFORMATTED_VALUE", literal=False):
+    p = values_get(tab_expr, rng, render, literal)
     p["options"] = {"timeout": 15000}
     return p
 
@@ -436,11 +439,12 @@ def lookup_node_specs():
         "Fetch Booking Ids": (http, 4.2, fetch_params("BOOKINGS_TAB", "B1:B2000"), once, SHEETS_CRED),
         "Read Next Booking ID": (code, 2, {"jsCode": read_source("compute_next_booking_id.js")},
                                  dict(LOOKUP_CODE_SETTINGS), None),
-        "Fetch Report Locations": (http, 4.2, fetch_params("AVAILABILITY_TAB", "A2:B2000"),
+        "Fetch Report Locations": (http, 4.2, fetch_params(AVAILABILITY_TAB, "A2:B2000", literal=True),
                                    dict(FETCH_SETTINGS), SHEETS_CRED),
         "Read Report Locations": (code, 2, {"jsCode": read_source("build_locations.js")},
                                   dict(LOOKUP_CODE_SETTINGS), None),
-        "Fetch Availability Locations": (http, 4.2, fetch_params("AVAILABILITY_TAB", "A2:B2000"),
+        "Fetch Availability Locations": (http, 4.2,
+                                         fetch_params(AVAILABILITY_TAB, "A2:B2000", literal=True),
                                          dict(FETCH_SETTINGS), SHEETS_CRED),
         "Read Availability Locations": (code, 2, {"jsCode": read_source("build_locations.js")},
                                         dict(LOOKUP_CODE_SETTINGS), None),
