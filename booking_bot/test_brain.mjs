@@ -2361,7 +2361,9 @@ check('extending into the next guest\'s arrival is flagged',
 aiOpen();
 r = aiSay('booking 31 extend 1', { output: { booking_id: '31', stay: { kind: 'extend', nights: 1 } } });
 check('a stay that ends before the next guest arrives is not flagged', !r.reply.text.includes('تعارض'), r.reply.text);
-check('the booking does not clash with itself', !r.reply.text.includes('Hana Ali'), r.reply.text);
+// A clash list line starts with 🛏️ (conflict_line). The card also names the matched guest
+// now, so the guest's name alone no longer means "listed as a clash".
+check('the booking does not clash with itself', !r.reply.text.includes('🛏️'), r.reply.text);
 aiOpen();
 aiSay('booking 31 to انبي 2 room 3 and paid 200 instapay', { output: { booking_id: '31',
   room: { apartment: 'انبي 2', room: '3' }, payment: { amount: 200, method: 'instapay' } } });
@@ -2421,6 +2423,37 @@ run(msg('/start')); run(cb('choice_edit')); r = run(msg('31'));
 check('the manual edit menu still opens', r.reply.text === '✏️ اختر ما تريد تعديله:', r.reply.text);
 r = run(cb('ef_done'));
 check('and finishing with no changes still posts nothing', r.hasSave === false, r.hasSave);
+
+// ── Review fixes (final whole-branch review) ─────────────────────────────────
+
+section('ai edit: the card names the booking it matched');
+aiOpen();
+r = aiSay('حجز 31 دفع 100 كاش', { output: { booking_id: '31', payment: { amount: 100, method: 'cash' } } });
+check('the card names the guest and the id, so a misread id is visible',
+  r.reply.text.includes('Hana Ali') && r.reply.text.includes('ID 31'), r.reply.text);
+check('and the apartment, room and arrival',
+  r.reply.text.includes('انبي 2 / 1') && r.reply.text.includes('2026-10-01'), r.reply.text);
+check('between the echo and the changes',
+  r.reply.text.indexOf('🤖 فهمت') < r.reply.text.indexOf('Hana Ali') &&
+  r.reply.text.indexOf('Hana Ali') < r.reply.text.indexOf('📋 *مراجعة التعديل:*'), r.reply.text);
+check('an ordinary booking carries no cancelled warning', !r.reply.text.includes('ملغي'), r.reply.text);
+const AI_CANCELLED = [{ ...AI_SHEET[0], 'ID': '36', 'اسم المقيم': 'Nour Fathy', 'ملاحظات': 'ملغي', booking_id: 47 }];
+aiOpen(USER, AI_CANCELLED);
+r = aiSay('booking 36 paid 100 cash', { output: { booking_id: '36', payment: { amount: 100, method: 'cash' } } });
+check('a cancelled booking is named and flagged on the card',
+  r.reply.text.includes('Nour Fathy') && r.reply.text.includes('⚠️ هذا الحجز ملغي'), r.reply.text);
+check('and the manual flow\'s card is unchanged (no AI lines)',
+  (() => { manualPay('31', 300, 'xpay_cash'); const x = run(cb('xleft_no')); return !x.reply.text.includes('Hana Ali'); })());
+
+section('ai edit: a /command that is not /start or /cancel is not an outage');   // Review Focus 3
+aiOpen();
+r = run(msg('/help'));
+check('it re-shows the prompt rather than claiming the AI is down',
+  r.reply.text.startsWith('🤖 اكتب التعديل المطلوب'), r.reply.text);
+check('and keeps the session in AI_TEXT', r.sessionState === 'AI_TEXT', r.sessionState);
+r = run(msg('/start '));                              // trailing space: not the /start command
+check('the same for a /start with trailing junk', r.reply.text.startsWith('🤖 اكتب التعديل المطلوب') ||
+  r.reply.text === 'اختر العملية:', r.reply.text);
 
 // ─── Result ───────────────────────────────────────────────────────────────────
 

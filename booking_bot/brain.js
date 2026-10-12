@@ -397,6 +397,10 @@ const S = {
   ai_room_unknown:
     '🏠 لم أتعرف على هذه الشقة أو الغرفة. الشقق المتاحة: {list}\nاكتب الطلب مرة أخرى:',
   ai_echo: '🤖 فهمت: «{request}»',
+  // Which booking the model's id matched. The admin typed text, not an id they
+  // walked a menu to, so the card is the only place a misread id can be caught.
+  ai_booking_line: '👤 {name} — ID {private_id}\n🏠 {apartment} / {room} — {arrival}',
+  ai_cancelled_line: '⚠️ هذا الحجز ملغي',
   paid_ask_id: '🔎 أدخل الـ ID الخاص بالحجز:',
   paid_ask_amount: '💵 أدخل المبلغ المدفوع:\n{status}',
   // What the booking has been paid across ALL its rows, not just its own one —
@@ -1706,12 +1710,34 @@ function afterEditStep(dd) {
   showEditMenu(dd);
 }
 
+/**
+ * The booking an AI request landed on, as it is BEFORE the change: guest, id,
+ * room and arrival, plus a flag if it is a cancelled booking. Same fields as
+ * the add-payment review card shows.
+ */
+function aiBookingLines(dd) {
+  const o = dd.editOrig || {};
+  const cell = (v) => (v === undefined || v === null || v === '' ? t('empty') : mdEscape(v));
+  const lines = [t('ai_booking_line', {
+    name: cell(dd.editName),
+    private_id: cell(dd.editPrivateId),
+    apartment: cell(o['اسم الشقة']),
+    room: cell(o['رقم الغرفة']),
+    arrival: cell(o['تاريخ البداية']),
+  })];
+  if (String(o['ملاحظات'] || '').indexOf(t('del_note')) !== -1) lines.push(t('ai_cancelled_line'));
+  return lines.join('\n');
+}
+
 /** Final review of everything this edit session changed, before it is written. */
 function showEditConfirm(dd) {
   const warn = overpayNote(dd);
-  // The AI edit echoes what it was asked and warns about clashes (computed on the
-  // turn that had the bookings loaded). Both are empty for the manual flow.
-  const echo = dd.aiMode ? t('ai_echo', { request: mdEscape(dd.aiText || '') }) + '\n\n' : '';
+  // The AI edit echoes what it was asked, names the booking it matched, and warns
+  // about clashes (computed on the turn that had the bookings loaded). All empty
+  // for the manual flow.
+  const echo = dd.aiMode
+    ? t('ai_echo', { request: mdEscape(dd.aiText || '') }) + '\n' + aiBookingLines(dd) + '\n\n'
+    : '';
   const clash = dd.aiMode && dd.aiClashes ? '\n\n' + dd.aiClashes : '';
   reply(echo + t('edit_confirm_summary', { changes: changeLines(dd) })
     + (warn ? '\n\n' + warn : '') + clash, {
@@ -2566,6 +2592,10 @@ switch (state) {
     if (cq) break;
     if (!isAdmin) { endSession(); break; }
     if (!text) break;                       // a photo or a file: nothing to read
+    // The gate keeps /commands away from the model, so the node never ran for
+    // this one. /start and /cancel were answered above; any other command is not
+    // an outage, it is just not a request.
+    if (text.startsWith('/')) { reply(t('ai_ask')); break; }
     let item = null;
     try { item = $('AI Extract').first().json; } catch (e) { item = null; }
     const got = readAiIntent(item);
