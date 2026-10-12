@@ -660,9 +660,8 @@ def main():
     # updates group"). It goes to REPORT_GROUP_CHAT_ID, which is the group the
     # schedule branch has always been configured for.
     #
-    # Only THIS wire is restored. The reconcile's wire into the same node stays
-    # cut (below): nobody asked for that one back, and it is the one that used
-    # to arrive unasked every morning whether or not there was a disagreement.
+    # (A reconcile message used to share this node and arrived unasked every
+    # morning; that branch is gone with the database.)
     #
     # This does NOT touch the per-booking announcements. Those go to
     # GROUP_CHAT_ID / EXPENSE_GROUP_CHAT_ID through `Post To Group`, are a
@@ -678,10 +677,9 @@ def main():
     # does, with the same code, and posts it to the same group.
     #
     # It has its own twins of the schedule's reads rather than wiring into
-    # Report Config, because Read Report Values also feeds the snapshot and the
-    # mirror append — a tap would have run the morning's real work as a side
-    # effect. build_reports.js tells the two chains apart by which Config ran,
-    # and sends only the availability report from this one.
+    # Report Config, so a tap does not also run the morning's schedule. And
+    # build_reports.js tells the two chains apart by which Config ran, and sends
+    # only the availability report from this one.
     if "Wants Availability?" not in have:
         add_node("Wants Availability?", "n8n-nodes-base.if", 2.3,
                  {"conditions": bw.flag_condition("={{ $json.hasAvailability }}",

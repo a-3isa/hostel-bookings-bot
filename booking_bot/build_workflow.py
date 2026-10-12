@@ -30,7 +30,7 @@ importing, three things are needed and none of them can come from this file:
 
 Then, in this order:
 
-    python booking_bot/deploy_graph.py --publish   # the reports/shadow/mirror branch
+    python booking_bot/deploy_graph.py --publish   # the reports + availability branches
     python booking_bot/push_brain.py   --publish   # brain.js + the Config lists
 
 `deploy_graph.py` adds the twenty nodes it owns on top of this base and expects
@@ -1014,10 +1014,10 @@ def build():
     # body — savedBody / savedNoGroupBody — the same way it emits `reply`.
     # `continueRegularOutput` on both, and this is not cosmetic: everything that
     # makes the save DURABLE hangs off Send Saved. The chain is
-    # Write * Row -> Has Group? -> Send Saved -> Clear Session -> Build Shadow
-    # Write -> Shadow Write, so one failed Telegram call — a 429, a transient
-    # network error — used to stop the execution with the row already on the
-    # sheet and NOTHING in Postgres, and the session still open on CONFIRM.
+    # Write * Row -> Has Group? -> Send Saved -> Clear Session (and, then, the
+    # database write), so one failed Telegram call — a 429, a transient network
+    # error — used to stop the execution with the row already on the sheet and
+    # the session still open on CONFIRM.
     # Sixty seconds later the Save button worked again and the booking flow
     # appended a SECOND row, with a fresh `new:<guest>:<now>` client_ref that
     # cannot converge with the first.
@@ -1087,10 +1087,10 @@ def build():
     # either of these runs, so a failure here can no longer take any of that with
     # it. That is the point of posting to the group last.
     #
-    # onError stays all the same. These are the end of the branch now, but the
-    # Postgres mirror hangs off Clear Session, and an execution that dies here
-    # would still be recorded as failed — which is a false alarm about a save
-    # that succeeded, and the kind of thing that gets a working bot restarted.
+    # onError stays all the same. These are the end of the branch, and an
+    # execution that dies here would still be recorded as failed — which is a false
+    # alarm about a save that succeeded, and the kind of thing that gets a working
+    # bot restarted.
     #
     # Observed on 2026-08-15 with a receipt photo: sendPhoto was sent no photo,
     # Telegram refused it, and the whole turn died at the last step with the
