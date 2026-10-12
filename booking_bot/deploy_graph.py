@@ -81,10 +81,11 @@ OFFLINE_IN = os.path.join(HERE, "bookings-bot.workflow.json")
 OFFLINE_OUT = os.path.join(HERE, "bookings-bot.full.workflow.json")
 
 # States whose turn draws an apartment keyboard, and so needs the registry.
-LOCATION_STATES = ["PHONE", "EXP_AMOUNT", "EDIT_MENU"]
+LOCATION_STATES = ["PHONE", "EXP_AMOUNT", "EDIT_MENU", "AI_TEXT", "AI_PICK"]
 # States whose turn needs the bookings tab: the two lookup steps, plus NOTES —
 # the turn that builds the confirmation, where the availability check runs.
-BOOKING_STATES = ["EDIT_FIND", "EDIT_PICK", "NOTES"]
+# AI_TEXT / AI_PICK are the AI edit's lookup turns.
+BOOKING_STATES = ["EDIT_FIND", "EDIT_PICK", "NOTES", "AI_TEXT", "AI_PICK"]
 
 
 def state_conditions(states):
@@ -139,18 +140,20 @@ def apply_offline(wf, ops):
             wf["nodes"].append(node)
             nodes[node["name"]] = node
         elif kind == "removeConnection":
-            branches = conns.get(op["source"], {}).get("main", [])
+            ctype = op.get("connectionType", "main")
+            branches = conns.get(op["source"], {}).get(ctype, [])
             i = op["sourceIndex"]
             if i < len(branches):
                 branches[i] = [c for c in branches[i] if c["node"] != op["target"]]
         elif kind == "addConnection":
-            main = conns.setdefault(op["source"], {}).setdefault("main", [])
-            while len(main) <= op["sourceIndex"]:
-                main.append([])
-            wired = {c["node"] for c in main[op["sourceIndex"]]}
+            ctype = op.get("connectionType", "main")
+            group = conns.setdefault(op["source"], {}).setdefault(ctype, [])
+            while len(group) <= op["sourceIndex"]:
+                group.append([])
+            wired = {c["node"] for c in group[op["sourceIndex"]]}
             if op["target"] not in wired:
-                main[op["sourceIndex"]].append({"node": op["target"], "type": "main",
-                                                "index": op.get("targetIndex", 0)})
+                group[op["sourceIndex"]].append({"node": op["target"], "type": ctype,
+                                                 "index": op.get("targetIndex", 0)})
         elif kind == "updateNodeParameters":
             nodes[op["nodeName"]]["parameters"].update(op["parameters"])
         elif kind == "setNodeSettings":
@@ -158,6 +161,75 @@ def apply_offline(wf, ops):
         else:
             raise SystemExit(f"--offline cannot apply {kind!r}")
     return wf
+
+
+def ai_branch_ops(have, conns, anthropic):
+    """Operations that add the AI edit: a gate and an extractor in front of the
+    Brain, and the chat model plugged into the extractor.
+
+    Idempotent against `have` (live node names) and `conns` (live connections).
+    Returns (ops, bindings); a binding is (node, credential key, id, name) and is
+    applied after its node exists.
+
+    With no Anthropic credential on the instance the branch is skipped: wiring the
+    Brain through an extractor that cannot authenticate would make the bot look
+    dead, whereas without the nodes the Brain answers "unavailable" by itself.
+    """
+    ops, bindings = [], []
+    if anthropic is None:
+        print("  ! AI edit skipped — no Anthropic credential on the instance."
+              " Create one in n8n (Credentials -> Anthropic) and run this again.")
+        return ops, bindings
+
+    def link(src, tgt, index=0, kind="main"):
+        existing = [c["node"] for br in conns.get(src, {}).get(kind, [])[index:index + 1]
+                    for c in br]
+        if tgt in existing:
+            return
+        op = {"type": "addConnection", "source": src, "target": tgt,
+              "sourceIndex": index, "targetIndex": 0}
+        if kind != "main":
+            op["connectionType"] = kind
+        ops.append(op)
+
+    def unlink(src, tgt, index=0):
+        branches = conns.get(src, {}).get("main", [])
+        if index < len(branches) and any(c["node"] == tgt for c in branches[index]):
+            ops.append({"type": "removeConnection", "source": src, "target": tgt,
+                        "sourceIndex": index, "targetIndex": 0})
+
+    specs = (
+        ("Needs AI?", "n8n-nodes-base.if", 2.3, bw.needs_ai_params(), [800, 640]),
+        ("AI Extract", "@n8n/n8n-nodes-langchain.informationExtractor", 1.2,
+         bw.ai_extract_params(), [1040, 640]),
+        ("Anthropic Chat Model", "@n8n/n8n-nodes-langchain.lmChatAnthropic", 1.6,
+         bw.ai_model_params(), [1040, 820]),
+    )
+    for name, ntype, tv, params, pos in specs:
+        if name in have:
+            ops.append({"type": "updateNodeParameters", "nodeName": name, "parameters": params})
+            print(f"  ~ {name}")
+            continue
+        ops.append({"type": "addNode", "node": {
+            "name": name, "type": ntype, "typeVersion": tv, "parameters": params,
+            "position": pos}})
+        print(f"  + {name}")
+        if name == "Anthropic Chat Model":
+            bindings.append((name, "anthropicApi", anthropic["id"], anthropic["name"]))
+    # addNode does not carry node-level settings, so pin them separately.
+    ops.append({"type": "setNodeSettings", "nodeName": "AI Extract",
+                "settings": dict(bw.AI_EXTRACT_SETTINGS)})
+
+    # Both ways into the Brain used to come straight from the expense-number gate.
+    unlink("Needs Expense Number?", "Brain", 1)
+    unlink("Read Expense Numbers", "Brain")
+    link("Needs Expense Number?", "Needs AI?", 1)
+    link("Read Expense Numbers", "Needs AI?")
+    link("Needs AI?", "AI Extract", 0)
+    link("Needs AI?", "Brain", 1)
+    link("AI Extract", "Brain")
+    link("Anthropic Chat Model", "AI Extract", kind="ai_languageModel")
+    return ops, bindings
 
 
 def main():
@@ -173,6 +245,7 @@ def main():
         # and inventing an id here would produce a node that silently fails to
         # authenticate rather than one n8n asks you to fix.
         pg = {"id": None, "name": "Supabase Postgres"}
+        anthropic = {"id": None, "name": "Anthropic account"}
         print(f"offline: {os.path.basename(OFFLINE_IN)}, {len(wf['nodes'])} nodes")
     else:
         # Picks the credential that can reach this workflow, not merely one that
@@ -183,9 +256,9 @@ def main():
                                      {"workflowId": pb.WORKFLOW_ID}))["workflow"]
         # Fetched once and shared: since Phase 4b the two reads are Postgres
         # nodes too, not just the shadow write.
-        pg = next((c for c in json.loads(
-            pb.call_tool("list_credentials", {"limit": 100}))["data"]
-            if c["type"] == "postgres"), None)
+        live_creds = json.loads(pb.call_tool("list_credentials", {"limit": 100}))["data"]
+        pg = next((c for c in live_creds if c["type"] == "postgres"), None)
+        anthropic = next((c for c in live_creds if c["type"] == "anthropicApi"), None)
         print(f"live: {len(wf['nodes'])} nodes")
 
     # The Sheets credential the live graph already uses. SHEETS_CRED's id dates
@@ -254,6 +327,11 @@ def main():
     ops.append({"type": "updateNodeParameters", "nodeName": "Needs Bookings?",
                 "parameters": {"conditions": state_conditions(BOOKING_STATES)}})
     print("  ~ Needs Bookings? fires on", ", ".join(BOOKING_STATES))
+    # The registry gate was only ever created, never updated, so the states the AI
+    # edit added would not reach a live instance that already has it.
+    ops.append({"type": "updateNodeParameters", "nodeName": "Needs Locations?",
+                "parameters": {"conditions": state_conditions(LOCATION_STATES)}})
+    print("  ~ Needs Locations? fires on", ", ".join(LOCATION_STATES))
 
     # ── Apartment/room registry ───────────────────────────────────────────────
     if "Needs Locations?" not in have:
@@ -827,6 +905,20 @@ def main():
     connect("Has Receipt?", "Receipt Is Document?", index=0)
     connect("Receipt Is Document?", "Post Receipt File To Group", index=0)
     connect("Receipt Is Document?", "Post Receipt To Group", index=1)
+
+    # ── The AI edit (2026-10-12) ──────────────────────────────────────────────
+    #
+    # The two gates above already carry AI_TEXT and AI_PICK. This adds the
+    # extractor in front of the Brain and the chat model plugged into it. The
+    # credential has to exist first: it is created in the n8n UI, never from here.
+    ai_ops, ai_bindings = ai_branch_ops(have, conns, anthropic)
+    ops.extend(ai_ops)
+    for name, key, cid, cname in ai_bindings:
+        if offline:
+            offline_creds.append((name, key, cname))
+        else:
+            creds.append({"type": "setNodeCredential", "nodeName": name,
+                          "credentialKey": key, "credentialId": cid, "credentialName": cname})
 
     ops.extend(creds)          # credentials bind after their node exists
     if not ops:
