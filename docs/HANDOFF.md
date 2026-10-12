@@ -3,8 +3,9 @@
 ## 2026-10-12 — AI edit: type a change, review it, confirm it
 
 **LIVE since 2026-10-12, but not yet exercised by a real Telegram message.**
-Workflow `hzMYegbL3yifl7KN`, activeVersionId `f8bb6716-0489-494e-bed5-b93e2ff9c5d6`,
-72 nodes, live Brain byte-identical to `booking_bot/brain.js`, Anthropic credential
+Workflow `hzMYegbL3yifl7KN`, activeVersionId `2c426156-87d8-4d28-a48a-02f7e94a1f39`
+(first publish was `f8bb6716…`; republished the same day for the registry-gate fix
+below), 72 nodes, live Brain byte-identical to `booking_bot/brain.js`, Anthropic credential
 `dObKg3UcZAYjhPLY` bound to `Anthropic Chat Model` (`claude-haiku-5-5` is in its
 model list, so the key authenticates). What is left is the first real pass — see
 the end of this entry. Spec: `docs/superpowers/specs/2026-10-12-ai-booking-edit-design.md`,
@@ -39,6 +40,20 @@ prompt live in `booking_bot/ai_intent.py` and nowhere else.
   and the card.
 - With no Anthropic credential on the instance, `deploy_graph.py` skips the AI
   branch and the Brain answers "unavailable" to the button by itself.
+- **A gate that follows a lookup must read the session by name.** `Needs Locations?`
+  read `$json.state`, but on the AI turns the item in front of it is a booking row
+  with no `state`, so it said no, `Read Locations` never ran, and the extractor's
+  prompt threw "Node 'Read Locations' hasn't been executed" (first live message,
+  2026-10-12). The two state lists never overlapped before. It now uses
+  `$('Load Session').first().json.state` (`state_conditions(..., from_session=True)`),
+  and the prompt guards the apartment list with `.isExecuted`. A test pins both.
+- **"AI unavailable" can mean billing, not code.** Brain shows that message for any
+  failed model call. The reason is only in the execution: open `AI Extract` or the
+  `Anthropic Chat Model` sub-node's error. On 2026-10-12 it was HTTP 400 "Your
+  credit balance is too low" — the API account behind the n8n credential had no
+  credit (a Claude subscription does not include API credit). Listing models
+  (`explore_node_resources`) works without credit, so it does not prove the key can
+  be used.
 - Offline tests mock the model. `python booking_bot/eval_ai_intents.py` (needs
   `ANTHROPIC_API_KEY`) is the only check of how it reads real phrasing — add the
   phrases staff really type to `ai_eval_cases.json`.
