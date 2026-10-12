@@ -198,3 +198,74 @@ def test_a_node_nothing_reaches_is_still_an_orphan():
     wf["nodes"].append({"name": "Stray", "type": "n8n-nodes-base.set", "typeVersion": 3,
                         "position": [0, 0], "parameters": {}})
     assert any(p.startswith("orphan") and "Stray" in p for p in vw.check(wf))
+
+
+# ── Deploying the AI branch ──────────────────────────────────────────────────
+
+import re
+
+import deploy_graph as dg
+
+AI_NODES = {"Needs AI?", "AI Extract", "Anthropic Chat Model"}
+
+
+def strip_ai(wf):
+    """The graph as it was before the AI branch: what a live workflow looks like."""
+    wf = json.loads(json.dumps(wf))
+    wf["nodes"] = [n for n in wf["nodes"] if n["name"] not in AI_NODES]
+    conns = wf["connections"]
+    for name in AI_NODES:
+        conns.pop(name, None)
+    for spec in conns.values():
+        for branches in spec.values():
+            for br in branches:
+                br[:] = [l for l in br if l["node"] not in AI_NODES]
+    conns["Needs Expense Number?"]["main"][1].append({"node": "Brain", "type": "main", "index": 0})
+    conns["Read Expense Numbers"]["main"][0].append({"node": "Brain", "type": "main", "index": 0})
+    return wf
+
+
+def _deploy(wf, anthropic):
+    have = {n["name"] for n in wf["nodes"]}
+    return dg.ai_branch_ops(have, wf["connections"], anthropic)
+
+
+def test_deploying_gives_the_live_graph_the_same_branch_the_generator_builds():
+    built = bw.workflow(bw.build())
+    live = strip_ai(built)
+    ops, bindings = _deploy(live, {"id": None, "name": "Anthropic account"})
+    dg.apply_offline(live, ops)
+    got = {n["name"]: n for n in live["nodes"]}
+    want = {n["name"]: n for n in built["nodes"]}
+    for name in AI_NODES:
+        for field in ("type", "typeVersion", "parameters"):
+            assert got[name][field] == want[name][field], (name, field)
+    for key in ("alwaysOutputData", "onError", "retryOnFail", "maxTries"):
+        assert got["AI Extract"][key] == want["AI Extract"][key], key
+    for src in ("Needs Expense Number?", "Read Expense Numbers", "Needs AI?", "AI Extract",
+                "Anthropic Chat Model"):
+        assert live["connections"][src] == built["connections"][src], src
+    assert [b[0] for b in bindings] == ["Anthropic Chat Model"]
+    assert vw.check(live) == []
+
+
+def test_deploying_twice_changes_nothing_the_second_time():
+    built = bw.workflow(bw.build())
+    ops, _ = _deploy(built, {"id": None, "name": "Anthropic account"})
+    kinds = {o["type"] for o in ops}
+    assert "addNode" not in kinds and "addConnection" not in kinds and "removeConnection" not in kinds, kinds
+
+
+def test_without_an_anthropic_credential_nothing_is_wired_in():
+    """A bot wired to an extractor that cannot authenticate would look dead. The
+    Brain already answers "unavailable" when the node never runs."""
+    live = strip_ai(bw.workflow(bw.build()))
+    ops, bindings = _deploy(live, None)
+    assert ops == [] and bindings == []
+
+
+def test_both_scripts_gate_the_same_states():
+    src = open(os.path.join(os.path.dirname(dg.__file__), "deploy_graph.py"), encoding="utf-8").read()
+    for name in ("BOOKING_STATES", "LOCATION_STATES"):
+        literal = re.search(rf"^{name} = (\[.*?\])$", src, re.M).group(1)
+        assert json.loads(literal.replace("'", '"')) == getattr(bw, name), name
