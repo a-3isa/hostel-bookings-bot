@@ -158,7 +158,36 @@ check('so does a missing second fetch', (() => { const fn = new Function('$', sr
 rows = runLookup({ 36: R36 }, {});
 check('formulas present but no values: the formula read stands in', rows.length === 1 && rows[0]['اسم المقيم'] === 'تبع عمر البيه', rows);
 
-// ── The registry and the next ID are added by Task 3 ──────────────────────────
+function runInput(file, body) {
+  const fn = new Function('$input', '$', src(file));
+  return fn({ first: () => ({ json: body }) }, () => { throw new Error('no named reads'); }).map(i => i.json);
+}
+
+section('registry: the الإتاحة tab, A2:B');
+const REG = { values: [
+  ['الشقة', 'الغرفة'], ['التاريخ'],
+  ['ذاكر حسين', 1], ['ذاكر حسين', 2], ['انبي 2', 1], ['ابو حديد 11', 10], ['ابو حديد 11', 2], [], ['', 3], ['عبدالله العربي'],
+] };
+let reg = runInput('build_locations.js', REG);
+check('the header row and the date row are not rooms', !reg.some(r => r['الشقة'] === 'الشقة' || r['الشقة'] === 'التاريخ'), reg);
+check('rooms are strings, in the tab\'s order',
+  JSON.stringify(reg.map(r => [r['الشقة'], r['الغرفة']])) ===
+  JSON.stringify([['ذاكر حسين', '1'], ['ذاكر حسين', '2'], ['انبي 2', '1'], ['ابو حديد 11', '10'], ['ابو حديد 11', '2']]), reg);
+check('a row with no apartment or no room is dropped', reg.length === 5, reg.length);
+check('no values at all gives no rows', runInput('build_locations.js', { error: 'boom' }).length === 0);                // Review Focus 1
+check('a header-only tab gives no rows', runInput('build_locations.js', { values: [['الشقة', 'الغرفة']] }).length === 0);
+
+section('next booking id: the highest plain counter this month, plus one');
+const ids = (...v) => ({ values: [['ID'], ...v.map(x => [x])] });
+check('the highest plain number + 1', runInput('compute_next_booking_id.js', ids(1, 2, 44, 43))[0].next_booking_id === 45);
+check('text and number cells both count', runInput('compute_next_booking_id.js', ids('7', 8))[0].next_booking_id === 9);
+check('Arabic-Indic digits are folded', runInput('compute_next_booking_id.js', ids('٢٥', '٩'))[0].next_booking_id === 26);
+check('a carried-over "104**" never counts', runInput('compute_next_booking_id.js', ids(3, '104**', '19**'))[0].next_booking_id === 4);
+check('a passport-length number (> 6 digits) never counts', runInput('compute_next_booking_id.js', ids(3, '29876543210'))[0].next_booking_id === 4);
+check('a blank row and the header never count', runInput('compute_next_booking_id.js', ids('', 5, ' '))[0].next_booking_id === 6);
+check('an empty tab starts at 1', runInput('compute_next_booking_id.js', { values: [['ID']] })[0].next_booking_id === 1);
+check('a failed read starts at 1 rather than throwing', runInput('compute_next_booking_id.js', { error: 'x' })[0].next_booking_id === 1);
+check('cancelled bookings still spend their number (the ID cell is all that is read)', runInput('compute_next_booking_id.js', ids(1, 2, 3))[0].next_booking_id === 4);
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all checks passed'}`);
 process.exit(failures ? 1 : 0);
