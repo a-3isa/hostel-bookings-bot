@@ -1333,6 +1333,39 @@ function applyAiStay(stay) {
   return null;
 }
 
+/** A room change from the request, checked against the registry. */
+function applyAiRoom(room) {
+  const reg = locationRegistry();
+  const entry = reg.find(e => sameName(e.apartment, room.apartment));
+  if (!entry || entry.rooms.indexOf(room.room) === -1) {
+    return t('ai_room_unknown', { list: reg.map(e => e.apartment).join('، ') });
+  }
+  editSet(d, 'اسم الشقة', entry.apartment);
+  editSet(d, 'رقم الغرفة', Number(room.room));
+  return null;
+}
+
+/**
+ * The clash warning for the stay as it would be after this request, or ''.
+ * Must run on a turn whose state loaded the bookings (AI_TEXT / AI_PICK); the
+ * result is stored as text because the card may be drawn two turns later, after
+ * a receipt, when bookingRows() is empty. The booking itself is skipped by row.
+ */
+function aiClashText(dd) {
+  const o = dd.editOrig || {};
+  const eff = (col) => (dd.editNew && dd.editNew[col] !== undefined ? dd.editNew[col] : o[col]);
+  const arrival = String(eff('تاريخ البداية') || '').trim();
+  const rawNights = eff('عدد الليالي');
+  const open = String(rawNights === undefined || rawNights === null ? '' : rawNights)
+    .trim().startsWith('=');
+  const nights = parseNum(rawNights);
+  if (!validIsoDate(arrival) || (!open && nights === null)) return '';
+  const apartment = eff('اسم الشقة');
+  const room = eff('رقم الغرفة');
+  const clashes = findConflicts(apartment, room, arrival, Math.trunc(nights || 0), open, dd.editRow);
+  return clashes.length ? conflictBlock(apartment, room, clashes) : '';
+}
+
 /**
  * Apply a checked request to the booking at `hit` and draw the review card.
  *
@@ -1357,6 +1390,13 @@ function applyAiIntent(hit, intent) {
     const bad = applyAiStay(intent.stay);
     if (bad) { refuse(bad); return; }
   }
+
+  if (intent.room) {
+    const bad = applyAiRoom(intent.room);
+    if (bad) { refuse(bad); return; }
+  }
+  // Occupancy only changes with the room or the stay, so only then look.
+  if (intent.room || intent.stay) d.aiClashes = aiClashText(d);
 
   // A transfer needs its receipt, as in the manual flow (admins may skip it).
   if (intent.payment && RECEIPT_PAYMENT_KEYS.indexOf(intent.payment.key) !== -1) {

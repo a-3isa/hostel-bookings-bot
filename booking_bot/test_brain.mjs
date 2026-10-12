@@ -2324,6 +2324,54 @@ manualPay('31', 300, 'xpay_cash'); run(cb('xleft_yes')); run(cb('cal_day_2026_10
 check('the save matches the one the checkout question builds, group text included',
   viaAiLeave === saveOf(r.save), { ai: viaAiLeave, manual: saveOf(r.save) });
 
+section('ai edit: moving the room');
+aiOpen();
+r = aiSay('booking 31 to انبي 2 room 4', { output: { booking_id: '31', room: { apartment: 'انبي 2', room: '4' } } });
+check('a free room reaches the card (1 ← 4)', r.reply.text.includes('رقم الغرفة: 1 ← 4'), r.reply.text);
+check('with no clash warning and the plain Confirm',
+  !r.reply.text.includes('تعارض') && r.reply.reply_markup.inline_keyboard[0][0].text === '✅ حفظ',
+  r.reply.reply_markup.inline_keyboard[0][0].text);
+r = run(cb('xedone'));
+check('both the apartment and the room are written', r.save.fields['اسم الشقة'] === 'انبي 2' &&
+  r.save.fields['رقم الغرفة'] === 4, r.save.fields);
+
+aiOpen();
+r = aiSay('booking 31 to الهرم room 1', { output: { booking_id: '31', room: { apartment: 'الهرم', room: '1' } } });
+check('an apartment the registry lacks is refused, listing the real ones',
+  r.reply.text.startsWith('🏠 لم أتعرف') && r.reply.text.includes('انبي 2'), r.reply.text);
+check('and the session stays in AI_TEXT', r.sessionState === 'AI_TEXT', r.sessionState);
+r = aiSay('booking 31 to انبي 2 room 9', { output: { booking_id: '31', room: { apartment: 'انبي 2', room: '9' } } });
+check('a room that apartment does not have is refused too', r.reply.text.startsWith('🏠 لم أتعرف'), r.reply.text);
+r = aiSay('booking 31 to  انبي  2 room 2', { output: { booking_id: '31', room: { apartment: ' انبي  2 ', room: '٢' } } });
+check('spacing and Arabic digits in the room still match', r.reply.text.includes('رقم الغرفة: 1 ← 2'), r.reply.text);
+
+section('ai edit: clashes are warned about, never blocked');
+aiOpen();
+r = aiSay('booking 31 to انبي 2 room 3', { output: { booking_id: '31', room: { apartment: 'انبي 2', room: '3' } } });
+check('moving into an occupied room shows the clash with who is there',
+  r.reply.text.includes('⚠️ *تعارض في الحجز*') && r.reply.text.includes('Dina Samir'), r.reply.text);
+check('and Confirm is relabelled, not removed',
+  r.reply.reply_markup.inline_keyboard[0][0].text === '⚠️ احفظ رغم التعارض' &&
+  r.reply.reply_markup.inline_keyboard[0][0].callback_data === 'xedone',
+  r.reply.reply_markup.inline_keyboard[0]);
+aiOpen();
+r = aiSay('booking 31 extend 3', { output: { booking_id: '31', stay: { kind: 'extend', nights: 3 } } });
+check('extending into the next guest\'s arrival is flagged',
+  r.reply.text.includes('⚠️ *تعارض في الحجز*') && r.reply.text.includes('Karim Adel'), r.reply.text);
+aiOpen();
+r = aiSay('booking 31 extend 1', { output: { booking_id: '31', stay: { kind: 'extend', nights: 1 } } });
+check('a stay that ends before the next guest arrives is not flagged', !r.reply.text.includes('تعارض'), r.reply.text);
+check('the booking does not clash with itself', !r.reply.text.includes('Hana Ali'), r.reply.text);
+aiOpen();
+aiSay('booking 31 to انبي 2 room 3 and paid 200 instapay', { output: { booking_id: '31',
+  room: { apartment: 'انبي 2', room: '3' }, payment: { amount: 200, method: 'instapay' } } });
+r = run(photo('RCPT7'));
+check('a clash found before the receipt step is still on the card after it',
+  r.reply.text.includes('⚠️ *تعارض في الحجز*') && r.reply.text.includes('Dina Samir'), r.reply.text);
+aiOpen();
+r = aiSay('booking 31 paid 100 cash', { output: { booking_id: '31', payment: { amount: 100, method: 'cash' } } });
+check('a payment alone never goes looking for clashes', !r.reply.text.includes('تعارض'), r.reply.text);
+
 // ─── Result ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all checks passed'}`);
