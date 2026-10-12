@@ -341,6 +341,19 @@ def test_fetches_read_the_sheets_api_and_run_once_when_they_follow_many_items(no
     assert renders == {"Fetch Bookings Formulas": ["FORMULA"], "Fetch Bookings Values": ["UNFORMATTED_VALUE"]}
 
 
+def test_the_report_fetches_do_not_depend_on_the_telegram_branchs_config():
+    """The 08:00 schedule and the availability tap never run `Config`: they have their
+    own Report Config / Availability Config. `$('Config')` there is "hasn't been
+    executed", so these two name the tab outright."""
+    specs = bw.lookup_node_specs()
+    for name in ("Fetch Report Locations", "Fetch Availability Locations"):
+        url = specs[name][2]["url"]
+        assert "$('Config')" not in url, name
+        assert "الإتاحة" in url and "A2:B2000" in url, name
+    for name in ("Fetch Bookings Formulas", "Fetch Bookings Values", "Fetch Locations", "Fetch Booking Ids"):
+        assert "$('Config')" in specs[name][2]["url"], name   # the Telegram branch has Config
+
+
 def test_the_code_nodes_carry_the_files_that_are_tested(nodes):
     here = os.path.dirname(os.path.abspath(bw.__file__))
     for name, body in (("Read Bookings For Edit", "build_bookings_lookup.js"),
@@ -361,7 +374,6 @@ def test_the_payment_line_still_gets_its_report_marker(graph, nodes):
     assert targets(graph, "Write Line Rows")[0] == ["Has Group?", "Write Line Id"]
     assert nodes["Write Line Id"]["type"] == "n8n-nodes-base.httpRequest"
     assert "Write Booking Id" not in nodes
-    assert "executeOnce" not in dg.read_settings("Read Bookings For Edit")
 
 
 def _left_values(node):
@@ -400,3 +412,143 @@ def test_the_offline_merge_wires_the_brain_once(monkeypatch, tmp_path):
     # and the registry gate the deploy rewrites keeps reading the session
     gate = next(n for n in full["nodes"] if n["name"] == "Needs Locations?")
     assert all("$('Load Session')" in left for left in _left_values(gate))
+
+
+# ── The live migration ───────────────────────────────────────────────────────
+
+SHEETS_LIVE = ("googleSheetsOAuth2Api", "SHEETS-ID", "Google Sheets account")
+SESSION_NODES = ("Load Session", "Save Session", "Clear Session")
+READER_NODES = ("Read Bookings For Edit", "Read Locations", "Read Next Booking ID")
+TG_FETCHES = ("Fetch Bookings Formulas", "Fetch Bookings Values", "Fetch Locations", "Fetch Booking Ids")
+
+
+def _norm(conns):
+    return {src: {kind: [sorted(l["node"] for l in br) for br in brs] for kind, brs in spec.items()}
+            for src, spec in conns.items()}
+
+
+def _old_graph():
+    """The built graph rewound to what the live workflow looked like before this change:
+    Postgres nodes for sessions and the three lookups wired straight to their gates, and
+    the live-only shadow / reconcile branch hanging off Clear Session."""
+    wf = json.loads(json.dumps(bw.workflow(bw.build())))
+    wf["nodes"] = [n for n in wf["nodes"] if n["name"] not in TG_FETCHES]
+    for n in wf["nodes"]:
+        if n["name"] in SESSION_NODES + READER_NODES:
+            n["type"], n["typeVersion"] = "n8n-nodes-base.postgres", 2.6
+            n["parameters"] = {"operation": "executeQuery", "query": "select 1", "options": {}}
+            n["credentials"] = {"postgres": {"id": "PG", "name": "Supabase Postgres"}}
+    c = wf["connections"]
+    for name in TG_FETCHES:
+        c.pop(name, None)
+    c["Needs Bookings?"]["main"] = [[{"node": "Read Bookings For Edit", "type": "main", "index": 0}],
+                                    [{"node": "Needs Locations?", "type": "main", "index": 0}]]
+    c["Needs Locations?"]["main"] = [[{"node": "Read Locations", "type": "main", "index": 0}],
+                                     [{"node": "Needs Booking ID?", "type": "main", "index": 0}]]
+    c["Needs Booking ID?"]["main"] = [[{"node": "Read Next Booking ID", "type": "main", "index": 0}],
+                                      [{"node": "Needs Expense Number?", "type": "main", "index": 0}]]
+    for name in sorted(POSTGRES_NAMES):
+        wf["nodes"].append({"name": name, "type": "n8n-nodes-base.postgres", "typeVersion": 2.6,
+                            "position": [0, 0],
+                            "parameters": {"operation": "executeQuery", "query": "select 1"}})
+
+    def wire(src, tgt, idx=0):
+        main = c.setdefault(src, {}).setdefault("main", [])
+        while len(main) <= idx:
+            main.append([])
+        main[idx].append({"node": tgt, "type": "main", "index": 0})
+    wire("Clear Session", "Build Shadow Write")
+    wire("Build Shadow Write", "Shadow Write")
+    wire("Shadow Write", "Read Booking Id")
+    wire("Read Booking Id", "Write Booking Id")
+    wire("Read Report Values", "Build Snapshot SQL") if "Read Report Values" in c else None
+    return wf
+
+
+def _migrated(live=None):
+    live = live or _old_graph()
+    target = bw.workflow(bw.build())
+    ops = dg.sheet_only_ops(live, target, SHEETS_LIVE)
+    dg.apply_offline(live, ops)
+    return live, ops
+
+
+def test_migrating_the_old_graph_gives_the_built_graph():
+    live, ops = _migrated()
+    built = bw.workflow(bw.build())
+    got = {n["name"]: n for n in live["nodes"]}
+    want = {n["name"]: n for n in built["nodes"]}
+    assert set(got) == set(want), (set(got) ^ set(want))
+    for name in want:
+        for field in ("type", "typeVersion", "parameters"):
+            assert got[name][field] == want[name][field], (name, field)
+    for name in SESSION_NODES + READER_NODES + TG_FETCHES:
+        for key in ("alwaysOutputData", "executeOnce", "onError", "retryOnFail", "maxTries"):
+            assert got[name].get(key) == want[name].get(key), (name, key)
+    assert _norm(live["connections"]) == _norm(built["connections"])
+    assert vw.check(live) == []
+
+
+def test_the_retired_branches_leave_nothing_behind():
+    live, _ = _migrated()
+    assert not ({n["name"] for n in live["nodes"]} & POSTGRES_NAMES)
+    assert not [n for n in live["nodes"] if n["type"].endswith("postgres")]
+    for spec in live["connections"].values():
+        for brs in spec.values():
+            for br in brs:
+                assert not [l for l in br if l["node"] in POSTGRES_NAMES]
+    assert not (set(live["connections"]) & POSTGRES_NAMES)
+
+
+def test_migrating_twice_changes_nothing_the_second_time():
+    live, _ = _migrated()
+    target = bw.workflow(bw.build())
+    ops = dg.sheet_only_ops(live, target, SHEETS_LIVE)
+    kinds = {o["type"] for o in ops}
+    assert not (kinds & {"addNode", "removeNode", "addConnection", "removeConnection"}), kinds       # Review Focus 5
+
+
+def test_the_http_fetches_carry_their_credential_inline():
+    """setNodeCredential refuses googleSheetsOAuth2Api on an HTTP node, so the node is
+    added WITH its credentials (proved in plan Task 1)."""
+    _, ops = _migrated()
+    adds = {o["node"]["name"]: o["node"] for o in ops if o["type"] == "addNode"}
+    for name in TG_FETCHES:
+        assert adds[name]["credentials"]["googleSheetsOAuth2Api"]["id"] == "SHEETS-ID", name
+    assert not [o for o in ops if o["type"] == "setNodeCredential"]
+
+
+def test_the_migration_fits_the_endpoints_batch_limit():
+    _, ops = _migrated()
+    parts = dg.batches(ops, 90)
+    assert all(len(b) <= 90 for b in parts) and sum(map(len, parts)) == len(ops)
+
+
+def targets_in(wf, src):
+    return [sorted(l["node"] for l in br) for br in wf["connections"].get(src, {}).get("main", [])]
+
+
+def test_the_merged_workflow_has_no_postgres_anywhere(monkeypatch, tmp_path):
+    base = tmp_path / "base.json"
+    out = tmp_path / "full.json"
+    base.write_text(json.dumps(bw.workflow(bw.build()), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(dg, "OFFLINE_IN", str(base))
+    monkeypatch.setattr(dg, "OFFLINE_OUT", str(out))
+    monkeypatch.setattr(sys, "argv", ["deploy_graph.py", "--offline"])
+    dg.main()
+    full = json.loads(out.read_text(encoding="utf-8"))
+    names = {n["name"] for n in full["nodes"]}
+    assert not [n["name"] for n in full["nodes"] if n["type"].endswith("postgres")]
+    assert not (POSTGRES_NAMES & names)
+    for need in ("Fetch Report Locations", "Read Report Locations", "Fetch Availability Locations",
+                 "Read Availability Locations", "Build Reports", "Build Availability Report"):
+        assert need in names, need
+    assert targets_in(full, "Report Config") == [["Fetch Report Locations"]]
+    assert targets_in(full, "Fetch Report Locations") == [["Read Report Locations"]]
+    assert targets_in(full, "Read Report Locations") == [["Read Report Formulas"]]
+    assert targets_in(full, "Availability Config") == [["Fetch Availability Locations"]]
+    assert targets_in(full, "Fetch Availability Locations") == [["Read Availability Locations"]]
+    assert targets_in(full, "Read Availability Locations") == [["Read Availability Formulas"]]
+    assert targets_in(full, "Read Report Values") == [["Build Reports"]]
+    assert targets_in(full, "Clear Session") == [["Should Format Row?"]] or "Clear Session" in full["connections"]
+    assert vw.check(full) == []

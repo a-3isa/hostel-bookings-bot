@@ -86,6 +86,12 @@
               "type": "string"
             },
             {
+              "id": "avail_tab",
+              "name": "AVAILABILITY_TAB",
+              "value": "الإتاحة",
+              "type": "string"
+            },
+            {
               "id": "sheet",
               "name": "SHEET_ID",
               "value": "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8",
@@ -111,26 +117,34 @@
     {
       "id": "load-session",
       "name": "Load Session",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
       "position": [
         -60,
         300
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "select state, data::text as data,\n       (extract(epoch from updated_at) * 1000)::bigint as updated_at\n  from bot_sessions\n where chat_id = $1;",
-        "options": {
-          "queryReplacement": "={{ String($('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query.message.chat.id) }}"
-        }
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings_bot_sessions"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ String($('Telegram Trigger').first().json.message?.chat?.id ?? $('Telegram Trigger').first().json.callback_query.message.chat.id) }}"
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1
       },
-      "alwaysOutputData": true,
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
-        }
-      }
+      "alwaysOutputData": true
     },
     {
       "id": "needs-bookings",
@@ -203,29 +217,102 @@
       }
     },
     {
+      "id": "fetch-bookings-formulas",
+      "name": "Fetch Bookings Formulas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        20
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.BOOKINGS_TAB + '!A1:U2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "FORMULA"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "id": "fetch-bookings-values",
+      "name": "Fetch Bookings Values",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        360,
+        20
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.BOOKINGS_TAB + '!A1:U2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "UNFORMATTED_VALUE"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
       "id": "read-bookings-for-edit",
       "name": "Read Bookings For Edit",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         360,
         180
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "-- Phase 4b: the lookup and the availability check read Postgres, not Sheets.\n-- Column aliases reproduce the sheet's headers exactly, so brain.js consumes\n-- this the way it consumed the Sheets node and needs no change.\n--\n-- bookings_live, NOT bookings_model, and the reason matters. The model folds a\n-- guest's continuation lines into one booking, which is right for a report and\n-- wrong here: this feeds the EDIT path, which writes back to a sheet row by\n-- number. Offer مروان as one 2200 row and the next payment lands on line 22\n-- while line 23 still holds its 1600 — the sheet would double-count. So this\n-- stays line-for-line with the sheet, exactly as the Sheets node was: all 55\n-- lines, cancelled ones included, because findConflicts() skips those by their\n-- ملغي note and the edit flow can still reach them.\n--\n-- '=OPEN' is deliberate. An open-ended stay arrived from the FORMULA read as\n-- '=TODAY()-J5', and both findConflicts() and showValue() key off that leading\n-- '='. Keeping the sentinel keeps that contract; Phase 5 replaces it with the\n-- open_ended boolean and deletes the sniffing.\nselect\n  b.sheet_row                                          as row_number,\n  coalesce(b.booking_ref, '')                          as \"بوكنج ID\",\n  coalesce(b.guest_ref, '')                            as \"ID\",\n  coalesce(b.guest_name, '')                           as \"اسم المقيم\",\n  coalesce(b.booking_type, '')                         as \"نوع الحجز\",\n  coalesce(b.phone, '')                                as \"رقم الهاتف\",\n  coalesce(b.apartment_name, '')                       as \"اسم الشقة\",\n  coalesce(b.room_number, '')                          as \"رقم الغرفة\",\n  case when b.open_ended then '=OPEN'\n       else coalesce(b.effective_nights::text, '') end as \"عدد الليالي\",\n  coalesce(to_char(b.arrival, 'YYYY-MM-DD'), '')       as \"تاريخ البداية\",\n  coalesce(to_char(b.departure, 'YYYY-MM-DD'), '')     as \"تاريخ المغادرة\",\n  coalesce(trim(to_char(b.effective_total, 'FM999999999.##')), '')     as \"اجمالي سعر الحجز\",\n  coalesce(trim(to_char(b.paid, 'FM999999999.##')), '')                as \"اجمالي ما تم دفعه\",\n  coalesce(b.payment_method, '')                       as \"طريقة الدفع\",\n  coalesce(trim(to_char(b.effective_remaining, 'FM999999999.##')), '') as \"المتبقي\",\n  coalesce(b.notes, '')                                as \"ملاحظات\",\n  -- Everything below is for the payment path, and none of it is a sheet column.\n  -- brain.js reads these by their ASCII names; the Arabic aliases above are the\n  -- cells, these are facts about the booking.\n  b.id                                                 as booking_id,\n  -- A booking occupies one row per payment METHOD. A payment in a method that\n  -- is already here joins that row and its cell grows; only a method not yet on\n  -- the booking opens a new one. Without this the bot could only ever see the\n  -- booking's own row, so a second method overwrote the first — reported live\n  -- on 2026-08-14.\n  (select coalesce(jsonb_agg(jsonb_build_object(\n            'seq', l.line_seq, 'row', l.sheet_row, 'method', l.method,\n            'amount', coalesce(pay.amount, 0)) order by l.line_seq), '[]'::jsonb)\n     from booking_lines l\n     join lateral (select coalesce(sum(p.amount), 0) as amount\n                     from payments p\n                    where p.booking_id = l.booking_id\n                      and p.line_seq = l.line_seq) pay on true\n    where l.booking_id = b.id and l.sheet_row is not null) as lines,\n  -- The last sheet row this booking occupies. A new line is inserted directly\n  -- under it, which is where a person would put it.\n  greatest(b.sheet_row, coalesce((select max(l.sheet_row) from booking_lines l\n                                   where l.booking_id = b.id), 0)) as block_end,\n  -- Whether اجمالي سعر الحجز on this row is a live formula (`=650*I18`, a\n  -- nightly rate). If it is, the booking row's total is the sheet's and must not\n  -- be reduced when a line is split off — writing a scalar there would destroy\n  -- the rate. Same rule mirror.py applies through sheet_owned_keys.\n  (b.nightly_rate is not null)                         as total_is_formula\nfrom bookings_live b\norder by b.sheet_row;\n",
-        "options": {}
+        "jsCode": "/**\n * \"Read Bookings For Edit\" — the bookings tab as the Brain's lookup rows.\n *\n * This used to be a Postgres query (read_bookings_for_edit.sql) over a mirror that\n * only ever heard about the bot's own writes. The sheet is hand-edited and the\n * mirror was not, so the row number the query handed over drifted, and the bot\n * wrote the next payment onto the guest above or below. Reading the sheet in the\n * same turn removes that class of bug: the row number and the amounts are the\n * ones the bot is about to write against.\n *\n * Inputs are two Sheets-API `values.get` responses of A1:U2000, one rendered as\n * FORMULA and one as UNFORMATTED_VALUE (the HTTP nodes \"Fetch Bookings Formulas\"\n * and \"Fetch Bookings Values\"). The API, not the Sheets node: it returns rows from\n * row 1 with trailing empties trimmed and interior blanks kept, so a row's number\n * is its index + 1 — the Sheets node numbers rows from its own view of the range.\n *\n * A row is a BOOKING when it names a guest and is not a LINE. A LINE is a second\n * payment METHOD on the same booking: commitPaymentLine copies the identity columns\n * onto a row directly under the booking's block, leaves the price blank and fills\n * paid and method. Anything else — including the same guest on a later arrival, or\n * the same identity after a gap — is its own booking.\n *\n * The output keeps the sheet's own Arabic headers, so brain.js reads it as it read\n * the SQL: row_number, booking_id (the row: nothing outside this turn needs a\n * database id any more), lines, block_end and total_is_formula.\n */\n\nconst H = {\n  ref: 'بوكنج ID', id: 'ID', name: 'اسم المقيم', type: 'نوع الحجز', phone: 'رقم الهاتف',\n  apt: 'اسم الشقة', room: 'رقم الغرفة', nights: 'عدد الليالي', arrival: 'تاريخ البداية',\n  departure: 'تاريخ المغادرة', total: 'اجمالي سعر الحجز', paid: 'اجمالي ما تم دفعه',\n  method: 'طريقة الدفع', remaining: 'المتبقي', notes: 'ملاحظات',\n};\n\nconst blank = (v) => v === undefined || v === null || String(v).trim() === '';\nconst txt = (v) => (v === undefined || v === null ? '' : String(v));\n\n/** Rows of a values.get response as { row, cells: {header: value} }; row = index + 1. */\nfunction sheetRows(resp) {\n  const values = resp && Array.isArray(resp.values) ? resp.values : [];\n  if (!values.length) return [];\n  const head = values[0].map(h => txt(h).trim());\n  const out = [];\n  for (let i = 1; i < values.length; i++) {\n    const row = values[i] || [];\n    const cells = {};\n    head.forEach((h, c) => { if (h) cells[h] = row[c] === undefined ? '' : row[c]; });\n    out.push({ row: i + 1, cells });\n  }\n  return out;\n}\n\n/** A date cell as YYYY-MM-DD: a Sheets serial, or text in the sheet's own forms. */\nfunction isoDate(v) {\n  if (blank(v)) return '';\n  if (typeof v === 'number') {\n    return new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 86400000).toISOString().slice(0, 10);\n  }\n  const s = String(v).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}/.test(s)) return s.slice(0, 10);\n  const m = /^(\\d{1,2})[/.-](\\d{1,2})[/.-](\\d{4})$/.exec(s);\n  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;\n  if (/^\\d+(\\.\\d+)?$/.test(s)) return isoDate(Number(s));\n  return s;\n}\n\n/** Who the row is about; a line repeats its booking's. */\nconst keyOf = (v) => [v[H.id], v[H.name], v[H.apt], v[H.room], isoDate(v[H.arrival])]\n  .map(x => txt(x).trim()).join('\\u0001');\n\nfunction bookingItem(row, f, v) {\n  const nightsF = f[H.nights];\n  const open = typeof nightsF === 'string' && /^=\\s*TODAY\\s*\\(\\s*\\)/i.test(nightsF.trim());\n  const totalF = f[H.total];\n  return {\n    row_number: row,\n    [H.ref]: txt(v[H.ref]),\n    [H.id]: txt(v[H.id]),\n    [H.name]: txt(v[H.name]),\n    [H.type]: txt(v[H.type]),\n    [H.phone]: txt(v[H.phone]),\n    [H.apt]: txt(v[H.apt]),\n    [H.room]: v[H.room] === undefined ? '' : v[H.room],\n    [H.nights]: open ? '=OPEN' : (blank(v[H.nights]) ? '' : v[H.nights]),\n    [H.arrival]: isoDate(v[H.arrival]),\n    [H.departure]: isoDate(v[H.departure]),\n    [H.total]: v[H.total] === undefined ? '' : v[H.total],\n    [H.paid]: v[H.paid] === undefined ? '' : v[H.paid],\n    [H.method]: txt(v[H.method]),\n    [H.remaining]: v[H.remaining] === undefined ? '' : v[H.remaining],\n    [H.notes]: txt(v[H.notes]),\n    booking_id: row,\n    lines: [],\n    block_end: row,\n    // A nightly rate (=500*I10, =(650*I19)-2200) grows with the stay and must not be\n    // overwritten by a typed number. A typed constant (=12900, =1400+700) may be.\n    total_is_formula: typeof totalF === 'string' && totalF.trim().startsWith('=') && /\\bI\\d+\\b/i.test(totalF),\n  };\n}\n\nlet formulas = [];\nlet values = [];\ntry {\n  formulas = sheetRows($('Fetch Bookings Formulas').first().json);\n  values = sheetRows($('Fetch Bookings Values').first().json);\n} catch (e) {\n  return [];                           // a node that did not run, or an error item\n}\n\nconst valueCells = new Map(values.map(x => [x.row, x.cells]));\nconst out = [];\nlet cur = null;\nlet curKey = '';\nfor (const { row, cells } of formulas) {\n  const v = valueCells.get(row) || cells;\n  if (blank(v[H.name])) continue;      // an empty row, or one with no guest\n  const isLine = cur && row === cur.block_end + 1 && keyOf(v) === curKey\n    && blank(v[H.total]) && !(blank(v[H.paid]) && blank(v[H.method]));\n  if (isLine) {\n    cur.lines.push({\n      seq: cur.lines.length + 2, row, method: txt(v[H.method]).trim(), amount: Number(v[H.paid]) || 0,\n    });\n    cur.block_end = row;\n    continue;\n  }\n  cur = bookingItem(row, cells, v);\n  curKey = keyOf(v);\n  out.push(cur);\n}\nreturn out.map(json => ({ json }));\n"
       },
-      "alwaysOutputData": true,
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2,
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
-        }
-      }
+      "alwaysOutputData": true
     },
     {
       "id": "needs-locations",
@@ -298,30 +385,61 @@
       }
     },
     {
+      "id": "fetch-locations",
+      "name": "Fetch Locations",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        180
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.AVAILABILITY_TAB + '!A2:B2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "UNFORMATTED_VALUE"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500,
+      "executeOnce": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
       "id": "read-locations",
       "name": "Read Locations",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         760,
         180
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "-- The apartment/room registry, seeded from the الإتاحة tab and verified equal\n-- to it on 2026-08-09: 6 apartments, 26 rooms on both sides.\n--\n-- Aliases match the tab's own header row, so locationRegistry() reads this\n-- exactly as it read the Sheets node. Rooms sort numerically rather than by\n-- text, or room 10 would sit before room 2 on the keyboard.\nselect\n  a.name   as \"الشقة\",\n  r.number as \"الغرفة\"\nfrom rooms r\njoin apartments a on a.id = r.apartment_id\nwhere r.active and a.active\norder by a.id, length(r.number), r.number;\n",
-        "options": {}
+        "jsCode": "/**\n * The apartment / room registry, from the الإتاحة tab (A2:B).\n *\n * One body for the three nodes that need it — \"Read Locations\" (the Telegram\n * branch), \"Read Report Locations\" and \"Read Availability Locations\" — because it\n * reads only its direct input: the values.get response of the HTTP node in front.\n *\n * Row 2 of the tab is the header (الشقة / الغرفة) and row 3 holds a date label with\n * no room; neither is a room. Rooms keep the tab's order, which is already grouped\n * by apartment and ascending. brain.js's locationRegistry() and build_reports.js\n * read الشقة / الغرفة as text, exactly as they read the SQL this replaced.\n */\nconst resp = $input.first().json;\nconst values = resp && Array.isArray(resp.values) ? resp.values : [];\nconst cell = (v) => (v === undefined || v === null ? '' : String(v).trim());\nconst out = [];\nfor (const r of values) {\n  const apartment = cell(r[0]);\n  const room = cell(r[1]);\n  if (!apartment || !room || apartment === 'الشقة') continue;\n  out.push({ json: { 'الشقة': apartment, 'الغرفة': room } });\n}\nreturn out;\n"
       },
-      "executeOnce": true,
-      "alwaysOutputData": true,
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2,
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
-        }
-      }
+      "alwaysOutputData": true
     },
     {
       "id": "needs-booking-id",
@@ -359,30 +477,61 @@
       }
     },
     {
+      "id": "fetch-booking-ids",
+      "name": "Fetch Booking Ids",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        400
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8/values/{{ encodeURIComponent($('Config').first().json.BOOKINGS_TAB + '!B1:B2000') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "majorDimension",
+              "value": "ROWS"
+            },
+            {
+              "name": "valueRenderOption",
+              "value": "UNFORMATTED_VALUE"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500,
+      "executeOnce": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
       "id": "read-next-booking-id",
       "name": "Read Next Booking ID",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         760,
         480
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "-- The ID the bot offers for the next booking: one past the previous one this\n-- month, so nobody has to remember it. Asked for on 2026-10-01.\n--\n-- The numbering restarts every month. When the bookings tab rolls over, the\n-- guests still staying are carried into the new month with their old ID marked\n-- `111**` (\"the ** means that the booking is from the past month, so now the\n-- new month begins and the id should reset\"). So only bookings created this\n-- calendar month, Cairo time, count, and a starred ID never does. The first\n-- booking of a month is offered 1.\n--\n-- ID is text typed by hand, so only plain counters count: Arabic-Indic digits\n-- are folded to ASCII first, the way brain.js reads them, and anything longer\n-- than six digits is left out — ID is sometimes a passport or national number,\n-- and one of those would push every suggestion into the millions. Cancelled\n-- bookings stay in: their number is still spent.\n--\n-- A suggestion, not an allocation: the receptionist can type another number,\n-- and two people starting at once are offered the same one.\nselect coalesce(max(ref::int), 0) + 1 as next_booking_id\n  from (select btrim(translate(guest_ref, '٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹',\n                                           '01234567890123456789')) as ref\n          from bookings\n         where created_at >= date_trunc('month', now() at time zone 'Africa/Cairo')\n                               at time zone 'Africa/Cairo') b\n where ref ~ '^[0-9]{1,6}$';\n",
-        "options": {}
+        "jsCode": "/**\n * \"Read Next Booking ID\" — the ID offered for the next booking: one past the\n * highest this month's tab holds, so nobody has to remember it.\n *\n * The numbering restarts every month, and the tab is one month, so \"this month\"\n * holds by construction. Guests carried over from last month keep their old ID\n * marked with stars (\"104**\"), which is not a plain counter and never counts; ID is\n * hand-typed text, so only 1-6 digit counters do (a passport or national number\n * would push every suggestion into the millions). Arabic-Indic digits are folded to\n * ASCII first, the way brain.js reads them. Cancelled bookings keep their number.\n *\n * A suggestion, not an allocation: the receptionist can type another number.\n * Input: the values.get response of B1:B2000 (row 1 is the \"ID\" header).\n */\nconst resp = $input.first().json;\nconst values = resp && Array.isArray(resp.values) ? resp.values : [];\nconst fold = (s) => String(s === undefined || s === null ? '' : s)\n  .replace(/[٠-٩]/g, ch => String(ch.charCodeAt(0) - 0x0660))\n  .replace(/[۰-۹]/g, ch => String(ch.charCodeAt(0) - 0x06F0))\n  .trim();\nlet max = 0;\nfor (let i = 1; i < values.length; i++) {         // row 1 is the header\n  const s = fold((values[i] || [])[0]);\n  if (/^[0-9]{1,6}$/.test(s)) max = Math.max(max, Number(s));\n}\nreturn [{ json: { next_booking_id: max + 1 } }];\n"
       },
-      "executeOnce": true,
-      "alwaysOutputData": true,
-      "onError": "continueRegularOutput",
-      "retryOnFail": true,
-      "maxTries": 2,
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
-        }
-      }
+      "alwaysOutputData": true
     },
     {
       "id": "needs-expense-number",
@@ -670,23 +819,79 @@
     {
       "id": "save-session",
       "name": "Save Session",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
       "position": [
         1160,
         480
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\nvalues ($1, $2, $3::jsonb, now())\non conflict (chat_id) do update\n   set state = excluded.state,\n       data = excluded.data,\n       updated_at = now();",
-        "options": {
-          "queryReplacement": "={{ [$json.chatId, $json.sessionState, $json.sessionData] }}"
-        }
-      },
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings_bot_sessions"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.chatId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "chat_id": "={{ $json.chatId }}",
+            "state": "={{ $json.sessionState }}",
+            "data": "={{ $json.sessionData }}",
+            "updated_at": "={{ Date.now() }}"
+          },
+          "matchingColumns": [
+            "chat_id"
+          ],
+          "schema": [
+            {
+              "id": "chat_id",
+              "displayName": "chat_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            }
+          ]
         }
       }
     },
@@ -1413,23 +1618,79 @@
     {
       "id": "clear-session",
       "name": "Clear Session",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
       "position": [
         2760,
         660
       ],
       "parameters": {
-        "operation": "executeQuery",
-        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\nvalues ($1, '', $2::jsonb, now())\non conflict (chat_id) do update\n   set state = '',\n       data = excluded.data,\n       updated_at = now();",
-        "options": {
-          "queryReplacement": "={{ [$('Brain').first().json.chatId, '{}'] }}"
-        }
-      },
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_ME",
-          "name": "Supabase Postgres"
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings_bot_sessions"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ $('Brain').first().json.chatId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "chat_id": "={{ $('Brain').first().json.chatId }}",
+            "state": "",
+            "data": "{}",
+            "updated_at": "={{ Date.now() }}"
+          },
+          "matchingColumns": [
+            "chat_id"
+          ],
+          "schema": [
+            {
+              "id": "chat_id",
+              "displayName": "chat_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            }
+          ]
         }
       }
     },
@@ -1542,7 +1803,7 @@
       "main": [
         [
           {
-            "node": "Read Bookings For Edit",
+            "node": "Fetch Bookings Formulas",
             "type": "main",
             "index": 0
           }
@@ -1550,6 +1811,28 @@
         [
           {
             "node": "Needs Locations?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Bookings Formulas": {
+      "main": [
+        [
+          {
+            "node": "Fetch Bookings Values",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Bookings Values": {
+      "main": [
+        [
+          {
+            "node": "Read Bookings For Edit",
             "type": "main",
             "index": 0
           }
@@ -1571,7 +1854,7 @@
       "main": [
         [
           {
-            "node": "Read Locations",
+            "node": "Fetch Locations",
             "type": "main",
             "index": 0
           }
@@ -1579,6 +1862,17 @@
         [
           {
             "node": "Needs Booking ID?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Locations": {
+      "main": [
+        [
+          {
+            "node": "Read Locations",
             "type": "main",
             "index": 0
           }
@@ -1600,7 +1894,7 @@
       "main": [
         [
           {
-            "node": "Read Next Booking ID",
+            "node": "Fetch Booking Ids",
             "type": "main",
             "index": 0
           }
@@ -1608,6 +1902,17 @@
         [
           {
             "node": "Needs Expense Number?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Booking Ids": {
+      "main": [
+        [
+          {
+            "node": "Read Next Booking ID",
             "type": "main",
             "index": 0
           }
