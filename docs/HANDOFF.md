@@ -2,9 +2,13 @@
 
 ## 2026-10-12 — AI edit: type a change, review it, confirm it
 
-**Built and tested offline; not yet deployed.** Deploy order is at the end of this
-entry. Spec: `docs/superpowers/specs/2026-10-12-ai-booking-edit-design.md`, plan:
-`docs/superpowers/plans/2026-10-12-ai-booking-edit.md`.
+**LIVE since 2026-10-12, but not yet exercised by a real Telegram message.**
+Workflow `hzMYegbL3yifl7KN`, activeVersionId `f8bb6716-0489-494e-bed5-b93e2ff9c5d6`,
+72 nodes, live Brain byte-identical to `booking_bot/brain.js`, Anthropic credential
+`dObKg3UcZAYjhPLY` bound to `Anthropic Chat Model` (`claude-haiku-5-5` is in its
+model list, so the key authenticates). What is left is the first real pass — see
+the end of this entry. Spec: `docs/superpowers/specs/2026-10-12-ai-booking-edit-design.md`,
+plan: `docs/superpowers/plans/2026-10-12-ai-booking-edit.md`.
 
 Admins get a new menu button, 🤖 تعديل بالذكاء الاصطناعي (`choice_ai`). They type a
 change to a saved booking in plain Arabic or English — "حجز 3 دفع 400 كاش",
@@ -39,10 +43,20 @@ prompt live in `booking_bot/ai_intent.py` and nowhere else.
   `ANTHROPIC_API_KEY`) is the only check of how it reads real phrasing — add the
   phrases staff really type to `ai_eval_cases.json`.
 
-**To deploy:** create an *Anthropic* credential in the n8n UI (Credentials → New),
-close the workflow tab, then `python booking_bot/deploy_graph.py --publish` and
-`python booking_bot/push_brain.py --publish`. First live pass: go as far as the
-card and tap **إلغاء**, so nothing is written.
+**How it was deployed** (the worktree has no gitignored `booking_bot/.workflow_id`,
+so the id went in as `N8N_WORKFLOW_ID=hzMYegbL3yifl7KN` on each run): the Anthropic
+credential created in the n8n UI; `deploy_graph.py` and `push_brain.py` both
+applied to the **draft** and checked against the repo (Brain byte-identical,
+`Brain` has exactly two inbound edges, `AI Extract` and `Read Locations` carry
+`executeOnce`, Config access lists and token untouched); then one
+`publish_workflow`. The live graph before this had 69 nodes and no drift.
+
+**First live pass — still to do, and it writes nothing:** `/start`, tap
+🤖 تعديل بالذكاء الاصطناعي, send `booking <a real ID> paid 1 cash`, check the card
+names the right guest, and tap **إلغاء**. Then open that run's `AI Extract` output
+(`get_workflow_execution` with `includeData` and `nodeNames: ["AI Extract"]`) and
+check it is `{ output: {...} }`. If the node errors instead, the first suspect is
+the schema allowing no `null` for optional parts (see the PR's rulings).
 
 ## 2026-08-28 — no scheduled messages, غير مدفوع is not a method, and the DB was resynced from the sheet
 
