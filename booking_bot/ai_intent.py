@@ -24,6 +24,12 @@ SCHEMA = {
             "description": "The booking's ID exactly as the staff member wrote it, "
                            "digits only. Never invent one.",
         },
+        "guest_name": {
+            "type": "string",
+            "description": "The guest's name exactly as written, only when the message names the "
+                           "guest and gives no booking ID. Just the name: no 'booking', amounts "
+                           "or payment words.",
+        },
         "payment": {
             "type": "object",
             "description": "Money the guest paid (positive) or was given back (negative).",
@@ -68,7 +74,9 @@ Messages are in Arabic or English; digits may be Arabic-Indic (٠١٢٣٤٥٦٧�
 
 Fill in only what the message asks for:
 
-- booking_id: the booking's ID as written ("booking 3", "حجز 3", "ID 3"). Digits only. If the message names no booking ID, do not guess: set unclear.
+- booking_id: the booking's ID as written ("booking 3", "حجز 3", "ID 3"). Digits only. Never guess one.
+- guest_name: use this INSTEAD of booking_id when the message names the guest and gives no ID ("حجز عبدالنبي دفع 400 كاش", "booking Hana Ali extend 2 nights"). Only the name, as written: no "حجز"/"booking", no amounts, no payment words. If an ID is given, leave guest_name out.
+- If the message gives neither a booking ID nor a guest name, do not guess: set unclear.
 - payment: money the guest paid (a positive amount) or was given back ("refund", "استرداد": a negative amount).
   method says how it was paid: cash / كاش / نقدي -> "cash"; instapay / انستاباي -> "instapay"; Vodafone Cash / فودافون كاش -> "vcash"; Airbnb -> "airbnb".
   For foreign money the CURRENCY decides the method, however it was handed over: dollars / USD / دولار -> "usd"; euros / EUR / يورو -> "eur". Egyptian pounds (EGP / جنيه) are the default currency.

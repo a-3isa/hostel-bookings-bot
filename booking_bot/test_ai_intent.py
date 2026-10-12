@@ -41,6 +41,24 @@ def test_the_schema_has_no_nulls_and_nothing_is_required_but_the_shape():
     assert "null" not in repr(ai_intent.SCHEMA)
 
 
+def test_the_booking_can_be_named_by_id_or_by_guest_name():
+    """brain.js reads `guest_name` when there is no `booking_id` (readAiIntent)."""
+    props = ai_intent.SCHEMA["properties"]
+    assert props["booking_id"]["type"] == "string"
+    assert props["guest_name"]["type"] == "string"
+    assert "guest_name" in ai_intent.PROMPT and "booking_id" in ai_intent.PROMPT
+    # the prompt must say a name is only for when there is no ID, and keep it bare
+    assert "INSTEAD" in ai_intent.PROMPT
+
+
+def test_brain_reads_exactly_the_fields_the_schema_offers():
+    with open(os.path.join(HERE, "brain.js"), encoding="utf-8") as fh:
+        src = fh.read()
+    for field in ("booking_id", "guest_name", "payment", "room", "stay", "unclear"):
+        assert f"o.{field}" in src, f"brain.js never reads o.{field}"
+        assert field in ai_intent.SCHEMA["properties"], field
+
+
 def test_every_stay_kind_the_brain_reads_is_offered():
     kinds = ai_intent.SCHEMA["properties"]["stay"]["properties"]["kind"]["enum"]
     assert kinds == ["extend", "until", "leave"]

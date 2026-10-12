@@ -375,6 +375,7 @@ const S = {
   ai_ask:
     '🤖 اكتب التعديل المطلوب، مثل:\n' +
     '• حجز 3 دفع 400 كاش\n' +
+    '• حجز عبدالنبي دفع 400 كاش\n' +
     '• حجز 12 غرفة 3 وزود ليلتين\n' +
     '• حجز 7 غادر النهاردة\n\n' +
     'أو أرسل /cancel للتراجع:',
@@ -382,6 +383,11 @@ const S = {
     '⚠️ الذكاء الاصطناعي غير متاح الآن. حاول مرة أخرى، أو استخدم ✏️ تعديل حجز من /start.',
   ai_not_understood:
     '❓ لم أفهم الطلب.{reason}\nاكتبه مرة أخرى بالـ ID وما تريد تغييره، أو أرسل /cancel:',
+  // Finding the booking by the guest's name instead of an ID.
+  ai_pick_name: '🔎 أكثر من حجز بهذا الاسم — اختر الحجز:',
+  ai_pick_more: '(المعروض أحدث {shown} من {total} — اكتب الاسم أكثر دقة لتضييق البحث)',
+  ai_name_not_found:
+    '❌ لا يوجد حجز باسم «{name}». جرّب الاسم كاملاً أو اكتب الـ ID:',
   ai_bad_amount: '❌ المبلغ غير واضح. اكتب الطلب مرة أخرى:',
   ai_bad_date: '❌ التاريخ غير واضح. اكتب الطلب مرة أخرى:',
   ai_departure_before:
@@ -1224,9 +1230,20 @@ function readAiIntent(item) {
   const unclear = String(o.unclear === undefined || o.unclear === null ? '' : o.unclear).trim();
   if (unclear) return { fail: 'ai_not_understood', reason: unclear };
 
-  const id = asciiDigits(o.booking_id).trim();
-  if (!id) return { fail: 'ai_not_understood' };
-  const intent = { id, payment: null, room: null, stay: null };
+  // The booking is named by its ID or, failing that, by the guest's name. An ID
+  // is exact and wins; a "name" that is only digits is an ID the model put in the
+  // wrong field; a name too short to mean anyone (a letter or two) is not searched.
+  let id = asciiDigits(o.booking_id).trim();
+  let name = String(o.guest_name === undefined || o.guest_name === null ? '' : o.guest_name)
+    .trim().replace(/\s+/g, ' ');
+  if (!id && name && /^\d+$/.test(asciiDigits(name).replace(/\s+/g, ''))) {
+    id = asciiDigits(name).replace(/\s+/g, '');
+    name = '';
+  }
+  if (id) name = '';
+  if (!id && !name) return { fail: 'ai_not_understood' };
+  if (name && squashName(name).length < 2) return { fail: 'ai_not_understood' };
+  const intent = { id, name, payment: null, room: null, stay: null };
 
   const p = o.payment;
   if (p && typeof p === 'object') {
@@ -1275,8 +1292,85 @@ function replyAiFail(got) {
   }
 }
 
+/**
+ * A guest's name the way it is compared: staff type "عبد النبي" where the sheet
+ * has "عبدالنبي", "احمد" where it has "أحمد", "Hana" where it has "Hana Ali".
+ * So case, diacritics, tatweel, the alef / ya / ta-marbuta variants, digits and
+ * punctuation are all flattened before two names are looked at.
+ */
+function normName(s) {
+  return asciiDigits(s).toLowerCase()
+    .replace(/[ً-ٰٟـ]/g, '')       // tashkeel, dagger alef, tatweel
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ى/g, 'ي').replace(/ئ/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/ؤ/g, 'و')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+/** A name with no spaces left, so "عبد النبي" and "عبدالنبي" are the same string. */
+function squashName(s) { return normName(s).replace(/ /g, ''); }
+
+/**
+ * How well a sheet name answers a typed one: 0 the same, 1 it starts with it,
+ * 2 it contains it, -1 not at all. Spaces are ignored on both sides.
+ */
+function nameRank(query, name) {
+  const q = squashName(query);
+  const n = squashName(name);
+  if (!q || !n) return -1;
+  if (n === q) return 0;
+  if (n.startsWith(q)) return 1;
+  if (n.includes(q)) return 2;
+  return -1;
+}
+
+function isCancelledRow(json) {
+  return String(json['ملاحظات'] || '').indexOf(t('del_note')) !== -1;
+}
+
+// The picker is a keyboard. A common first name must not draw dozens of buttons.
+const AI_PICK_MAX = 10;
+
+/** One picker button: enough to tell apart bookings that share a name. */
+function aiPickLabel(json) {
+  const room = [json['اسم الشقة'], json['رقم الغرفة']]
+    .filter(v => v !== undefined && v !== null && v !== '').join('/');
+  const idPart = plainId(json['ID']) ? `ID ${plainId(json['ID'])}` : '';
+  return [idPart, json['اسم المقيم'], room, json['تاريخ البداية']].filter(Boolean).join(' · ')
+    + (isCancelledRow(json) ? ' ❌' : '');
+}
+
+/** Bookings whose guest name answers `name`: best match first, then newest arrival. */
+function findByName(name) {
+  return bookingRows()
+    .map(x => ({ x, rank: nameRank(name, x.json['اسم المقيم']) }))
+    .filter(m => m.rank >= 0)
+    .sort((a, b) => a.rank - b.rank
+      || String(b.x.json['تاريخ البداية'] || '').localeCompare(String(a.x.json['تاريخ البداية'] || ''))
+      || b.x.row - a.x.row)
+    .map(m => m.x);
+}
+
 /** Find the booking the request names, then apply it. Several matches open the picker. */
 function openAiBooking(intent) {
+  if (!intent.id) {                                    // named by the guest, not by an ID
+    const found = findByName(intent.name);
+    if (!found.length) {
+      reply(t('ai_name_not_found', { name: intent.name }));      // stays in AI_TEXT
+      return;
+    }
+    if (found.length === 1) { applyAiIntent(found[0], intent); return; }
+    const shown = found.slice(0, AI_PICK_MAX);
+    d.aiIntent = intent;
+    reply(t('ai_pick_name') + (found.length > shown.length
+      ? '\n' + t('ai_pick_more', { shown: shown.length, total: found.length }) : ''), {
+      inline_keyboard: shown.map(h => [{ text: aiPickLabel(h.json), callback_data: `epick_${h.row}` }]),
+    });
+    setState('AI_PICK', d);
+    return;
+  }
   // Matches column B (ID) only, in ASCII on both sides — the same rule as EDIT_FIND.
   const hits = bookingRows().filter(x => asciiDigits(x.json['ID'] || '').trim() === intent.id);
   if (!hits.length) { reply(t('edit_not_found')); return; }       // stays in AI_TEXT
@@ -1725,7 +1819,7 @@ function aiBookingLines(dd) {
     room: cell(o['رقم الغرفة']),
     arrival: cell(o['تاريخ البداية']),
   })];
-  if (String(o['ملاحظات'] || '').indexOf(t('del_note')) !== -1) lines.push(t('ai_cancelled_line'));
+  if (isCancelledRow(o)) lines.push(t('ai_cancelled_line'));
   return lines.join('\n');
 }
 

@@ -33,14 +33,15 @@ the model can never reach the sheet without an admin confirming it.
 | Provider | Anthropic, Claude Haiku 5.5 (model id verified when the credential exists; Sonnet is the fallback) | Cheap and fast; extraction is an easy task. |
 | Role of the model | **Parses only.** It has no tools and never writes. | A wrong guess is stopped by validation and by the review card. |
 | Writes | Existing `commitEdit` / `commitPaymentLine` path | Keeps the group post, the Supabase mirror, the double-tap lock and the row-shift safety. |
-| How the booking is identified | By ID in the message | Staff always give the ID. Name/room lookup is a possible later addition. |
+| How the booking is identified | By ID **or by the guest's name** (amended 2026-10-12) | Staff also say names. A name matching several bookings opens the picker. See §6.2a. |
 | Node | Information Extractor (v1.2) + Anthropic Chat Model sub-node, manual JSON Schema | Needs no tools. An Agent node can replace it later if tools are wanted. |
 
 ## 3. Out of scope for v1
 
 Price changes, arrival-date changes, notes, cancelling a booking, cashier access,
-finding a booking by guest name or room, voice messages. All stay in the normal
-edit menu.
+finding a booking by room, voice messages. All stay in the normal edit menu.
+(Finding a booking by guest name was out of scope here and was added on
+2026-10-12 — §6.2a.)
 
 ## 4. Graph changes
 
@@ -97,7 +98,8 @@ Postgres mirror, the group post, the save lock.
 }
 ```
 
-`payment`, `room` and `stay` are each nullable. `stay.kind` is `extend`
+`guest_name` (a string) takes the place of `booking_id` when the message names
+the guest and gives no ID. `payment`, `room` and `stay` are each nullable. `stay.kind` is `extend`
 (`nights`), `until` (`date`) or `leave` (`date`, optional). `unclear` is a short
 string when the model cannot tell what is being asked.
 
@@ -115,7 +117,9 @@ string when the model cannot tell what is being asked.
 - A refund is a negative amount.
 - Relative dates ("tomorrow", "the 20th") are resolved to ISO dates using the
   supplied date.
-- Never invent a booking ID. If none is stated, return `unclear`.
+- Never invent a booking ID. If the message gives neither an ID nor a guest name,
+  return `unclear`. A name goes in `guest_name`, bare (no "booking", amounts or
+  payment words), and only when no ID is given.
 
 ### 5.3 What the model never sees
 
@@ -147,11 +151,32 @@ their message, it goes with the message — nothing else does.
 `AI_PICK` handles `epick_<row>` like `EDIT_PICK`, then runs steps 5 onwards from
 the stored intent.
 
+### 6.2a Finding the booking by the guest's name (added 2026-10-12)
+
+When there is no ID, Brain searches the loaded booking rows by `اسم المقيم`:
+
+- **Normalised on both sides:** case, diacritics, tatweel, alef / ya / ta-marbuta
+  variants, digits and punctuation are flattened, and **spaces are ignored**, so
+  "عبد النبي" finds "عبدالنبي" and "احمد" finds "أحمد". A name under 2 letters is
+  not searched.
+- **Ranked:** the same name first, then names that start with it, then names that
+  contain it; within each, newest arrival first.
+- **One match** goes straight to the card (which names the guest, ID, room and
+  arrival). **No match** says so and stays in `AI_TEXT`. **Several** open the
+  picker (state `AI_PICK`), each button `ID · name · apartment/room · arrival`,
+  with ❌ on a cancelled booking. Cancelled bookings are listed, not hidden.
+- The picker shows at most **10**, newest first, with a line saying how many of how
+  many and to type more of the name.
+- If the message has an ID and a name, **the ID decides**. A "name" that is only
+  digits is treated as an ID.
+- Only the typed name goes to the model, as part of the message; the sheet's
+  names never do. Matching is Brain's.
+
 ### 6.3 Validation
 
 | Field | Rule |
 |---|---|
-| `booking_id` | Non-empty after ASCII-digit normalisation. |
+| `booking_id` / `guest_name` | One of them, non-empty (the ID after ASCII-digit normalisation; a name of at least 2 letters). |
 | `payment.amount` | Finite, non-zero. Negative allowed (admin refund). |
 | `payment.method` | A key in `PAY_METHODS` (never `unpaid`). |
 | `room` | Apartment and room both exist in the registry; otherwise refuse, listing the real apartments, and stay in `AI_TEXT` (a picker would need a new state to resume the rest of the request). |
