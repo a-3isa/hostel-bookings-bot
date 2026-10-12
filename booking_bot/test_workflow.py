@@ -281,12 +281,86 @@ def test_the_extractor_calls_the_model_once_per_turn_not_once_per_item(nodes):
     assert nodes["AI Extract"].get("executeOnce") is True
 
 
-def test_the_registry_read_runs_once_when_it_follows_the_bookings_read(nodes):
-    """Read Locations used to follow only the single Load Session item. On the AI
-    turns it follows Read Bookings For Edit, so it would run its query once per
-    booking row and hand on rows x 26 items."""
-    assert nodes["Read Locations"].get("executeOnce") is True
-    assert dg.read_settings("Read Locations").get("executeOnce") is True
+# ── Sheet-only: no Postgres anywhere ─────────────────────────────────────────
+
+POSTGRES_NAMES = {"Build Shadow Write", "Shadow Write", "Read Booking Id", "Write Booking Id",
+                  "Build Snapshot SQL", "Write Snapshot", "Read Discrepancies",
+                  "Build Reconcile Message", "Read Unmirrored Bookings", "Append Mirror Row",
+                  "Mark Mirrored"}
+
+
+def test_the_base_graph_has_no_postgres_node(graph):
+    pg = [n["name"] for n in graph.nodes if n["type"].endswith("postgres")]
+    assert pg == [], pg
+    assert not [n for n in graph.nodes if n["name"] in POSTGRES_NAMES]
+    assert not any("postgres" in json.dumps(n.get("credentials", {})) for n in graph.nodes)
+
+
+def test_sessions_are_data_table_nodes(nodes):
+    for name, op in (("Load Session", "get"), ("Save Session", "upsert"), ("Clear Session", "upsert")):
+        n = nodes[name]
+        assert n["type"] == "n8n-nodes-base.dataTable" and n["typeVersion"] == 1.1, name
+        p = n["parameters"]
+        assert p["resource"] == "row" and p["operation"] == op, name
+        assert p["dataTableId"] == {"__rl": True, "mode": "name", "value": "bookings_bot_sessions"}, name
+        assert p["filters"]["conditions"][0]["keyName"] == "chat_id", name
+    assert nodes["Load Session"].get("alwaysOutputData") is True
+    cols = nodes["Save Session"]["parameters"]["columns"]
+    assert set(cols["value"]) == {"chat_id", "state", "data", "updated_at"}
+    assert cols["matchingColumns"] == ["chat_id"]
+    assert nodes["Clear Session"]["parameters"]["columns"]["value"]["state"] == ""
+
+
+def test_the_lookups_are_fetch_then_code(graph, nodes):
+    assert targets(graph, "Needs Bookings?")[0] == ["Fetch Bookings Formulas"]
+    assert targets(graph, "Fetch Bookings Formulas") == [["Fetch Bookings Values"]]
+    assert targets(graph, "Fetch Bookings Values") == [["Read Bookings For Edit"]]
+    assert targets(graph, "Read Bookings For Edit") == [["Needs Locations?"]]
+    assert targets(graph, "Needs Locations?")[0] == ["Fetch Locations"]
+    assert targets(graph, "Fetch Locations") == [["Read Locations"]]
+    assert targets(graph, "Read Locations") == [["Needs Booking ID?"]]
+    assert targets(graph, "Needs Booking ID?")[0] == ["Fetch Booking Ids"]
+    assert targets(graph, "Fetch Booking Ids") == [["Read Next Booking ID"]]
+    assert targets(graph, "Read Next Booking ID") == [["Needs Expense Number?"]]
+    for name in ("Read Bookings For Edit", "Read Locations", "Read Next Booking ID"):
+        assert nodes[name]["type"] == "n8n-nodes-base.code", name
+        assert nodes[name].get("alwaysOutputData") is True, name
+
+
+def test_fetches_read_the_sheets_api_and_run_once_when_they_follow_many_items(nodes):
+    for name in ("Fetch Bookings Formulas", "Fetch Bookings Values", "Fetch Locations", "Fetch Booking Ids"):
+        n = nodes[name]
+        assert n["type"] == "n8n-nodes-base.httpRequest", name
+        assert "sheets.googleapis.com" in n["parameters"]["url"], name
+        assert n["credentials"]["googleSheetsOAuth2Api"]["name"], name
+    # an HTTP node runs once per incoming item: these two follow a node that emits many
+    assert nodes["Fetch Locations"].get("executeOnce") is True
+    assert nodes["Fetch Booking Ids"].get("executeOnce") is True
+    renders = {n: [p["value"] for p in nodes[n]["parameters"]["queryParameters"]["parameters"]
+                   if p["name"] == "valueRenderOption"] for n in ("Fetch Bookings Formulas", "Fetch Bookings Values")}
+    assert renders == {"Fetch Bookings Formulas": ["FORMULA"], "Fetch Bookings Values": ["UNFORMATTED_VALUE"]}
+
+
+def test_the_code_nodes_carry_the_files_that_are_tested(nodes):
+    here = os.path.dirname(os.path.abspath(bw.__file__))
+    for name, body in (("Read Bookings For Edit", "build_bookings_lookup.js"),
+                       ("Read Locations", "build_locations.js"),
+                       ("Read Next Booking ID", "compute_next_booking_id.js")):
+        with open(os.path.join(here, "nodes", body), encoding="utf-8") as fh:
+            assert nodes[name]["parameters"]["jsCode"] == fh.read(), name
+
+
+def test_the_registry_tab_is_in_config(nodes):
+    have = {a["name"]: a["value"] for a in nodes["Config"]["parameters"]["assignments"]["assignments"]}
+    assert have["AVAILABILITY_TAB"] == "الإتاحة"
+
+
+def test_the_payment_line_still_gets_its_report_marker(graph, nodes):
+    """Write Line Id stamps `<row>-<seq>` into column U; build_reports.js skips such rows
+    so a payment line is not listed as a second guest."""
+    assert targets(graph, "Write Line Rows")[0] == ["Has Group?", "Write Line Id"]
+    assert nodes["Write Line Id"]["type"] == "n8n-nodes-base.httpRequest"
+    assert "Write Booking Id" not in nodes
     assert "executeOnce" not in dg.read_settings("Read Bookings For Edit")
 
 

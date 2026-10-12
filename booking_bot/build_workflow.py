@@ -80,6 +80,8 @@ WORKFLOW_NAME = "Bookings Bot (Telegram - Google Sheets)"
 SHEET_ID = "1CiHciOeeyRMx9vz5cP0Xlid-jqM_gVjW3sUfore84S8"
 BOOKINGS_TAB = "إدخال الحجوزات"
 EXPENSE_TAB = "مصروفات عامة"
+# The apartment / room registry the Telegram branch and both reports read.
+AVAILABILITY_TAB = "الإتاحة"
 
 GROUP_CHAT_ID = "-4809181011"
 EXPENSE_GROUP_CHAT_ID = "-4809181011"
@@ -118,7 +120,6 @@ SESSION_TABLE = "bookings_bot_sessions"
 # and visible outcome rather than a silent binding to something that is not there.
 TELEGRAM_CRED = ("telegramApi", "REPLACE_ME", "Telegram account")
 SHEETS_CRED = ("googleSheetsOAuth2Api", "REPLACE_ME", "Google Sheets account")
-POSTGRES_CRED = ("postgres", "REPLACE_ME", "Supabase Postgres")
 # Per-instance like the others. The deploy script swaps in the real id.
 ANTHROPIC_CRED = ("anthropicApi", "REPLACE_ME", "Anthropic account")
 
@@ -263,7 +264,7 @@ def ai_model_params():
             "options": {"maxTokensToSample": 300}}
 
 
-def values_get(tab_expr, rng):
+def values_get(tab_expr, rng, render="UNFORMATTED_VALUE"):
     """Read a range through the Sheets API itself, not through the Sheets node.
 
     Where the next row goes is arithmetic on the sheet's own row numbers, and
@@ -286,8 +287,9 @@ def values_get(tab_expr, rng):
         "url": "=https://sheets.googleapis.com/v4/spreadsheets/"
                f"{SHEET_ID}/values/{{{{ encodeURIComponent($('Config').first()"
                f".json.{tab_expr} + '!{rng}') }}}}",
-        # Same note as Format Cancelled Row: this binding cannot be set over the
-        # API, only in the editor or by importing the JSON.
+        # setNodeCredential refuses this credential type on an HTTP node, but an
+        # addNode that carries `credentials` inline binds it (proved 2026-10-12, plan
+        # Task 1) — which is how deploy_graph.py adds these nodes.
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "googleSheetsOAuth2Api",
         "sendQuery": True,
@@ -295,8 +297,10 @@ def values_get(tab_expr, rng):
             {"name": "majorDimension", "value": "ROWS"},
             # Formulas evaluate to '' on empty rows either way; what matters is
             # that a row holding only a formula still counts as occupied, and
-            # UNFORMATTED_VALUE keeps numbers as numbers for the eye.
-            {"name": "valueRenderOption", "value": "UNFORMATTED_VALUE"},
+            # UNFORMATTED_VALUE keeps numbers as numbers for the eye. The booking
+            # lookup also asks for FORMULA, to see =TODAY()-J (an open stay) and
+            # the rate formulas in اجمالي سعر الحجز.
+            {"name": "valueRenderOption", "value": render},
         ]},
         "options": {},
     }
@@ -346,6 +350,100 @@ def sheets_read(tab, rng):
         "sheetName": {"__rl": True, "mode": "name", "value": tab},
         "options": {"dataLocationOnSheet": {"values": {
             "rangeDefinition": "specifyRangeA1", "range": rng}}},
+    }
+
+
+# The lookups' HTTP reads. onError continues so a failed read still reaches the Code
+# node (which then returns nothing) and the Brain; retried once because a 5xx from
+# Sheets is transient and the read is a plain GET.
+FETCH_SETTINGS = dict(onError="continueRegularOutput", retryOnFail=True, maxTries=2,
+                      waitBetweenTries=500)
+# A Code node that emits nothing stops the branch before the Brain runs — the lesson
+# of the SQL reads these replaced. This turns an empty read into one empty item.
+LOOKUP_CODE_SETTINGS = dict(alwaysOutputData=True)
+
+
+def fetch_params(tab_expr, rng, render="UNFORMATTED_VALUE"):
+    p = values_get(tab_expr, rng, render)
+    p["options"] = {"timeout": 15000}
+    return p
+
+
+def session_params(operation):
+    """The Data Table parameters for the session store: "get", "save" or "clear".
+
+    One row per chat in the n8n Data Table `bookings_bot_sessions`. This was the
+    original store; it moved to Postgres on 2026-08-14 because it "looked up
+    cleanly and wrote nothing", and came back on 2026-10-12 when Postgres left the
+    bot. The shapes below were run against the real node in a scratch workflow
+    first (plan Task 1, executions 7810-7811): upsert inserts, a second upsert
+    updates the SAME row, `get` and the table API agree, an empty `state` persists,
+    and a missing row yields one empty item under alwaysOutputData.
+
+    The Brain wants `updated_at` as epoch milliseconds (SESSION_TTL_MS) and reads
+    `data` as a JSON string; both come back from the table as stored.
+    """
+    table = {"__rl": True, "mode": "name", "value": SESSION_TABLE}
+    chat_id = ("={{ String($('Telegram Trigger').first().json.message?.chat?.id ?? "
+               "$('Telegram Trigger').first().json.callback_query.message.chat.id) }}")
+    if operation == "get":
+        return {"resource": "row", "operation": "get", "dataTableId": table,
+                "matchType": "allConditions",
+                "filters": {"conditions": [{"keyName": "chat_id", "condition": "eq",
+                                            "keyValue": chat_id}]},
+                "returnAll": False, "limit": 1}
+    schema = [{"id": c, "displayName": c, "required": False, "defaultMatch": False,
+               "display": True, "type": t, "canBeUsedToMatch": True}
+              for c, t in (("chat_id", "string"), ("state", "string"),
+                           ("data", "string"), ("updated_at", "number"))]
+    if operation == "save":
+        key = "={{ $json.chatId }}"
+        value = {"chat_id": key, "state": "={{ $json.sessionState }}",
+                 "data": "={{ $json.sessionData }}", "updated_at": "={{ Date.now() }}"}
+    elif operation == "clear":      # ended: nothing parked in `data`
+        key = "={{ $('Brain').first().json.chatId }}"
+        value = {"chat_id": key, "state": "", "data": "{}", "updated_at": "={{ Date.now() }}"}
+    else:
+        raise ValueError(operation)
+    return {"resource": "row", "operation": "upsert", "dataTableId": table,
+            "matchType": "allConditions",
+            "filters": {"conditions": [{"keyName": "chat_id", "condition": "eq",
+                                        "keyValue": key}]},
+            "columns": {"mappingMode": "defineBelow", "value": value,
+                        "matchingColumns": ["chat_id"], "schema": schema}}
+
+
+def lookup_node_specs():
+    """name -> (type, typeVersion, parameters, settings, credential).
+
+    The lookups the Postgres reads became, shared by build() and deploy_graph.py,
+    which adds the two report/availability registries to a live workflow. A fetch
+    that follows a node emitting many items is executeOnce: an HTTP node runs once
+    per incoming item.
+    """
+    http, code = "n8n-nodes-base.httpRequest", "n8n-nodes-base.code"
+    once = dict(FETCH_SETTINGS, executeOnce=True)
+    return {
+        "Fetch Bookings Formulas": (http, 4.2, fetch_params("BOOKINGS_TAB", "A1:U2000", "FORMULA"),
+                                    dict(FETCH_SETTINGS), SHEETS_CRED),
+        "Fetch Bookings Values": (http, 4.2, fetch_params("BOOKINGS_TAB", "A1:U2000"),
+                                  dict(FETCH_SETTINGS), SHEETS_CRED),
+        "Read Bookings For Edit": (code, 2, {"jsCode": read_source("build_bookings_lookup.js")},
+                                   dict(LOOKUP_CODE_SETTINGS), None),
+        "Fetch Locations": (http, 4.2, fetch_params("AVAILABILITY_TAB", "A2:B2000"), once, SHEETS_CRED),
+        "Read Locations": (code, 2, {"jsCode": read_source("build_locations.js")},
+                           dict(LOOKUP_CODE_SETTINGS), None),
+        "Fetch Booking Ids": (http, 4.2, fetch_params("BOOKINGS_TAB", "B1:B2000"), once, SHEETS_CRED),
+        "Read Next Booking ID": (code, 2, {"jsCode": read_source("compute_next_booking_id.js")},
+                                 dict(LOOKUP_CODE_SETTINGS), None),
+        "Fetch Report Locations": (http, 4.2, fetch_params("AVAILABILITY_TAB", "A2:B2000"),
+                                   dict(FETCH_SETTINGS), SHEETS_CRED),
+        "Read Report Locations": (code, 2, {"jsCode": read_source("build_locations.js")},
+                                  dict(LOOKUP_CODE_SETTINGS), None),
+        "Fetch Availability Locations": (http, 4.2, fetch_params("AVAILABILITY_TAB", "A2:B2000"),
+                                         dict(FETCH_SETTINGS), SHEETS_CRED),
+        "Read Availability Locations": (code, 2, {"jsCode": read_source("build_locations.js")},
+                                        dict(LOOKUP_CODE_SETTINGS), None),
     }
 
 
@@ -436,6 +534,8 @@ def build():
              "type": "string"},
             {"id": "expense_tab", "name": "EXPENSE_TAB", "value": EXPENSE_TAB,
              "type": "string"},
+            {"id": "avail_tab", "name": "AVAILABILITY_TAB", "value": AVAILABILITY_TAB,
+             "type": "string"},
             {"id": "sheet", "name": "SHEET_ID", "value": SHEET_ID, "type": "string"},
             # The numeric gid of إدخال الحجوزات. TWO nodes need it now, not one:
             # `Format Cancelled Row`, which is gated on it and simply does
@@ -457,80 +557,54 @@ def build():
 
     # ── The session ──────────────────────────────────────────────────────────
     #
-    # One row per chat in `bot_sessions`, a Postgres table — NOT n8n's Data
-    # Table feature, which this used until 2026-08-14. The data table looked up
-    # cleanly and wrote nothing: `Save Session` reported success on every turn
-    # and the table stayed empty, so every button tap arrived with no state and
-    # fell through to "No Action Needed" — the exact bug the session store was
-    # introduced to kill, wearing a different coat.
-    #
-    # Postgres is where everything else durable in this bot already lives, the
-    # credential is the one the two lookups already use, and `on conflict` is a
-    # guarantee rather than a node option. `schema.sql` owns the table:
-    #
-    #     chat_id text primary key, state text, data jsonb, updated_at timestamptz
+    # One row per chat in the n8n Data Table `bookings_bot_sessions`; see
+    # session_params() for its history and for what was proven about the node.
     #
     # `alwaysOutputData` is what lets a chat with no row through as an empty
     # item — the Brain's readSession() treats that as "no session", and without
     # it a first-time user would simply stop here.
-    #
-    # The Brain wants `updated_at` as epoch milliseconds, because that is what it
-    # compares against SESSION_TTL_MS. node-postgres hands a bigint back as a
-    # string and `readSession` does `Number(row.updated_at)`, so that is fine.
-    #
-    # `$1` rather than an interpolated id: the value comes from a Telegram
-    # payload, and a query built by string concatenation out of user-controlled
-    # input is one apostrophe away from being someone else's query.
-    g.node("Load Session", "n8n-nodes-base.postgres", 2.6, {
-        "operation": "executeQuery",
-        "query": "select state, data::text as data,\n"
-                 "       (extract(epoch from updated_at) * 1000)::bigint as updated_at\n"
-                 "  from bot_sessions\n"
-                 " where chat_id = $1;",
-        "options": {"queryReplacement":
-                    "={{ String($('Telegram Trigger').first().json.message"
-                    "?.chat?.id ?? $('Telegram Trigger').first().json"
-                    ".callback_query.message.chat.id) }}"},
-    }, (-60, 300), cred=POSTGRES_CRED, alwaysOutputData=True)
+    g.node("Load Session", "n8n-nodes-base.dataTable", 1.1, session_params("get"),
+           (-60, 300), alwaysOutputData=True)
 
-    # ── The two gated lookups ────────────────────────────────────────────────
+    # ── The gated lookups ────────────────────────────────────────────────────
     #
-    # Each costs a query, so each runs only on the turns that need it. The Brain
-    # references both inside a try/catch precisely because they are unexecuted
-    # on every other turn — see bookingRows() and the registry loader.
+    # Each reads the sheet, so each runs only on the turns that need it. The Brain
+    # references them inside a try/catch precisely because they are unexecuted on
+    # every other turn — see bookingRows() and the registry loader.
     #
-    # Both reads are Postgres, not Sheets. They were Sheets originally and the
-    # swap at Phase 4b is what removed a 0.4–2 s mid-conversation wait; the SQL
-    # aliases the sheet's own Arabic headers, so brain.js consumes the rows
-    # unchanged. Emitting the superseded Sheets version here would be worse than
-    # merely out of date: deploy_graph.py updates these two nodes in place when
-    # they already exist, so it would write Postgres parameters onto a Sheets
-    # node and leave something that cannot run.
+    # They were Postgres reads until 2026-10-12. The database only ever heard about
+    # the bot's own writes while the sheet is hand-edited, so the row number a
+    # lookup handed over drifted and a payment landed on the guest above or below.
+    # Reading the sheet in the same turn it is written removes that. Each lookup is
+    # an HTTP read of the Sheets API followed by a Code node that returns the rows
+    # in the shape the SQL did, so brain.js is unchanged — see lookup_node_specs()
+    # and nodes/build_bookings_lookup.js for why the API and not the Sheets node.
     #
-    # alwaysOutputData is load-bearing on both. A query returning no rows would
-    # otherwise stop the branch before the Brain ever ran, and the bot would
-    # answer nothing at all — the same lesson as Read Discrepancies.
+    # alwaysOutputData is load-bearing on every Code node. A read that returns no
+    # rows would otherwise stop the branch before the Brain ever ran, and the bot
+    # would answer nothing at all.
     lookup_settings = dict(alwaysOutputData=True, onError="continueRegularOutput",
                            retryOnFail=True, maxTries=2)
+    specs = lookup_node_specs()
+
+    def lookup(name, pos):
+        ntype, tv, params, settings, cred = specs[name]
+        g.node(name, ntype, tv, params, pos, cred=cred, **settings)
 
     g.node("Needs Bookings?", "n8n-nodes-base.if", 2.3,
            {"conditions": state_conditions(BOOKING_STATES),
             "looseTypeValidation": True, "options": {}}, (160, 300))
-    g.node("Read Bookings For Edit", "n8n-nodes-base.postgres", 2.6,
-           {"operation": "executeQuery",
-            "query": read_source("read_bookings_for_edit.sql"), "options": {}},
-           (360, 180), cred=POSTGRES_CRED, **lookup_settings)
+    lookup("Fetch Bookings Formulas", (160, 20))
+    lookup("Fetch Bookings Values", (360, 20))
+    lookup("Read Bookings For Edit", (360, 180))
     g.node("Needs Locations?", "n8n-nodes-base.if", 2.3,
            {"conditions": state_conditions(LOCATION_STATES, from_session=True),
             "looseTypeValidation": True, "options": {}}, (560, 300))
-    g.node("Read Locations", "n8n-nodes-base.postgres", 2.6,
-           {"operation": "executeQuery",
-            "query": read_source("read_locations.sql"), "options": {}},
-           # executeOnce: on the AI turns this follows Read Bookings For Edit, so it
-           # is fed one item per booking row and would otherwise run its query once
-           # for each, handing on rows x 26 items. Anywhere else it gets one item,
-           # so nothing changes there.
-           (760, 180), cred=POSTGRES_CRED, executeOnce=True, **lookup_settings)
+    # Fetch Locations is executeOnce: on the AI turns it follows the bookings
+    # lookup, which emits one item per booking row, and an HTTP node runs once per
+    # incoming item. Anywhere else it gets one item, so nothing changes there.
+    lookup("Fetch Locations", (560, 180))
+    lookup("Read Locations", (760, 180))
 
     # The suggested booking ID and expense number, each read only on the turn
     # that asks for it — see deploy_graph.py, which owns the same two gates.
@@ -540,10 +614,10 @@ def build():
                "={{ $('Load Session').first().json.state === 'BOOKING_ID' }}",
                "needs-booking-id"),
             "looseTypeValidation": True, "options": {}}, (560, 480))
-    g.node("Read Next Booking ID", "n8n-nodes-base.postgres", 2.6,
-           {"operation": "executeQuery",
-            "query": read_source("read_next_booking_id.sql"), "options": {}},
-           (760, 480), cred=POSTGRES_CRED, executeOnce=True, **lookup_settings)
+    # executeOnce for the same reason as Fetch Locations: it follows the registry,
+    # which emits one item per room.
+    lookup("Fetch Booking Ids", (560, 400))
+    lookup("Read Next Booking ID", (760, 480))
     g.node("Needs Expense Number?", "n8n-nodes-base.if", 2.3,
            {"conditions": flag_condition(
                "={{ ($('Telegram Trigger').first().json.callback_query || {}).data"
@@ -556,17 +630,22 @@ def build():
     g.connect("Telegram Trigger", "Config")
     g.connect("Config", "Load Session")
     g.connect("Load Session", "Needs Bookings?")
-    # true -> look the bookings up first; false -> straight on to the next gate.
-    g.connect("Needs Bookings?", "Read Bookings For Edit", index=0)
+    # true -> look the bookings up first (two reads: formulas, then values);
+    # false -> straight on to the next gate.
+    g.connect("Needs Bookings?", "Fetch Bookings Formulas", index=0)
     g.connect("Needs Bookings?", "Needs Locations?", index=1)
+    g.connect("Fetch Bookings Formulas", "Fetch Bookings Values")
+    g.connect("Fetch Bookings Values", "Read Bookings For Edit")
     g.connect("Read Bookings For Edit", "Needs Locations?")
-    g.connect("Needs Locations?", "Read Locations", index=0)
+    g.connect("Needs Locations?", "Fetch Locations", index=0)
+    g.connect("Fetch Locations", "Read Locations")
 
     # ── The Brain ────────────────────────────────────────────────────────────
     g.node("Brain", "n8n-nodes-base.code", 2, {"jsCode": brain_source()}, (960, 300))
     g.connect("Read Locations", "Needs Booking ID?")
     g.connect("Needs Locations?", "Needs Booking ID?", index=1)
-    g.connect("Needs Booking ID?", "Read Next Booking ID", index=0)
+    g.connect("Needs Booking ID?", "Fetch Booking Ids", index=0)
+    g.connect("Fetch Booking Ids", "Read Next Booking ID")
     g.connect("Needs Booking ID?", "Needs Expense Number?", index=1)
     g.connect("Read Next Booking ID", "Needs Expense Number?")
     g.connect("Needs Expense Number?", "Read Expense Numbers", index=0)
@@ -646,25 +725,10 @@ def build():
     # than needing a branch to skip it.
     #
     # `sessionData` is always a JSON string — brain.js emits '{}' rather than ''
-    # for an empty session — so the `::jsonb` cast never sees anything it cannot
-    # parse. `updated_at` is `now()` rather than a value from the turn: the row's
-    # age is a fact about the database, and letting the client assert it is how
-    # clock skew becomes an expired session.
-    g.node("Save Session", "n8n-nodes-base.postgres", 2.6, {
-        "operation": "executeQuery",
-        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\n"
-                 "values ($1, $2, $3::jsonb, now())\n"
-                 "on conflict (chat_id) do update\n"
-                 "   set state = excluded.state,\n"
-                 "       data = excluded.data,\n"
-                 "       updated_at = now();",
-        # An ARRAY expression, not a comma-separated string. `sessionData` is
-        # JSON and full of commas, and the string form is split on them — the
-        # session would arrive as three mangled parameters, or as a syntax
-        # error, depending on where the commas fell.
-        "options": {"queryReplacement":
-                    "={{ [$json.chatId, $json.sessionState, $json.sessionData] }}"},
-    }, (1160, 480), cred=POSTGRES_CRED)
+    # for an empty session. `updated_at` is Date.now() on the n8n server, the same
+    # clock the Brain compares it against in readSession().
+    g.node("Save Session", "n8n-nodes-base.dataTable", 1.1, session_params("save"),
+           (1160, 480))
 
     # ── The write path ───────────────────────────────────────────────────────
     g.node("Has Save?", "n8n-nodes-base.if", 2.3,
@@ -809,11 +873,14 @@ def build():
                     " data: $json.data }) }}",
         "options": {},
     }, (2160, 1020), cred=SHEETS_CRED)
-    # The line's own id, in its own request. Build Line Rows leaves معرف النظام
-    # out of the ranges it emits, so the value comes from the Brain rather than
-    # from the item. `executeOnce` is kept even though that node emits a single
-    # item now: it costs nothing, and it is the guarantee rather than the item
-    # count that matters.
+    # The line's own marker, in its own request: `<row>-<seq>`, e.g. "36-2".
+    # build_reports.js skips any row whose column U looks like that, so a payment
+    # line is not listed as a second guest in the digest, the long-stays list and
+    # the debt report. It used to be "<database id>-<seq>"; the Brain now builds it
+    # from the booking's sheet row. Build Line Rows leaves معرف النظام out of the
+    # ranges it emits, so the value comes from the Brain rather than from the item.
+    # `executeOnce` is kept even though that node emits a single item now: it costs
+    # nothing, and it is the guarantee rather than the item count that matters.
     g.node("Write Line Id", "n8n-nodes-base.httpRequest", 4.2,
            values_put_id("BOOKINGS_TAB",
                          row_expr="$('Brain').first().json.save.row",
@@ -1035,24 +1102,13 @@ def build():
     # so a failed write leaves the user on CONFIRM with the Save button still
     # working — see the closing comment in brain.js.
     #
-    # deploy_graph.py hangs the shadow write off this node.
-    #
     # `data` used to keep the last edit's pre-image, which is what /undo read
     # within its ten minutes. Undo was removed on 2026-08-22 — it left the
     # payments ledger holding both the original payment and the one the undo
     # created, and its cleanup was keyed on a row number, which is not a stable
     # identity — so there is nothing to park and the row is simply cleared.
-    g.node("Clear Session", "n8n-nodes-base.postgres", 2.6, {
-        "operation": "executeQuery",
-        "query": "insert into bot_sessions (chat_id, state, data, updated_at)\n"
-                 "values ($1, '', $2::jsonb, now())\n"
-                 "on conflict (chat_id) do update\n"
-                 "   set state = '',\n"
-                 "       data = excluded.data,\n"
-                 "       updated_at = now();",
-        "options": {"queryReplacement":
-                    "={{ [$('Brain').first().json.chatId, '{}'] }}"},
-    }, (2760, 660), cred=POSTGRES_CRED)
+    g.node("Clear Session", "n8n-nodes-base.dataTable", 1.1, session_params("clear"),
+           (2760, 660))
     # Send Saved's own edge is wired where the reply order is decided, so that
     # it lands before the group post rather than after it.
     g.connect("Send Saved No Group", "Clear Session")

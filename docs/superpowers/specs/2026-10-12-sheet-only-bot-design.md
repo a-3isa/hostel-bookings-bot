@@ -44,7 +44,7 @@ Reading the sheet in the same turn the bot writes it removes both.
 | `Read Bookings For Edit` (SQL) | `Fetch Bookings Formulas` + `Fetch Bookings Values` (HTTP `values.get` of `A1:U2000`, `FORMULA` and `UNFORMATTED_VALUE`) → `Read Bookings For Edit` (Code). |
 | `Read Locations`, `Read Report Locations`, `Read Availability Locations` (SQL) | `Fetch … Locations` (HTTP `values.get` of the `الإتاحة` tab `A2:B2000`) → the same-named Code node returning `{الشقة, الغرفة}` rows. |
 | `Read Next Booking ID` (SQL) | `Fetch Booking Ids` (HTTP, `B1:B2000`) → `Read Next Booking ID` (Code). |
-| `Build Shadow Write`, `Shadow Write`, `Read Booking Id`, `Write Booking Id`, `Write Line Id`, `Write Snapshot`, `Read Discrepancies`, `Build Reconcile Message`, `Read Unmirrored Bookings`, `Append Mirror Row`, `Mark Mirrored` | Removed, with their IF/Code helpers and wiring. |
+| `Build Shadow Write`, `Shadow Write`, `Read Booking Id`, `Write Booking Id`, `Write Snapshot`, `Read Discrepancies`, `Build Reconcile Message`, `Read Unmirrored Bookings`, `Append Mirror Row`, `Mark Mirrored` | Removed, with their IF/Code helpers and wiring. |
 
 `Config` gains `AVAILABILITY_TAB` (`الإتاحة`). The Postgres credential becomes unused.
 
@@ -69,7 +69,15 @@ A row is a **line** of the booking above it when all of these hold:
 
 That is exactly what `commitPaymentLine` writes (it copies the identity columns, leaves
 the price blank and fills paid and method). A test pins the identity columns to
-`LINE_IDENTITY_COLS` in `brain.js`. Column `معرف النظام` is not read.
+`LINE_IDENTITY_COLS` in `brain.js`. The lookup does not read column `معرف النظام`.
+
+**`Write Line Id` stays** (found while building; the first draft of this spec retired it).
+It stamps `<row>-<seq>` into column U of a new payment line, and `build_reports.js`
+skips a row whose U matches `n-n` so that the daily digest, the long-stays list and the
+Saturday debt report do not count a payment line as a second guest. `Brain` already
+builds that marker from `booking_id`, which is now the row number, so nothing changes
+in it. A booking's own row gets no U any more (the database id it carried is gone), and
+the reports already treat a blank U as "a booking".
 
 Each booking is returned as one item with the sheet's own Arabic headers plus:
 
