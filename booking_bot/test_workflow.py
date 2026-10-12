@@ -552,3 +552,50 @@ def test_the_merged_workflow_has_no_postgres_anywhere(monkeypatch, tmp_path):
     assert targets_in(full, "Read Report Values") == [["Build Reports"]]
     assert targets_in(full, "Clear Session") == [["Should Format Row?"]] or "Clear Session" in full["connections"]
     assert vw.check(full) == []
+
+
+# ── Branch order: n8n runs one output's branches in the order they were connected ──
+
+def _order(wf, src, idx=0):
+    return [c["node"] for c in wf["connections"][src]["main"][idx]]
+
+
+def test_the_migration_keeps_the_order_the_branches_run_in():
+    """Found live (execution 7820): re-adding Save Session appended it to the END of
+    Brain's list, so it ran after Clear Session and put the finished session back to
+    EDIT_CONFIRM — leaving an old Confirm card able to save the payment again. Save
+    Session must run first (before anything that talks to Telegram) and Clear Session
+    before the group post."""
+    live, _ = _migrated()
+    built = bw.workflow(bw.build())
+    for src in ("Brain", "Send Saved", "Write Line Rows"):
+        assert _order(live, src) == _order(built, src), src
+    assert _order(live, "Brain")[0] == "Save Session"
+    o = _order(live, "Send Saved")
+    assert o.index("Clear Session") < o.index("Has Receipt?")
+
+
+def test_a_live_only_branch_stays_after_the_generated_ones():
+    live = _old_graph()
+    live["nodes"].append({"name": "Wants Availability?", "type": "n8n-nodes-base.if", "typeVersion": 2.3,
+                          "position": [0, 0], "parameters": {}})
+    live["connections"]["Brain"]["main"][0].append({"node": "Wants Availability?", "type": "main", "index": 0})
+    dg.apply_offline(live, dg.sheet_only_ops(live, bw.workflow(bw.build()), SHEETS_LIVE))
+    o = _order(live, "Brain")
+    assert o[0] == "Save Session" and o[-1] == "Wants Availability?", o
+
+
+def test_a_graph_already_published_in_the_wrong_order_is_put_right():
+    live, _ = _migrated()
+    br = live["connections"]["Brain"]["main"][0]
+    br.append(br.pop(0))                       # Save Session last: what went live
+    sc = live["connections"]["Send Saved"]["main"][0]
+    sc.append(sc.pop(0))                       # Clear Session after Has Receipt?
+    ops = dg.sheet_only_ops(live, bw.workflow(bw.build()), SHEETS_LIVE)
+    assert {o["type"] for o in ops} & {"removeConnection", "addConnection"}
+    dg.apply_offline(live, ops)
+    assert _order(live, "Brain")[0] == "Save Session"
+    o = _order(live, "Send Saved")
+    assert o.index("Clear Session") < o.index("Has Receipt?")
+    again = dg.sheet_only_ops(live, bw.workflow(bw.build()), SHEETS_LIVE)
+    assert not ({o["type"] for o in again} & {"addNode", "removeNode", "addConnection", "removeConnection"})
