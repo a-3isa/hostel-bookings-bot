@@ -17,7 +17,7 @@
 - Every HTTP fetch that follows a node emitting more than one item is `executeOnce` (`Fetch Locations`, `Fetch Booking Ids`, `Fetch Report Locations`, `Fetch Availability Locations`). Every lookup Code node has `alwaysOutputData: true`, so an empty or failed read still lets the Brain run.
 - A **line** is a row directly under a booking's block with the same `ID`, `اسم المقيم`, `اسم الشقة`, `رقم الغرفة` and arrival, a blank `اجمالي سعر الحجز`, and a filled paid or method cell. Those five identity columns must stay a subset of `LINE_IDENTITY_COLS` in `brain.js` (a test pins it).
 - Lookup row shape (what `brain.js` already reads): the sheet's Arabic headers, plus `row_number`, `booking_id` (= the row number), `lines: [{seq, row, method, amount}]` (`seq` from 2), `block_end`, `total_is_formula`. Open-ended nights are the string `'=OPEN'`. Dates are `YYYY-MM-DD`. `ID` is text.
-- The sheet's formula columns `K, N, P, R, S, T` are never written; column `U` (معرف النظام) is no longer written or read.
+- The sheet's formula columns `K, N, P, R, S, T` are never written; column `U` (معرف النظام) is read by nobody in the lookups. `Write Line Id` stays and still stamps `<row>-<seq>` on a payment line, because `build_reports.js` skips rows whose U matches `n-n` (otherwise the reports list a guest twice). A booking's own row gets no U.
 - The graph is generated. Never edit the workflow in the n8n editor.
 - Nothing in Postgres, `supabase/` or `webui/` is deleted. Retire them in docs only.
 - Shell is Git Bash; keep commands plain and separate (worktree isolation refuses compound git commands). Read files in chunks of at most 200 lines. A hook creates empty junk files named after JS fragments in the worktree root: never `git add -A`; run `git clean -n` and remove them with `git clean -f` before the final review.
@@ -49,7 +49,7 @@ Failure modes the spec implies but the tasks' main tests would not catch. Each i
 | `booking_bot/nodes/compute_next_booking_id.js` | create | `Read Next Booking ID`: highest plain counter + 1. |
 | `booking_bot/test_sheet_lookup.mjs` | create | Offline tests for the three Code nodes, on fixtures from the real tab. |
 | `booking_bot/lookup_cli.mjs`, `booking_bot/check_sheet_lookup.py` | create | Read-only parity check against the live tab. |
-| `booking_bot/build_workflow.py` | modify | Data Table session nodes, the fetch + Code lookups, `AVAILABILITY_TAB`, no Postgres, no `Write Line Id`. |
+| `booking_bot/build_workflow.py` | modify | Data Table session nodes, the fetch + Code lookups, `AVAILABILITY_TAB`, no Postgres. |
 | `booking_bot/deploy_graph.py` | modify | Reports/availability registry reads, no shadow/reconcile blocks, the live migration (`sheet_only_ops`), batching, `removeNode` offline. |
 | `booking_bot/test_workflow.py`, `validate_workflow.py` | modify | No-Postgres and wiring tests. |
 | retired files | delete | `nodes/build_shadow_write.js`, `build_snapshot_sql.js`, `build_reconcile_message.js`, `read_unmirrored.sql`, `read_bookings_for_edit.sql`, `read_locations.sql`, `read_next_booking_id.sql`, `test_shadow.mjs`, `test_reconcile.mjs`. |
@@ -625,7 +625,7 @@ git commit -m "The registry and the next booking ID, from the sheet" -m "Co-Auth
 # ── Sheet-only: no Postgres anywhere ─────────────────────────────────────────
 
 POSTGRES_NAMES = {"Build Shadow Write", "Shadow Write", "Read Booking Id", "Write Booking Id",
-                  "Write Line Id", "Build Snapshot SQL", "Write Snapshot", "Read Discrepancies",
+                  "Build Snapshot SQL", "Write Snapshot", "Read Discrepancies",
                   "Build Reconcile Message", "Read Unmirrored Bookings", "Append Mirror Row",
                   "Mark Mirrored"}
 
@@ -696,10 +696,11 @@ def test_the_registry_tab_is_in_config(nodes):
     assert have["AVAILABILITY_TAB"] == "الإتاحة"
 
 
-def test_the_payment_line_write_ends_at_the_group_post(graph):
-    """Write Line Id stamped a database id into column U and is gone with the database."""
-    assert targets(graph, "Write Line Rows")[0] == ["Has Group?"]
-    assert "Write Line Id" not in graph.connections
+def test_the_payment_line_still_gets_its_report_marker(graph, nodes):
+    """Write Line Id stamps `<row>-<seq>` into column U; build_reports.js skips such rows."""
+    assert targets(graph, "Write Line Rows")[0] == ["Has Group?", "Write Line Id"]
+    assert nodes["Write Line Id"]["type"] == "n8n-nodes-base.httpRequest"
+    assert "Write Booking Id" not in nodes
 ```
 
 Update the existing tests that assumed the old nodes:
@@ -891,7 +892,7 @@ Connections (replace the old lookup wiring block):
 ```
 (keep the surrounding comments about ordering, rewriting the Postgres-specific ones: "`updated_at` is `Date.now()`, the same server clock the Brain compares against").
 
-`Write Line Id`: delete the node definition, its comment block, and `g.connect("Write Line Rows", "Write Line Id")` with its comment. Delete `values_put_id` if nothing else in `build_workflow.py` or `deploy_graph.py` still calls it after Task 5 (check with grep in Task 6).
+`Write Line Id` and `values_put_id` **stay** (the reports need the marker; see Global Constraints). Only fix the comment above the node: the id it writes is `<row>-<seq>`, not a database id.
 
 Update the module docstring and comments that describe Postgres/shadow (`deploy_graph.py hangs the shadow write off this node`, "Phase 4b" lookups, `bot_sessions`) to say what is true now.
 
@@ -953,7 +954,7 @@ def _old_graph():
     add("Needs Locations?", "Read Locations", 0)
     add("Needs Booking ID?", "Read Next Booking ID", 0)
     # the live-only branches
-    for name in sorted(POSTGRES_NAMES - {"Write Line Id"}):
+    for name in sorted(POSTGRES_NAMES):
         wf["nodes"].append({"name": name, "type": "n8n-nodes-base.postgres", "typeVersion": 2.6,
                             "position": [0, 0], "parameters": {"operation": "executeQuery", "query": "select 1"}})
     add("Clear Session", "Build Shadow Write")
@@ -1111,7 +1112,7 @@ Add near the top-level helpers:
 ```python
 # Nodes that exist only to feed the database, with their helpers. Removing a node
 # drops its connections, so nothing is left pointing at them.
-RETIRED = ["Build Shadow Write", "Shadow Write", "Read Booking Id", "Write Booking Id", "Write Line Id",
+RETIRED = ["Build Shadow Write", "Shadow Write", "Read Booking Id", "Write Booking Id",
            "Build Snapshot SQL", "Write Snapshot", "Read Discrepancies", "Build Reconcile Message",
            "Read Unmirrored Bookings", "Append Mirror Row", "Mark Mirrored"]
 
@@ -1299,7 +1300,7 @@ git commit -m "deploy_graph: the sheet-only migration, and no more shadow or rec
 
 - [ ] **Step 1: Find every reference**
 
-Run: `git grep -n -E "build_shadow_write|build_snapshot_sql|build_reconcile_message|read_unmirrored|read_bookings_for_edit|read_locations|read_next_booking_id|test_shadow|test_reconcile|values_put_id|Write Line Id|Shadow Write" -- booking_bot README.md docs/HANDOFF.md | grep -v "bookings-bot.*\.json" | head -40`
+Run: `git grep -n -E "build_shadow_write|build_snapshot_sql|build_reconcile_message|read_unmirrored|read_bookings_for_edit|read_locations|read_next_booking_id|test_shadow|test_reconcile|Shadow Write" -- booking_bot README.md docs/HANDOFF.md | grep -v "bookings-bot.*\.json" | head -40`
 
 - [ ] **Step 2: Delete**
 
@@ -1311,9 +1312,9 @@ git rm booking_bot/test_shadow.mjs booking_bot/test_reconcile.mjs
 
 - [ ] **Step 3: Fix the references the grep found**
 
-- `build_workflow.py`: delete `values_put_id` if unused (and its docstring), and stale comments naming the shadow write / Phase 4b / `bot_sessions`.
+- `build_workflow.py`: stale comments naming the shadow write / Phase 4b / `bot_sessions` (`values_put_id` stays).
 - `sync_nodes.py`: remove the retired names from `DEFAULT_NODES` / `NEVER_DEFAULT` and its docstring.
-- `nodes/build_line_rows.js`: the header comments that mention `Write Line Id` and column U: say column U is no longer written.
+- `nodes/build_line_rows.js`: its comment about `Write Line Id` stays true; only say the id is `<row>-<seq>`.
 - `booking_bot/README.md`, `README.md`: the architecture diagram and the "mirror" paragraphs (Task 8 rewrites them; here only make the code comments true).
 - `validate_workflow.py`: nothing should reference the removed files; run it.
 
