@@ -1,5 +1,82 @@
 # Handoff — where the Supabase migration stands
 
+> **2026-10-12: the Supabase migration is over.** The bot no longer reads or writes
+> Postgres; see the first entry. Everything below that talks about the mirror, the
+> shadow write, the reconcile or `bot_sessions` is history.
+
+## 2026-10-12 — the bot no longer uses Postgres
+
+**LIVE since 2026-10-12, but not yet exercised by a real Telegram message.**
+Workflow `hzMYegbL3yifl7KN`, activeVersionId `2cefc898-16f8-403f-805c-0d338361445d`,
+67 nodes (was 72), no Postgres node, live Brain byte-identical to `booking_bot/brain.js`.
+**Rollback:** `restore_workflow_version` to `4555ef7a-38f1-4d4e-a1dc-f71038a6d6f8` (the
+Postgres version that was live this morning), then `publish_workflow`. Spec:
+`docs/superpowers/specs/2026-10-12-sheet-only-bot-design.md`; plan: `…/plans/2026-10-12-sheet-only-bot.md`.
+
+**Why.** The admin edits the sheet by hand and never uses the dashboard, so the database
+could not stay current, and the bot read it: a payment was written to the wrong guest's row
+(the stored `sheet_row` was one off) and `paid = database paid + new payment` was written into
+the sheet's cumulative cell from a stale number. The bot now reads the sheet in the turn it
+writes it.
+
+**What changed.**
+- `Load/Save/Clear Session` are Data Table nodes on `bookings_bot_sessions`
+  (`build_workflow.session_params`).
+- `Read Bookings For Edit`, `Read Locations`, `Read Next Booking ID` (and the report and
+  availability registries) are each an HTTP `values.get` of the Sheets API followed by a Code
+  node (`nodes/build_bookings_lookup.js`, `build_locations.js`, `compute_next_booking_id.js`)
+  that returns the rows `brain.js` always got. `booking_id` is now the sheet row.
+- Removed: `Build Shadow Write`, `Shadow Write`, `Read Booking Id`, `Write Booking Id`,
+  `Build Snapshot SQL`, `Write Snapshot`, `Read Discrepancies`, `Build Reconcile Message`,
+  `Read Unmirrored Bookings`, `Append Mirror Row`, `Mark Mirrored`. So: a new booking's own row
+  gets no `معرف النظام` any more, there is no 08:00 reconcile, and dashboard-born bookings are
+  no longer appended to the sheet.
+- **`Write Line Id` stays.** It stamps `<row>-<seq>` on a payment line, and
+  `build_reports.js` drops rows whose column U looks like `n-n`; without it the reports list a
+  guest twice.
+- A *line* is the row directly under a booking with the same ID, name, apartment, room and
+  arrival, a blank price, and its own paid/method. Anything else — the same guest on a later
+  arrival, or the same identity after a gap — is its own booking (rows 37-39 are three).
+- `Config` gains `AVAILABILITY_TAB`. Supabase, `supabase/` and `webui/` are untouched and
+  marked retired.
+
+**Proven before publish.** (1) A scratch workflow ran the real Data Table node (upsert, second
+upsert updates the same row, an empty `state` persists, delete) and an HTTP node whose
+credential was supplied inline (executions 7810, 7811). (2) A second scratch workflow ran the
+*generated* session and lookup nodes in n8n's real runtime against the live tab (execution
+7813): 56 bookings, 26 rooms, next ID 45, a session saved, read back, cleared and deleted;
+identical to `python booking_bot/check_sheet_lookup.py`. (3) `deploy_graph.py --dry-run`
+applied the migration to a copy of the live graph (87 operations, 72 → 67 nodes) and a second
+run found only parameter refreshes. (4) The draft was read back from the server and compared
+with the generator before publishing.
+
+**First-message checklist (nobody has done this yet).** `/start` → ✏️ or 🤖, type an existing
+ID, then **إلغاء**: the card must name the right guest. Then one real payment on a booking you
+choose and check the right row. Look at the next execution for a red node; if a lookup, a
+session node or a write is red, roll back.
+
+**Things that behave differently.**
+- Conversations in progress at the switch lost their session (they lived in `bot_sessions`).
+- The suggested booking ID is the highest plain number in column B + 1; starred carry-overs
+  (`104**`) and anything over six digits are ignored. It restarts with the tab each month.
+- A lookup is two Sheets API reads (about a second or two).
+- The only remaining wrong-row window is a row inserted by hand between the lookup and the
+  Confirm tap. A write-time guard (re-read the row's name before writing) would close it and
+  was not built.
+
+**Landmines.**
+- The report and availability branches never run `Config`, so their fetches name the tab
+  literally; `$('Config')` there throws "hasn't been executed".
+- `setNodeCredential` still refuses `googleSheetsOAuth2Api` on an HTTP node, but an `addNode`
+  that carries `credentials` binds it. That is how `deploy_graph.py` adds the fetch nodes.
+- Data Table operation names: `get`, `upsert`, `deleteRows`.
+- `validate_workflow.py` reports `Route Save routes None` on the LIVE graph: its rules have no
+  `outputKey` there. That is the live node's shape, not a fault.
+- `deploy_graph.py --dry-run` applies everything to a copy of the live graph and validates it
+  without sending anything; use it before every structural deploy.
+- Still for a person, unchanged: the nine orphan rows 3-11, and ID 27's two rows (38, 39) which
+  share one old system id.
+
 ## 2026-10-12 — AI edit: type a change, review it, confirm it
 
 **LIVE since 2026-10-12, but not yet exercised by a real Telegram message.**

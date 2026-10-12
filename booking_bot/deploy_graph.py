@@ -825,6 +825,25 @@ def main():
                 print(f"  {name:24} {key} ({cname})")
         return
 
+    if "--dry-run" in sys.argv:
+        # Nothing is sent. The operations are applied to a private copy of the live
+        # graph, which is then checked, so a migration is verified against the REAL
+        # workflow before the draft is touched.
+        import copy
+        import tempfile
+        import validate_workflow as vw
+        sim = apply_offline(copy.deepcopy(wf), [o for o in ops if o["type"] != "setNodeCredential"])
+        out = os.path.join(os.environ.get("CLAUDE_JOB_DIR", tempfile.gettempdir()), "live-dry-run.workflow.json")
+        with open(out, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(sim, fh, ensure_ascii=False, indent=2)
+        pg_left = [n["name"] for n in sim["nodes"] if n["type"].endswith("postgres")]
+        print(f"\ndry run: {len(ops)} operations in {len(batches(ops))} batch(es);"
+              f" {len(wf['nodes'])} -> {len(sim['nodes'])} nodes")
+        print("postgres nodes left:", pg_left or "none")
+        print("validator:", vw.check(sim) or "clean")
+        print("wrote", out)
+        return
+
     # In batches, each atomic: the endpoint takes at most 100 operations a call and
     # the no-Postgres migration is more than that. A failed batch leaves the draft
     # half-migrated; nothing is live until --publish, and restore_workflow_version
