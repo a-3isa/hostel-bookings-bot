@@ -1,5 +1,49 @@
 # Handoff — where the Supabase migration stands
 
+## 2026-10-12 — AI edit: type a change, review it, confirm it
+
+**Built and tested offline; not yet deployed.** Deploy order is at the end of this
+entry. Spec: `docs/superpowers/specs/2026-10-12-ai-booking-edit-design.md`, plan:
+`docs/superpowers/plans/2026-10-12-ai-booking-edit.md`.
+
+Admins get a new menu button, 🤖 تعديل بالذكاء الاصطناعي (`choice_ai`). They type a
+change to a saved booking in plain Arabic or English — "حجز 3 دفع 400 كاش",
+"booking 12 to انبي 2 room 3 and extend 2 nights", "booking 7 left today" — and the
+bot answers with the ordinary edit review card, prefixed with what it understood.
+Nothing is written until **Confirm**, and Confirm is the unchanged `commitEdit`
+path: same sheet write, Postgres mirror, group post and double-tap lock as the
+manual edit menu. Covered: payments (including a second method on its own line,
+foreign currency, refunds), changing the room, extending the stay, running it
+until a date, and leaving.
+
+**The model only parses.** An Information Extractor node (Anthropic Chat Model,
+`claude-haiku-5-5`) sits in front of `Brain` and returns a small JSON request. It
+has no tools, never writes, and never sees sheet rows, names or phones — only the
+typed text, today's date, the apartment names and the payment-method keys.
+`brain.js` re-validates every field (`readAiIntent`), looks the booking up in the
+rows it already has, does the arithmetic, and draws the card. The schema and the
+prompt live in `booking_bot/ai_intent.py` and nowhere else.
+
+**Landmines**
+
+- `AI_TEXT` and `AI_PICK` must be in `BOOKING_STATES` and `LOCATION_STATES` in
+  **both** `build_workflow.py` and `deploy_graph.py`; a test pins that they match.
+- Room moves and stay changes warn about clashes (`findConflicts`, same strings as
+  the new-booking flow); the manual edit menu still does not check at all.
+- The clash text is computed on the turn that has the bookings loaded and carried
+  in the session (`d.aiClashes`), because a receipt step can sit between that turn
+  and the card.
+- With no Anthropic credential on the instance, `deploy_graph.py` skips the AI
+  branch and the Brain answers "unavailable" to the button by itself.
+- Offline tests mock the model. `python booking_bot/eval_ai_intents.py` (needs
+  `ANTHROPIC_API_KEY`) is the only check of how it reads real phrasing — add the
+  phrases staff really type to `ai_eval_cases.json`.
+
+**To deploy:** create an *Anthropic* credential in the n8n UI (Credentials → New),
+close the workflow tab, then `python booking_bot/deploy_graph.py --publish` and
+`python booking_bot/push_brain.py --publish`. First live pass: go as far as the
+card and tap **إلغاء**, so nothing is written.
+
 ## 2026-08-28 — no scheduled messages, غير مدفوع is not a method, and the DB was resynced from the sheet
 
 **All of this is LIVE.** Workflow `hzMYegbL3yifl7KN`, activeVersionId

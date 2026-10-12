@@ -154,7 +154,7 @@ the stored intent.
 | `booking_id` | Non-empty after ASCII-digit normalisation. |
 | `payment.amount` | Finite, non-zero. Negative allowed (admin refund). |
 | `payment.method` | A key in `PAY_METHODS` (never `unpaid`). |
-| `room` | Apartment and room both exist in the registry; otherwise open the existing apartment/room picker. |
+| `room` | Apartment and room both exist in the registry; otherwise refuse, listing the real apartments, and stay in `AI_TEXT` (a picker would need a new state to resume the rest of the request). |
 | `stay.nights` | Integer ≥ 1. |
 | `stay.date` | Valid ISO date; `daysBetween(arrival, date)` must not be negative. `leave` without a date means today. |
 | Combination | At most one payment, one room change, one stay change. |
@@ -176,8 +176,9 @@ manual flow builds (`editRow`, `editOrig`, `editNew`, `paidAdded`, `payMethod`,
   then continue.
 - **Room.** `editSet` on `اسم الشقة` and `رقم الغرفة`.
 - **Stay.** `extend`: `nights = current + n`. `until` / `leave`:
-  `daysBetween(arrival, date)`; `d.departure` is set so the card shows the date.
-  `تاريخ المغادرة` is a sheet formula and is never written.
+  `daysBetween(arrival, date)`. In every case `d.departure` is set so the card
+  shows the (new) departure date. `تاريخ المغادرة` is a sheet formula and is never
+  written.
 
 ### 6.5 The card
 
@@ -228,13 +229,15 @@ state list. Cases:
   refund below zero (refused).
 - Extend by N; extend an open-ended stay (refused); `until` a date; `leave` with
   and without a date; `leave` before arrival (refused).
-- Room change: valid, invalid (picker), and clash warning.
+- Room change: valid, invalid (refused with the list of apartments), and clash warning.
 - Payment plus extension in one message.
 - Duplicate ID → pick list → applied; unknown ID.
 - AI failure → fallback message; cashier refused.
 - Cancel writes nothing (`hasSave` unset).
-- **Equivalence:** for each supported change, the `out.save` from the AI path
-  equals the `out.save` from the manual flow for the same change.
+- **Equivalence:** for a payment, and for a payment plus a leave, the AI path's
+  `out.save` equals the manual flow's (key order and `payment.ref` ignored). A
+  stay change on its own has no manual equivalent that records a departure, so
+  only its written `fields` are compared.
 
 ### 8.2 Graph (`test_workflow.py`, `validate_workflow.py`)
 
@@ -259,8 +262,9 @@ real examples of what staff type, so the sample phrases come from the user.
 
 ## 10. Risks and open items
 
-- **`addConnection` with AI connection types** over the n8n MCP is unverified.
-  If it is refused, fall back to importing the generated JSON.
+- **`addConnection` with AI connection types** — resolved: `update_workflow`
+  accepts `connectionType` on connection operations, so `ai_languageModel` is a
+  normal operation. First exercised on the live instance at rollout.
 - **Model id.** `claude-haiku-5-5` must appear in the node's model list once the
   credential exists; otherwise use Sonnet.
 - **Apartment names in the prompt** come from `Read Locations`; the best-effort

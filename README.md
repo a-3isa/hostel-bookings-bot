@@ -32,6 +32,9 @@ Each folder has its own README with the details.
   payment shows what the booking has paid against its price, asks for a receipt
   for انستاباي and فودافون كاش, and saves nothing until the review card is
   confirmed.
+- **Admins** also get 🤖 تعديل بالذكاء الاصطناعي: type a change to a booking in
+  plain words, see exactly what would change, and confirm. The model only reads
+  the text; the same code path as the edit menu writes it.
 - Every booking is posted to the group chat. The bot suggests the next booking
   ID, and the numbering restarts each Cairo calendar month.
 - In column P (المتبقي) the bot writes the sheet's own formula, not a number,
