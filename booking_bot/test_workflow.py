@@ -599,3 +599,33 @@ def test_a_graph_already_published_in_the_wrong_order_is_put_right():
     assert o.index("Clear Session") < o.index("Has Receipt?")
     again = dg.sheet_only_ops(live, bw.workflow(bw.build()), SHEETS_LIVE)
     assert not ({o["type"] for o in again} & {"addNode", "removeNode", "addConnection", "removeConnection"})
+
+
+# ── The key reads retry instead of hanging (execution 7480) ──────────────────
+
+def test_the_key_reads_retry_and_report_instead_of_hanging():
+    """Execution 7480 (2026-10-11): Google answered the key read with a 503 after
+    185 s, the node had no error output, and the run died before Send Save Error.
+    The admin saw nothing, tapped Save again inside the 60 s lock, and the tap
+    was swallowed too. The read is a plain GET, so it retries; it gives up
+    quickly rather than sitting on the default 300 s; and a failure that
+    survives the retries has to reach the user.
+
+    alwaysOutputData stays off: with an error output it puts an empty item on
+    output 0 as well, and the user got the error message twice."""
+    graph = bw.build()
+    nodes = {n["name"]: n for n in graph.nodes}
+    for reader in ("Read Booking Key", "Read Expense Key"):
+        n = nodes[reader]
+        assert n.get("onError") == "continueErrorOutput", reader
+        assert n.get("alwaysOutputData") is False, reader
+        assert n.get("retryOnFail") is True, reader
+        assert n.get("maxTries") == 3, reader
+        timeout = n["parameters"].get("options", {}).get("timeout")
+        assert timeout and timeout <= 20000, f"{reader} timeout is {timeout}"
+        # worst case = tries * timeout + waits, and it has to finish inside the
+        # Brain's 60 s save lock or the user's retry tap is swallowed.
+        worst = n["maxTries"] * timeout + (n["maxTries"] - 1) * n["waitBetweenTries"]
+        assert worst < 60000, f"{reader} can take {worst} ms"
+        failed = graph.connections[reader]["main"][1]
+        assert [l["node"] for l in failed] == ["Send Save Error"], reader

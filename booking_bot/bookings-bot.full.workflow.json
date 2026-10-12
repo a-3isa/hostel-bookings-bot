@@ -1090,7 +1090,9 @@
             }
           ]
         },
-        "options": {}
+        "options": {
+          "timeout": 15000
+        }
       },
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -1098,7 +1100,11 @@
           "name": "Google Sheets account"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
     },
     {
       "id": "build-booking-row",
@@ -1178,7 +1184,9 @@
             }
           ]
         },
-        "options": {}
+        "options": {
+          "timeout": 15000
+        }
       },
       "credentials": {
         "googleSheetsOAuth2Api": {
@@ -1186,7 +1194,11 @@
           "name": "Google Sheets account"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
     },
     {
       "id": "build-expense-row",

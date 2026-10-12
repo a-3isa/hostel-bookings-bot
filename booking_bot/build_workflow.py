@@ -911,9 +911,25 @@ def build():
     # The write nodes downstream have had this since the beginning. The READS
     # in front of them did not, and a read is the first thing to fail when a
     # credential dies.
+    #
+    # 2026-10-12: the error path alone was not enough. Execution 7480 — Google
+    # answered this read with a 503 after 185 s, the live node had never
+    # received the onError above (the instance had drifted from this file), and
+    # the admin was left with nothing. A 503 from Sheets is transient and the
+    # read is a plain GET, so it retries; the timeout replaces n8n's 300 s
+    # default, and three tries at 15 s plus the waits stay inside the Brain's
+    # 60 s SAVE_LOCK_MS — past that, a user's retry tap is swallowed in silence.
+    #
+    # alwaysOutputData is stated as False rather than left out: sync_nodes only
+    # pushes keys this file declares, and the live nodes still carry True.
     for reader in ("Read Booking Key", "Read Expense Key"):
         node = next(n for n in g.nodes if n["name"] == reader)
         node["onError"] = "continueErrorOutput"
+        node["alwaysOutputData"] = False
+        node["retryOnFail"] = True
+        node["maxTries"] = 3
+        node["waitBetweenTries"] = 1000
+        node["parameters"]["options"] = {"timeout": 15000}
         g.connect(reader, "Send Save Error", index=1)
 
     g.connect("Read Booking Key", "Build Booking Row")
