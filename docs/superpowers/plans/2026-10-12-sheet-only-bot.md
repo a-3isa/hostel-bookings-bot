@@ -78,7 +78,7 @@ Run `list_credentials` (type `google`) and note the id and name of `Google Sheet
 N8N_WORKFLOW_ID=hzMYegbL3yifl7KN python -c "import sys,json; sys.path.insert(0,'booking_bot'); import push_brain as pb; pb.select_server(); wf=json.loads(pb.call_tool('get_workflow_details',{'workflowId':pb.WORKFLOW_ID}))['workflow']; print([n['credentials']['googleSheetsOAuth2Api'] for n in wf['nodes'] if (n.get('credentials') or {}).get('googleSheetsOAuth2Api')][:1])"
 ```
 
-Call `get_node_types` for `{nodeId: "n8n-nodes-base.dataTable", resource: "row", operation: "delete_rows"}` to learn its filter shape.
+Call `get_node_types` for `{nodeId: "n8n-nodes-base.dataTable", resource: "row", operation: "deleteRows"}` to learn its filter shape.
 
 - [ ] **Step 3: Add the probe nodes with one `update_workflow` call**
 
@@ -112,7 +112,7 @@ Operations (all `addNode` unless stated; positions arbitrary), each node's `para
 4. `Probe B` — Code: same as `Probe A` but `sessionState: 'EDIT_MENU'` and `sessionData: '{}'`.
 5. `Probe Upsert B` — a copy of `Probe Upsert A`.
 6. `Probe Get B` — a copy of `Probe Get A`.
-7. `Probe Delete` — `dataTable` v1.1, `operation: "delete_rows"` with the filter `chat_id eq __probe__` in the shape step 2 returned.
+7. `Probe Delete` — `dataTable` v1.1, `operation: "deleteRows"` with the filter `chat_id eq __probe__` in the shape step 2 returned.
 8. `Probe Sheets` — `n8n-nodes-base.httpRequest` v4.2, **with the credential inline in the node object**:
 ```json
 {"parameters": {"method": "GET",
@@ -141,7 +141,11 @@ Archive the scratch workflow (`archive_workflow`). Ledger the outcome:
 - Data Table fails (no row in the table, or two rows) → change one thing at a time (add or drop `schema`, `mode: "id"`, `matchType`) and re-run; if no shape persists, `Ruling: sessions stay on Postgres` and **skip** the session parts of Tasks 4 and 5 (marked "if sessions move"). Everything else ships.
 - HTTP credential fails → `Ruling: lookups use the Google Sheets node (getAll, header row 1, row_number)`; Task 2's `sheetRows()` already accepts that shape (Step 3 there), and Task 4 emits Sheets nodes instead of HTTP nodes.
 
-No commit (nothing changes in the repo).
+No commit for the proof itself (nothing changes in the repo).
+
+**Result (2026-10-12, scratch workflow `Le9zDCUgDaVWxeDE`, executions 7810-7811, archived): both pass.**
+- Data Table: `upsert` inserted the row; `get` read it back; a second `upsert` updated the same row (id 2, still one row); `get_data_table_rows` agreed after each step. Arabic JSON in `data` round-trips. An upsert with `state: ""` and `data: "{}"` persists (the `Clear Session` shape). `deleteRows` (operation name is `deleteRows`, not `delete_rows`) removed it. `get` for a missing row with `alwaysOutputData` emits one empty item `{}`.
+- HTTP + inline credential: an `addNode` op carrying `credentials: {googleSheetsOAuth2Api: {id: qXOwEKyHdq2gJy6B, name: "Google Sheets account"}}` authenticated to the Sheets API and returned the registry (`['الشقة','الغرفة']`, `['التاريخ']`, then rooms with the room as a **number**, so `build_locations.js` must stringify it, which it does). The tool's note that HTTP nodes "must be configured manually" refers to auto-assignment only; the inline credential survives.
 
 ---
 
