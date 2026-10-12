@@ -62,6 +62,8 @@ import json
 import os
 import sys
 
+import ai_intent
+
 # Every tab name, guest prompt and group message in this graph is Arabic, and a
 # Windows console defaults to a codepage that cannot encode any of it.
 for _stream in (sys.stdout, sys.stderr):
@@ -117,6 +119,8 @@ SESSION_TABLE = "bookings_bot_sessions"
 TELEGRAM_CRED = ("telegramApi", "REPLACE_ME", "Telegram account")
 SHEETS_CRED = ("googleSheetsOAuth2Api", "REPLACE_ME", "Google Sheets account")
 POSTGRES_CRED = ("postgres", "REPLACE_ME", "Supabase Postgres")
+# Per-instance like the others. The deploy script swaps in the real id.
+ANTHROPIC_CRED = ("anthropicApi", "REPLACE_ME", "Anthropic account")
 
 # What the row builders read to decide where the next row goes. Every column in
 # these ranges is hand-typed; the ranges stop short of the fill-down formula
@@ -136,8 +140,8 @@ EXPENSE_KEY_RANGE = "A1:H2000"
 # deploy_graph.py, which rewrites the same two gates — see BOOKING_STATES and
 # LOCATION_STATES there. NOTES is in the booking list because that is the turn
 # which draws the confirmation, where the availability check needs rows.
-BOOKING_STATES = ["EDIT_FIND", "EDIT_PICK", "NOTES"]
-LOCATION_STATES = ["PHONE", "EXP_AMOUNT", "EDIT_MENU"]
+BOOKING_STATES = ["EDIT_FIND", "EDIT_PICK", "NOTES", "AI_TEXT", "AI_PICK"]
+LOCATION_STATES = ["PHONE", "EXP_AMOUNT", "EDIT_MENU", "AI_TEXT", "AI_PICK"]
 
 
 def read_source(name):
@@ -175,12 +179,16 @@ class Graph:
         self.nodes.append(node)
         return name
 
-    def connect(self, src, tgt, index=0):
-        """Wire src output `index` to tgt input 0."""
-        main = self.connections.setdefault(src, {}).setdefault("main", [])
-        while len(main) <= index:
-            main.append([])
-        main[index].append({"node": tgt, "type": "main", "index": 0})
+    def connect(self, src, tgt, index=0, kind="main"):
+        """Wire src output `index` to tgt input 0.
+
+        `kind` is the connection type: "main" for the data flow, or an ai_* type
+        (ai_languageModel, ai_tool, …) for a sub-node that plugs into its parent.
+        """
+        group = self.connections.setdefault(src, {}).setdefault(kind, [])
+        while len(group) <= index:
+            group.append([])
+        group[index].append({"node": tgt, "type": kind, "index": 0})
 
     def credentials_needed(self):
         return self._creds
@@ -211,6 +219,35 @@ def flag_condition(expr, cid):
         ],
         "combinator": "and",
     }
+
+
+# A failed model call must still reach the Brain, which then says so; without
+# these the run dies at the extractor and the admin is told nothing.
+AI_EXTRACT_SETTINGS = dict(alwaysOutputData=True, onError="continueRegularOutput",
+                           retryOnFail=True, maxTries=2)
+
+
+def needs_ai_params():
+    """True for a text message that is not a /command, while the session is in
+    AI_TEXT. Button taps and commands go round the model."""
+    return {"conditions": flag_condition(
+        "={{ $('Load Session').first().json.state === 'AI_TEXT'"
+        r" && /^[^\/]/.test(String(($('Telegram Trigger').first().json.message || {}).text || '')) }}",
+        "needs-ai"), "looseTypeValidation": True, "options": {}}
+
+
+def ai_extract_params():
+    return {
+        "text": "={{ $('Telegram Trigger').first().json.message.text }}",
+        "schemaType": "manual",
+        "inputSchema": json.dumps(ai_intent.SCHEMA, ensure_ascii=False, indent=2),
+        "options": {"systemPromptTemplate": ai_intent.n8n_prompt()},
+    }
+
+
+def ai_model_params():
+    return {"model": {"__rl": True, "mode": "id", "value": ai_intent.MODEL},
+            "options": {"maxTokensToSample": 300}}
 
 
 def values_get(tab_expr, rng):
@@ -516,8 +553,21 @@ def build():
     g.connect("Needs Booking ID?", "Needs Expense Number?", index=1)
     g.connect("Read Next Booking ID", "Needs Expense Number?")
     g.connect("Needs Expense Number?", "Read Expense Numbers", index=0)
-    g.connect("Needs Expense Number?", "Brain", index=1)
-    g.connect("Read Expense Numbers", "Brain")
+    # The AI edit: a text message in AI_TEXT goes through the extractor on its
+    # way to the Brain; every other turn goes round it. The chat model is a
+    # sub-node, plugged in with an ai_languageModel connection rather than wired
+    # as data.
+    g.node("Needs AI?", "n8n-nodes-base.if", 2.3, needs_ai_params(), (800, 640))
+    g.node("AI Extract", "@n8n/n8n-nodes-langchain.informationExtractor", 1.2,
+           ai_extract_params(), (1040, 640), **AI_EXTRACT_SETTINGS)
+    g.node("Anthropic Chat Model", "@n8n/n8n-nodes-langchain.lmChatAnthropic", 1.6,
+           ai_model_params(), (1040, 820), cred=ANTHROPIC_CRED)
+    g.connect("Needs Expense Number?", "Needs AI?", index=1)
+    g.connect("Read Expense Numbers", "Needs AI?")
+    g.connect("Needs AI?", "AI Extract", index=0)
+    g.connect("Needs AI?", "Brain", index=1)
+    g.connect("AI Extract", "Brain")
+    g.connect("Anthropic Chat Model", "AI Extract", kind="ai_languageModel")
 
     # ── Answering the turn ───────────────────────────────────────────────────
     #
@@ -1104,7 +1154,7 @@ def main():
     with open(OUT_PATH, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(blob + "\n")
     print(f"wrote {os.path.relpath(OUT_PATH, os.path.dirname(HERE))}"
-          f" — {len(g.nodes)} nodes, {sum(len(v['main']) for v in g.connections.values())}"
+          f" — {len(g.nodes)} nodes, {sum(len(v.get('main', [])) for v in g.connections.values())}"
           f" connection groups")
 
 

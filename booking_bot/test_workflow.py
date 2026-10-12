@@ -9,6 +9,7 @@ something is actually wrong.
     python -m pytest booking_bot/test_workflow.py
 """
 
+import json
 import os
 import sys
 
@@ -67,16 +68,10 @@ def test_no_sheets_append_anywhere(nodes):
                 f"{name} uses append"
 
 
-def test_every_node_is_reachable_from_the_trigger(graph, nodes):
-    seen, queue = set(), ["Telegram Trigger"]
-    while queue:
-        cur = queue.pop()
-        if cur in seen:
-            continue
-        seen.add(cur)
-        for branch in graph.connections.get(cur, {}).get("main", []):
-            queue += [l["node"] for l in branch]
-    assert set(nodes) == seen, f"unreachable: {sorted(set(nodes) - seen)}"
+def test_every_node_is_reachable_from_the_trigger(graph):
+    """A sub-node has no inbound main; it is reached through the node it serves."""
+    problems = vw.check(bw.workflow(graph))
+    assert not [p for p in problems if p.startswith("orphan")], problems
 
 
 def test_the_writers_all_have_an_error_output():
@@ -123,3 +118,83 @@ def test_an_unrouted_flow_is_caught(monkeypatch):
     keys = {r["outputKey"] for r in
             nodes["Route Save"]["parameters"]["rules"]["values"]}
     assert vw.brain_flows() - keys == {"refund"}
+
+
+# ── The AI edit branch ───────────────────────────────────────────────────────
+
+def targets(graph, src, kind="main"):
+    return [[l["node"] for l in br] for br in graph.connections.get(src, {}).get(kind, [])]
+
+
+def test_the_ai_gate_sits_between_the_last_lookup_and_the_brain(graph):
+    """Both ways into the Brain used to come straight from the expense-number gate.
+    Now they pass the AI gate: a text message in AI_TEXT goes through the model,
+    every other turn goes round it."""
+    assert targets(graph, "Needs Expense Number?")[1] == ["Needs AI?"]
+    assert targets(graph, "Read Expense Numbers") == [["Needs AI?"]]
+    assert targets(graph, "Needs AI?") == [["AI Extract"], ["Brain"]]
+    assert targets(graph, "AI Extract") == [["Brain"]]
+    assert "Brain" not in sum(targets(graph, "Needs Expense Number?"), [])
+
+
+def test_the_model_is_plugged_into_the_extractor_not_wired_as_data(graph):
+    assert targets(graph, "Anthropic Chat Model", "ai_languageModel") == [["AI Extract"]]
+    assert "main" not in graph.connections.get("Anthropic Chat Model", {})
+
+
+def test_the_gate_skips_commands_and_other_states(nodes):
+    expr = nodes["Needs AI?"]["parameters"]["conditions"]["conditions"][0]["leftValue"]
+    assert "'AI_TEXT'" in expr
+    assert r"/^[^\/]/" in expr, "a /command must not be sent to the model"
+
+
+def test_a_failed_model_call_still_reaches_the_brain(nodes):
+    """Without these the run dies at the extractor and the admin is told nothing."""
+    n = nodes["AI Extract"]
+    assert n["alwaysOutputData"] is True
+    assert n["onError"] == "continueRegularOutput"
+    assert n["retryOnFail"] is True and n["maxTries"] == 2
+
+
+def test_the_extractor_uses_the_shared_schema_and_the_haiku_model(nodes):
+    import ai_intent
+    params = nodes["AI Extract"]["parameters"]
+    assert params["schemaType"] == "manual"
+    assert json.loads(params["inputSchema"]) == ai_intent.SCHEMA
+    assert nodes["Anthropic Chat Model"]["parameters"]["model"]["value"] == ai_intent.MODEL
+    assert nodes["Anthropic Chat Model"]["credentials"]["anthropicApi"]["name"]
+
+
+def test_the_ai_states_load_what_the_brain_needs(nodes):
+    for gate in ("Needs Bookings?", "Needs Locations?"):
+        states = {c["rightValue"] for c in nodes[gate]["parameters"]["conditions"]["conditions"]}
+        assert {"AI_TEXT", "AI_PICK"} <= states, gate
+
+
+def test_the_generated_graph_is_clean(graph):
+    assert vw.check(bw.workflow(graph)) == []
+
+
+# ── The checks still bite (AI branch) ────────────────────────────────────────
+
+def _wf():
+    return json.loads(json.dumps(bw.workflow(bw.build())))
+
+
+def test_an_extractor_with_no_model_is_caught():
+    wf = _wf()
+    del wf["connections"]["Anthropic Chat Model"]
+    assert any("language model" in p for p in vw.check(wf))
+
+
+def test_a_connection_to_a_missing_node_is_caught_for_every_kind():
+    wf = _wf()
+    wf["connections"]["Anthropic Chat Model"]["ai_languageModel"][0][0]["node"] = "Nope"
+    assert any("Nope" in p for p in vw.check(wf))
+
+
+def test_a_node_nothing_reaches_is_still_an_orphan():
+    wf = _wf()
+    wf["nodes"].append({"name": "Stray", "type": "n8n-nodes-base.set", "typeVersion": 3,
+                        "position": [0, 0], "parameters": {}})
+    assert any(p.startswith("orphan") and "Stray" in p for p in vw.check(wf))
