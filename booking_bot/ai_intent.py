@@ -87,8 +87,11 @@ If you cannot tell what is being asked, or the message is not an edit request at
 def n8n_prompt():
     """PROMPT as an n8n expression: today's date and the apartment names are live."""
     today = "{{ $now.setZone('Africa/Cairo').toFormat('yyyy-MM-dd') }}"
-    apartments = ("{{ [...new Set($('Read Locations').all()"
-                  ".map(i => i.json['الشقة']).filter(Boolean))].join('، ') }}")
+    # Best-effort (spec 5.2): referencing a node that did not run THROWS, which made
+    # the whole extraction fail on the first live message. Brain matches the
+    # apartment strictly against the registry anyway.
+    apartments = ("{{ $('Read Locations').isExecuted ? [...new Set($('Read Locations').all()"
+                  ".map(i => i.json['الشقة']).filter(Boolean))].join('، ') : '' }}")
     return "=" + PROMPT.replace("<<TODAY>>", today).replace("<<APARTMENTS>>", apartments)
 
 

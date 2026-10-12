@@ -247,7 +247,7 @@
           "conditions": [
             {
               "id": "is-phone",
-              "leftValue": "={{ $json.state }}",
+              "leftValue": "={{ $('Load Session').first().json.state }}",
               "rightValue": "PHONE",
               "operator": {
                 "type": "string",
@@ -256,7 +256,7 @@
             },
             {
               "id": "is-exp_amount",
-              "leftValue": "={{ $json.state }}",
+              "leftValue": "={{ $('Load Session').first().json.state }}",
               "rightValue": "EXP_AMOUNT",
               "operator": {
                 "type": "string",
@@ -265,7 +265,7 @@
             },
             {
               "id": "is-edit_menu",
-              "leftValue": "={{ $json.state }}",
+              "leftValue": "={{ $('Load Session').first().json.state }}",
               "rightValue": "EDIT_MENU",
               "operator": {
                 "type": "string",
@@ -274,7 +274,7 @@
             },
             {
               "id": "is-ai_text",
-              "leftValue": "={{ $json.state }}",
+              "leftValue": "={{ $('Load Session').first().json.state }}",
               "rightValue": "AI_TEXT",
               "operator": {
                 "type": "string",
@@ -283,7 +283,7 @@
             },
             {
               "id": "is-ai_pick",
-              "leftValue": "={{ $json.state }}",
+              "leftValue": "={{ $('Load Session').first().json.state }}",
               "rightValue": "AI_PICK",
               "operator": {
                 "type": "string",
@@ -522,7 +522,7 @@
         "schemaType": "manual",
         "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"booking_id\": {\n      \"type\": \"string\",\n      \"description\": \"The booking's ID exactly as the staff member wrote it, digits only. Never invent one.\"\n    },\n    \"payment\": {\n      \"type\": \"object\",\n      \"description\": \"Money the guest paid (positive) or was given back (negative).\",\n      \"properties\": {\n        \"amount\": {\n          \"type\": \"number\"\n        },\n        \"method\": {\n          \"type\": \"string\",\n          \"enum\": [\n            \"cash\",\n            \"instapay\",\n            \"airbnb\",\n            \"vcash\",\n            \"eur\",\n            \"usd\"\n          ]\n        }\n      },\n      \"required\": [\n        \"amount\",\n        \"method\"\n      ]\n    },\n    \"room\": {\n      \"type\": \"object\",\n      \"description\": \"Move the booking to this apartment and room.\",\n      \"properties\": {\n        \"apartment\": {\n          \"type\": \"string\"\n        },\n        \"room\": {\n          \"type\": \"string\",\n          \"description\": \"The room number, digits only.\"\n        }\n      },\n      \"required\": [\n        \"apartment\",\n        \"room\"\n      ]\n    },\n    \"stay\": {\n      \"type\": \"object\",\n      \"description\": \"Change how long the guest stays.\",\n      \"properties\": {\n        \"kind\": {\n          \"type\": \"string\",\n          \"enum\": [\n            \"extend\",\n            \"until\",\n            \"leave\"\n          ]\n        },\n        \"nights\": {\n          \"type\": \"integer\",\n          \"description\": \"For kind=extend: how many nights to add.\"\n        },\n        \"date\": {\n          \"type\": \"string\",\n          \"description\": \"yyyy-mm-dd. For kind=until: the last day. For kind=leave: the day the guest left; leave it out for today.\"\n        }\n      },\n      \"required\": [\n        \"kind\"\n      ]\n    },\n    \"unclear\": {\n      \"type\": \"string\",\n      \"description\": \"Only when the request cannot be understood: a short reason, in the staff member's language.\"\n    }\n  }\n}",
         "options": {
-          "systemPromptTemplate": "=You read one message from a hostel receptionist about an EXISTING booking and fill in a JSON edit request. You never decide anything else: the system looks the booking up and checks everything you write.\n\nMessages are in Arabic or English; digits may be Arabic-Indic (٠١٢٣٤٥٦٧٨٩). Today is {{ $now.setZone('Africa/Cairo').toFormat('yyyy-MM-dd') }} (Africa/Cairo).\n\nFill in only what the message asks for:\n\n- booking_id: the booking's ID as written (\"booking 3\", \"حجز 3\", \"ID 3\"). Digits only. If the message names no booking ID, do not guess: set unclear.\n- payment: money the guest paid (a positive amount) or was given back (\"refund\", \"استرداد\": a negative amount).\n  method says how it was paid: cash / كاش / نقدي -> \"cash\"; instapay / انستاباي -> \"instapay\"; Vodafone Cash / فودافون كاش -> \"vcash\"; Airbnb -> \"airbnb\".\n  For foreign money the CURRENCY decides the method, however it was handed over: dollars / USD / دولار -> \"usd\"; euros / EUR / يورو -> \"eur\". Egyptian pounds (EGP / جنيه) are the default currency.\n  An amount with no way of paying: set unclear.\n- room: the apartment and room number to MOVE the booking to. The apartment must be one of: {{ [...new Set($('Read Locations').all().map(i => i.json['الشقة']).filter(Boolean))].join('، ') }}. Copy its spelling exactly from that list.\n- stay: how long the guest stays.\n  \"extend\" adds nights (nights = how many): \"extend 2 nights\", \"زود ليلتين\".\n  \"until\" says the last day (date): \"stays until the 20th\".\n  \"leave\" means the guest left or leaves (date = that day; leave date out for today): \"left today\", \"غادر امبارح\".\n  Write dates as yyyy-mm-dd. Resolve \"today\", \"tomorrow\", \"yesterday\" and \"the 20th\" from today's date above.\n\nOne message can ask for several of these; include each one that was asked for and nothing else.\nIf you cannot tell what is being asked, or the message is not an edit request at all, set unclear to a short reason in the staff member's language and fill in nothing else."
+          "systemPromptTemplate": "=You read one message from a hostel receptionist about an EXISTING booking and fill in a JSON edit request. You never decide anything else: the system looks the booking up and checks everything you write.\n\nMessages are in Arabic or English; digits may be Arabic-Indic (٠١٢٣٤٥٦٧٨٩). Today is {{ $now.setZone('Africa/Cairo').toFormat('yyyy-MM-dd') }} (Africa/Cairo).\n\nFill in only what the message asks for:\n\n- booking_id: the booking's ID as written (\"booking 3\", \"حجز 3\", \"ID 3\"). Digits only. If the message names no booking ID, do not guess: set unclear.\n- payment: money the guest paid (a positive amount) or was given back (\"refund\", \"استرداد\": a negative amount).\n  method says how it was paid: cash / كاش / نقدي -> \"cash\"; instapay / انستاباي -> \"instapay\"; Vodafone Cash / فودافون كاش -> \"vcash\"; Airbnb -> \"airbnb\".\n  For foreign money the CURRENCY decides the method, however it was handed over: dollars / USD / دولار -> \"usd\"; euros / EUR / يورو -> \"eur\". Egyptian pounds (EGP / جنيه) are the default currency.\n  An amount with no way of paying: set unclear.\n- room: the apartment and room number to MOVE the booking to. The apartment must be one of: {{ $('Read Locations').isExecuted ? [...new Set($('Read Locations').all().map(i => i.json['الشقة']).filter(Boolean))].join('، ') : '' }}. Copy its spelling exactly from that list.\n- stay: how long the guest stays.\n  \"extend\" adds nights (nights = how many): \"extend 2 nights\", \"زود ليلتين\".\n  \"until\" says the last day (date): \"stays until the 20th\".\n  \"leave\" means the guest left or leaves (date = that day; leave date out for today): \"left today\", \"غادر امبارح\".\n  Write dates as yyyy-mm-dd. Resolve \"today\", \"tomorrow\", \"yesterday\" and \"the 20th\" from today's date above.\n\nOne message can ask for several of these; include each one that was asked for and nothing else.\nIf you cannot tell what is being asked, or the message is not an edit request at all, set unclear to a short reason in the staff member's language and fill in nothing else."
         }
       },
       "alwaysOutputData": true,

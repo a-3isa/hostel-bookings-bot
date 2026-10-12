@@ -88,17 +88,10 @@ LOCATION_STATES = ["PHONE", "EXP_AMOUNT", "EDIT_MENU", "AI_TEXT", "AI_PICK"]
 BOOKING_STATES = ["EDIT_FIND", "EDIT_PICK", "NOTES", "AI_TEXT", "AI_PICK"]
 
 
-def state_conditions(states):
-    return {
-        "options": {"caseSensitive": True, "leftValue": "",
-                    "typeValidation": "loose", "version": 1},
-        "conditions": [
-            {"id": f"is-{s.lower()}", "leftValue": "={{ $json.state }}", "rightValue": s,
-             "operator": {"type": "string", "operation": "equals"}}
-            for s in states
-        ],
-        "combinator": "or",
-    }
+def state_conditions(states, from_session=False):
+    # One definition, in build_workflow.py. It used to be a copy here, and a second
+    # copy is how the registry gate would have kept its wrong default.
+    return bw.state_conditions(states, from_session)
 
 
 def sheets_read(tab, rng, formula=False, execute_once=False):
@@ -343,13 +336,14 @@ def main():
     # The registry gate was only ever created, never updated, so the states the AI
     # edit added would not reach a live instance that already has it.
     ops.append({"type": "updateNodeParameters", "nodeName": "Needs Locations?",
-                "parameters": {"conditions": state_conditions(LOCATION_STATES)}})
+                "parameters": {"conditions": state_conditions(LOCATION_STATES,
+                                                              from_session=True)}})
     print("  ~ Needs Locations? fires on", ", ".join(LOCATION_STATES))
 
     # ── Apartment/room registry ───────────────────────────────────────────────
     if "Needs Locations?" not in have:
         add_node("Needs Locations?", "n8n-nodes-base.if", 2.3,
-                 {"conditions": state_conditions(LOCATION_STATES),
+                 {"conditions": state_conditions(LOCATION_STATES, from_session=True),
                   "looseTypeValidation": True, "options": {}},
                  [-544, 560])
         print("  + Needs Locations?")
