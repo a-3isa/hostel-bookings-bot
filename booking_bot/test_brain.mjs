@@ -2136,6 +2136,45 @@ const aiDefined = new Set([...brainSrc.matchAll(/^  (ai_[a-z_]+):/gm)].map(m => 
 check('no ai_* key is used without being defined in S',
   aiQuoted.every(k => aiDefined.has(k)), aiQuoted.filter(k => !aiDefined.has(k)));
 
+section('ai edit: what the model returns is checked, not trusted');
+const ID31 = { booking_id: '31' };
+const pay300 = { payment: { amount: 300, method: 'cash' } };
+aiOpen();
+r = aiSay('???', { output: { unclear: 'مش واضح' } });
+check('"unclear" is passed on, with the reason',
+  r.reply.text.startsWith('❓ لم أفهم الطلب.') && r.reply.text.includes('(مش واضح)'), r.reply.text);
+check('and the session stays in AI_TEXT', r.sessionState === 'AI_TEXT', r.sessionState);
+r = aiSay('paid 300 cash', { output: { ...pay300 } });
+check('no booking id is "not understood", never a guess',
+  r.reply.text.startsWith('❓ لم أفهم الطلب.'), r.reply.text);
+r = aiSay('booking 31', { output: { ...ID31 } });
+check('an id with nothing to change is "not understood"', r.reply.text.startsWith('❓'), r.reply.text);
+r = aiSay('booking 31 paid abc', { output: { ...ID31, payment: { amount: 'abc', method: 'cash' } } });
+check('a non-numeric amount is refused', r.reply.text.startsWith('❌ المبلغ غير واضح'), r.reply.text);
+r = aiSay('booking 31 paid 0', { output: { ...ID31, payment: { amount: 0, method: 'cash' } } });
+check('a zero amount is refused', r.reply.text.startsWith('❌ المبلغ غير واضح'), r.reply.text);
+r = aiSay('booking 31 paid 5 unpaid', { output: { ...ID31, payment: { amount: 5, method: 'unpaid' } } });
+check('"unpaid" is not a way to pay', r.reply.text.startsWith('❓'), r.reply.text);
+r = aiSay('booking 31 paid 5', { output: { ...ID31, payment: { amount: 5, method: '0' } } });
+check('a positional "0" does not mean cash', r.reply.text.startsWith('❓'), r.reply.text);
+r = aiSay('booking 31 stays', { output: { ...ID31, stay: { kind: 'sideways' } } });
+check('an unknown stay kind is refused', r.reply.text.startsWith('❓'), r.reply.text);
+r = aiSay('booking 31 extend', { output: { ...ID31, stay: { kind: 'extend', nights: 0 } } });
+check('extending by zero nights is refused', r.reply.text.startsWith('❓'), r.reply.text);
+r = aiSay('booking 99 paid 300 cash', { output: { booking_id: '99', ...pay300 } });
+check('an unknown id says so, and stays in AI_TEXT',
+  r.reply.text.startsWith('❌ لا يوجد حجز') && r.sessionState === 'AI_TEXT', [r.reply.text, r.sessionState]);
+
+section('ai edit: two bookings with one id open the pick list, and the request survives it');
+aiOpen();
+r = aiSay('حجز ٥٥ دفع ٥٠ كاش', { output: { booking_id: '٥٥', payment: { amount: 50, method: 'cash' } } });
+check('Arabic-Indic digits in the id still find it, and two matches open the picker',
+  r.reply.text.startsWith('🔎 أكثر من حجز'), r.reply.text);
+check('the buttons carry the sheet rows',
+  r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() === 'epick_6,epick_7',
+  r.reply.reply_markup.inline_keyboard);
+check('waiting in AI_PICK', r.sessionState === 'AI_PICK', r.sessionState);
+
 // ─── Result ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all checks passed'}`);

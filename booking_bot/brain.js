@@ -1191,16 +1191,76 @@ function startEdit() { reply(t('edit_ask_id'), null); setState('EDIT_FIND', {});
 
 function startAi() { reply(t('ai_ask')); setState('AI_TEXT', {}); }
 
+function validIsoDate(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const dt = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(dt.getTime()) && dt.toISOString().slice(0, 10) === s;
+}
+
+/** Today in the bot's timezone, as the ISO date the sheet stores. */
+function todayIso() {
+  const tp = todayParts();
+  return `${tp.y}-${String(tp.m).padStart(2, '0')}-${String(tp.d).padStart(2, '0')}`;
+}
+
 /**
- * The model's answer for an AI_TEXT message, checked field by field. Task 3
- * fills in the checks; until then anything the model returns is "not understood".
- * `item` is the AI Extract node's item: { output } on success, whatever n8n
- * puts there on an error, or null when the node did not run.
+ * The model's answer for an AI_TEXT message, checked field by field. This is
+ * where its answer stops being trusted: it only ever read the text.
+ *
+ * Returns { intent } when everything it filled in is usable, or { fail, reason }
+ * where `fail` is the string key to answer with. A field the model leaves out,
+ * or sets to null, simply is not part of the request.
+ *
+ * `item` is the AI Extract node's item: { output } on success, whatever n8n puts
+ * there on an error, or null when the node did not run.
  */
 function readAiIntent(item) {
   const o = item && item.output;
   if (!o || typeof o !== 'object') return { fail: 'ai_unavailable' };
-  return { fail: 'ai_not_understood' };
+  const unclear = String(o.unclear === undefined || o.unclear === null ? '' : o.unclear).trim();
+  if (unclear) return { fail: 'ai_not_understood', reason: unclear };
+
+  const id = asciiDigits(o.booking_id).trim();
+  if (!id) return { fail: 'ai_not_understood' };
+  const intent = { id, payment: null, room: null, stay: null };
+
+  const p = o.payment;
+  if (p && typeof p === 'object') {
+    const amount = Number(p.amount);
+    if (!Number.isFinite(amount) || amount === 0) return { fail: 'ai_bad_amount' };
+    // Compared as written. payByKey() would also read "0" as a position in the
+    // retired positional order, and a model answering "0" must not mean cash.
+    const key = String(p.method || '');
+    if (!PAY_METHODS.some(m => m.key === key)) return { fail: 'ai_not_understood' };
+    intent.payment = { amount, key };
+  }
+
+  const rm = o.room;
+  if (rm && typeof rm === 'object') {
+    const apartment = String(rm.apartment || '').trim();
+    const room = asciiDigits(rm.room).trim();
+    if (!apartment || !room) return { fail: 'ai_not_understood' };
+    intent.room = { apartment, room };
+  }
+
+  const s = o.stay;
+  if (s && typeof s === 'object') {
+    if (s.kind === 'extend') {
+      const nights = Math.trunc(Number(s.nights));
+      if (!(nights >= 1)) return { fail: 'ai_not_understood' };
+      intent.stay = { kind: 'extend', nights };
+    } else if (s.kind === 'until' || s.kind === 'leave') {
+      const date = String(s.date || '').trim();
+      if (date && !validIsoDate(date)) return { fail: 'ai_bad_date' };
+      if (s.kind === 'until' && !date) return { fail: 'ai_bad_date' };
+      intent.stay = { kind: s.kind, date };          // a leave with no date is today
+    } else {
+      return { fail: 'ai_not_understood' };
+    }
+  }
+
+  if (!intent.payment && !intent.room && !intent.stay) return { fail: 'ai_not_understood' };
+  return { intent };
 }
 
 function replyAiFail(got) {
@@ -1209,6 +1269,27 @@ function replyAiFail(got) {
   } else {
     reply(t(got.fail));
   }
+}
+
+/** Find the booking the request names, then apply it. Several matches open the picker. */
+function openAiBooking(intent) {
+  // Matches column B (ID) only, in ASCII on both sides — the same rule as EDIT_FIND.
+  const hits = bookingRows().filter(x => asciiDigits(x.json['ID'] || '').trim() === intent.id);
+  if (!hits.length) { reply(t('edit_not_found')); return; }       // stays in AI_TEXT
+  if (hits.length > 1) {                                           // IDs are not enforced unique
+    d.aiIntent = intent;
+    reply(t('edit_pick_match'), {
+      inline_keyboard: hits.map(h => [{ text: bookingLabel(h.json), callback_data: `epick_${h.row}` }]),
+    });
+    setState('AI_PICK', d);
+    return;
+  }
+  applyAiIntent(hits[0], intent);
+}
+
+/** Task 4 turns this into the real thing. */
+function applyAiIntent(hit, intent) {
+  reply(t('ai_not_understood', { reason: '' }));
 }
 
 /** Menu of editable fields, plus finish and cancel-the-booking. */
@@ -2366,7 +2447,19 @@ switch (state) {
     if (!text) break;                       // a photo or a file: nothing to read
     let item = null;
     try { item = $('AI Extract').first().json; } catch (e) { item = null; }
-    replyAiFail(readAiIntent(item));
+    const got = readAiIntent(item);
+    if (got.fail) { replyAiFail(got); break; }     // the session stays exactly as it was
+    d.aiText = text;
+    openAiBooking(got.intent);
+    break;
+  }
+
+  case 'AI_PICK': {
+    const m = /^epick_(\d+)$/.exec(cbData || '');
+    if (!m) break;
+    const hit = bookingRows().find(x => x.row === Number(m[1]));
+    if (!hit) { reply(t('edit_not_found')); setState('AI_TEXT', {}); break; }
+    applyAiIntent(hit, d.aiIntent);
     break;
   }
 
