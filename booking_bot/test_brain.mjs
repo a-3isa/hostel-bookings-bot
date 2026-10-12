@@ -2372,6 +2372,56 @@ aiOpen();
 r = aiSay('booking 31 paid 100 cash', { output: { booking_id: '31', payment: { amount: 100, method: 'cash' } } });
 check('a payment alone never goes looking for clashes', !r.reply.text.includes('تعارض'), r.reply.text);
 
+section('ai edit: several things in one message');
+aiOpen();
+r = aiSay('booking 31 paid 300 cash and extend 2 nights', { output: { booking_id: '31',
+  payment: { amount: 300, method: 'cash' }, stay: { kind: 'extend', nights: 2 } } });
+check('one card shows both changes',
+  r.reply.text.includes('اجمالي ما تم دفعه: 500 ← 800') && r.reply.text.includes('عدد الليالي: 3 ← 5'),
+  r.reply.text);
+r = run(cb('xedone'));
+check('one write carries both', r.save.fields['اجمالي ما تم دفعه'] === 800 && r.save.fields['عدد الليالي'] === 5,
+  r.save.fields);
+aiOpen();
+r = aiSay('booking 31 refund 900 and extend', { output: { booking_id: '31',
+  payment: { amount: -900, method: 'cash' }, stay: { kind: 'extend', nights: 1 } } });
+check('when one part is refused nothing from the others survives',
+  r.sessionState === 'AI_TEXT' && r.hasSave === false, [r.sessionState, r.hasSave]);
+r = aiSay('booking 31 extend 1', { output: { booking_id: '31', stay: { kind: 'extend', nights: 1 } } });
+check('and the next request starts from the sheet\'s values (3 ← 4)',
+  r.reply.text.includes('عدد الليالي: 3 ← 4') && !r.reply.text.includes('اجمالي ما تم دفعه'), r.reply.text);
+
+section('ai edit: the edges of the conversation');
+aiOpen();
+r = run(msg('/start'));
+check('/start inside AI_TEXT is the menu, not a request to the model',
+  r.reply.text === 'اختر العملية:', r.reply.text);
+aiOpen();
+aiOutput = { output: { booking_id: '31', payment: { amount: 1, method: 'cash' } } };
+r = run(msg('/cancel'));
+aiOutput = null;
+check('/cancel inside AI_TEXT ends it', r.sessionState === '' && r.reply.text.startsWith('تم الإلغاء'),
+  [r.sessionState, r.reply.text]);
+aiOpen();
+r = run(cb('xedone'));
+check('a stale Confirm tap in AI_TEXT does nothing', r.hasSave === false && r.hasReply === false,
+  [r.hasSave, r.hasReply]);
+r = aiSay('x', { output: { booking_id: '31', payment: { amount: 1, method: 'cash' } } }, EXPUSER);
+check('a cashier cannot drive AI_TEXT even with a forced session', r === null || r.hasSave === false);
+aiOpen();
+r = aiSay('booking 31 paid 300 cash', { output: { booking_id: '٣١', payment: { amount: '300', method: 'cash' } } });
+check('Arabic-Indic digits in the id and a numeric string for the amount both work',   // Review Focus 4
+  r.reply.text.includes('اجمالي ما تم دفعه: 500 ← 800'), r.reply.text);
+check('and the card is waiting for its buttons', r.sessionState === 'EDIT_CONFIRM', r.sessionState);
+
+section('ai edit: the manual flows are untouched');
+resetSession();
+sheetRows = AI_SHEET;
+run(msg('/start')); run(cb('choice_edit')); r = run(msg('31'));
+check('the manual edit menu still opens', r.reply.text === '✏️ اختر ما تريد تعديله:', r.reply.text);
+r = run(cb('ef_done'));
+check('and finishing with no changes still posts nothing', r.hasSave === false, r.hasSave);
+
 // ─── Result ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all checks passed'}`);
