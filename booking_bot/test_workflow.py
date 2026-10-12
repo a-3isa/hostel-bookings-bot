@@ -269,3 +269,40 @@ def test_both_scripts_gate_the_same_states():
     for name in ("BOOKING_STATES", "LOCATION_STATES"):
         literal = re.search(rf"^{name} = (\[.*?\])$", src, re.M).group(1)
         assert json.loads(literal.replace("'", '"')) == getattr(bw, name), name
+
+
+# ── Review fixes: once per turn, and the Brain wired once ────────────────────
+
+def test_the_extractor_calls_the_model_once_per_turn_not_once_per_item(nodes):
+    """AI_TEXT is the first state in BOTH gate lists, so the extractor receives the
+    booking rows (and, via Read Locations, their cross product with the registry)
+    as separate items. A node without executeOnce runs per item: one admin message
+    would make dozens of paid model calls."""
+    assert nodes["AI Extract"].get("executeOnce") is True
+
+
+def test_the_registry_read_runs_once_when_it_follows_the_bookings_read(nodes):
+    """Read Locations used to follow only the single Load Session item. On the AI
+    turns it follows Read Bookings For Edit, so it would run its query once per
+    booking row and hand on rows x 26 items."""
+    assert nodes["Read Locations"].get("executeOnce") is True
+    assert dg.read_settings("Read Locations").get("executeOnce") is True
+    assert "executeOnce" not in dg.read_settings("Read Bookings For Edit")
+
+
+def test_the_offline_merge_wires_the_brain_once(monkeypatch, tmp_path):
+    """deploy_graph.py --offline writes the file people import by hand. It used to
+    keep the old expense-gate -> Brain wires next to the new AI ones, so the Brain
+    ran twice per turn: two replies, and every save written twice."""
+    base = tmp_path / "base.json"
+    out = tmp_path / "full.json"
+    base.write_text(json.dumps(bw.workflow(bw.build()), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(dg, "OFFLINE_IN", str(base))
+    monkeypatch.setattr(dg, "OFFLINE_OUT", str(out))
+    monkeypatch.setattr(sys, "argv", ["deploy_graph.py", "--offline"])
+    dg.main()
+    full = json.loads(out.read_text(encoding="utf-8"))
+    into_brain = sorted(src for src, spec in full["connections"].items()
+                        for br in spec.get("main", []) for l in br if l["node"] == "Brain")
+    assert into_brain == ["AI Extract", "Needs AI?"], into_brain
+    assert vw.check(full) == []

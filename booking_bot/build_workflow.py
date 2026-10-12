@@ -223,8 +223,12 @@ def flag_condition(expr, cid):
 
 # A failed model call must still reach the Brain, which then says so; without
 # these the run dies at the extractor and the admin is told nothing.
+#
+# executeOnce is load-bearing: AI_TEXT is the first state that is in BOTH gate
+# lists, so the extractor is fed the booking rows as separate items, and a node
+# runs once per item. Without it one admin message is dozens of paid model calls.
 AI_EXTRACT_SETTINGS = dict(alwaysOutputData=True, onError="continueRegularOutput",
-                           retryOnFail=True, maxTries=2)
+                           retryOnFail=True, maxTries=2, executeOnce=True)
 
 
 def needs_ai_params():
@@ -513,7 +517,11 @@ def build():
     g.node("Read Locations", "n8n-nodes-base.postgres", 2.6,
            {"operation": "executeQuery",
             "query": read_source("read_locations.sql"), "options": {}},
-           (760, 180), cred=POSTGRES_CRED, **lookup_settings)
+           # executeOnce: on the AI turns this follows Read Bookings For Edit, so it
+           # is fed one item per booking row and would otherwise run its query once
+           # for each, handing on rows x 26 items. Anywhere else it gets one item,
+           # so nothing changes there.
+           (760, 180), cred=POSTGRES_CRED, executeOnce=True, **lookup_settings)
 
     # The suggested booking ID and expense number, each read only on the turn
     # that asks for it — see deploy_graph.py, which owns the same two gates.

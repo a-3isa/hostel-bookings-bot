@@ -163,6 +163,19 @@ def apply_offline(wf, ops):
     return wf
 
 
+def read_settings(name):
+    """Node-level settings for the two Postgres lookups the gates feed.
+
+    Read Locations runs once: on the AI turns it follows Read Bookings For Edit and
+    would otherwise run its query once per booking row (see build_workflow.py).
+    """
+    settings = {"alwaysOutputData": True, "onError": "continueRegularOutput",
+                "retryOnFail": True, "maxTries": 2}
+    if name == "Read Locations":
+        settings["executeOnce"] = True
+    return settings
+
+
 def ai_branch_ops(have, conns, anthropic):
     """Operations that add the AI edit: a gate and an extractor in front of the
     Brain, and the chat model plugged into the extractor.
@@ -351,8 +364,7 @@ def main():
     # a query returning no rows would otherwise stop the branch before the Brain
     # ever ran, and the bot would answer nothing at all.
     def postgres_read(name, sql_file, pos):
-        settings = {"alwaysOutputData": True, "onError": "continueRegularOutput",
-                    "retryOnFail": True, "maxTries": 2}
+        settings = read_settings(name)
         params = {"operation": "executeQuery", "query": read_source(sql_file),
                   "options": {}}
         if name not in have:
@@ -448,8 +460,10 @@ def main():
     connect("Needs Booking ID?", "Needs Expense Number?", index=1)
     connect("Read Next Booking ID", "Needs Expense Number?")
     connect("Needs Expense Number?", "Read Expense Numbers", index=0)
-    connect("Needs Expense Number?", "Brain", index=1)
-    connect("Read Expense Numbers", "Brain")
+    # No wires into the Brain from here: they go through the AI gate now (see
+    # ai_branch_ops). Re-adding the direct ones on every run would undo that move
+    # on the second deploy and, offline, leave the Brain wired twice — two replies
+    # per turn and every save written twice.
 
     # ── Undo: park the pre-image instead of blanking `data` ───────────────────
     #
