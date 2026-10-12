@@ -1110,6 +1110,25 @@ function askArrival() {
   reply(t('ask_arrival'), calKeyboard(tp.y, tp.m));
   setState('ARRIVAL', d);
 }
+/** The clash warning, as Markdown: who is in the room, and for which nights. */
+function conflictBlock(apartment, room, clashes) {
+  return t('conflict_warning', {
+    room: `${mdEscape(apartment)} — ${mdEscape(String(room))}`,
+    count: clashes.length,
+    list: clashes
+      .map(c => t('conflict_line', {
+        name: mdEscape(c.name),
+        id_part: c.privateId ? t('conflict_id_part', { private_id: mdEscape(c.privateId) }) : '',
+        arrival: c.arrival,
+        departure: c.departure,
+        overlap_from: c.overlapFrom,
+        overlap_to: c.overlapTo,
+        nights_part: c.overlapNights ? t('conflict_nights_part', { nights: c.overlapNights }) : '',
+      }))
+      .join('\n'),
+  });
+}
+
 function showConfirm() {
   const dv = derived(d);
   // The one turn where the room is known along with the dates, so it is the only
@@ -1117,23 +1136,7 @@ function showConfirm() {
   const clashes = findConflicts(d.apartment, d.room, d.arrival_date, d.nights, d.infinity);
   d.conflict = clashes.length > 0;
   let body = t('confirm_summary', summaryVars(d, dv));
-  if (d.conflict) {
-    body += '\n\n' + t('conflict_warning', {
-      room: `${mdEscape(d.apartment)} — ${mdEscape(String(d.room))}`,
-      count: clashes.length,
-      list: clashes
-        .map(c => t('conflict_line', {
-          name: mdEscape(c.name),
-          id_part: c.privateId ? t('conflict_id_part', { private_id: mdEscape(c.privateId) }) : '',
-          arrival: c.arrival,
-          departure: c.departure,
-          overlap_from: c.overlapFrom,
-          overlap_to: c.overlapTo,
-          nights_part: c.overlapNights ? t('conflict_nights_part', { nights: c.overlapNights }) : '',
-        }))
-        .join('\n'),
-    });
-  }
+  if (d.conflict) body += '\n\n' + conflictBlock(d.apartment, d.room, clashes);
   // Shown on the turn that draws the confirmation, because that is the turn the
   // booking rows are already loaded for — the availability check needs them, so
   // this costs no extra query. It is also the right moment: before the save, not
@@ -1408,8 +1411,50 @@ function paymentTarget(dd, method) {
   return { kind: 'new', seq: maxSeq + 1, insertAfter: after, row: after + 1, base: 0 };
 }
 
-/** Lock the edit session onto one sheet row, then continue with the right flow. */
-function applyPick(hit) {
+/**
+ * Put `added` (non-zero, in the currency of `pay`) where it belongs for this
+ * booking: on its own row, or on a payment line. `pay` is the method's Arabic
+ * label. Returns null when applied, or the text to show when a refund would take
+ * a line below zero. Shared by the manual EDIT_PAYMENT step and the AI edit.
+ */
+function applyPaymentChoice(dd, pay, added) {
+  const target = paymentTarget(dd, pay);
+  dd.payTarget = target;
+  dd.payMethod = pay;
+  if (target.kind === 'booking') {
+    // The booking's own row: طريقة الدفع is this method already, or it had
+    // none. اجمالي ما تم دفعه is cumulative there, as it always has been.
+    editSet(dd, 'اجمالي ما تم دفعه', num(paidSoFar(dd) + added));
+    editSet(dd, 'طريقة الدفع', pay);
+    return null;
+  }
+  // A line of its own — either one that already carries this method, whose
+  // cells simply grow, or a row that does not exist yet. Both are written
+  // by the payment_line branch, and neither touches طريقة الدفع on the
+  // booking's row. That cell describes the money on ITS row.
+  //
+  // The below-zero check in EDIT_PAID cannot cover this, and did not: it
+  // runs a turn earlier, before the method is known, and it tests the
+  // BOOKING's own paid cell. The row the money actually lands on is only
+  // decided here. A booking with 500 كاش on its row and 300 انستاباي on a
+  // line would let a −400 انستاباي refund through — 500 − 400 ≥ 0 — and
+  // write −100 into that line's paid cell. Since المتبقي is L − M and L is
+  // blank on a line, the row's المتبقي would then read +100 while the guest
+  // was 400 short. Worse when no line carried the method yet: the same
+  // refund INSERTED a row, shifted every row below it, stamped column U and
+  // recorded a −400 payment, all to take money off a cell that was elsewhere.
+  //
+  // A refund can only come out of what that line actually holds.
+  const lineTotal = target.base + added;
+  if (lineTotal < 0) {
+    return t('line_paid_below_zero', { method: pay, current: num(target.base) });
+  }
+  dd.lineTotal = num(lineTotal);
+  return null;
+}
+
+/** Lock the edit session onto one sheet row and load what the edit steps need. */
+function loadEditBooking(hit) {
   d.editRow = hit.row;
   d.editOrig = hit.json;
   d.editNew = {};
@@ -1423,6 +1468,11 @@ function applyPick(hit) {
   d.editLines = Array.isArray(hit.json.lines) ? hit.json.lines : [];
   d.blockEnd = Number(hit.json.block_end) || hit.row;
   d.totalIsFormula = Boolean(hit.json.total_is_formula);
+}
+
+/** Lock the edit session onto one sheet row, then continue with the right flow. */
+function applyPick(hit) {
+  loadEditBooking(hit);
   if (d.paidOnly) {
     // Cashier flow: the booking is found, so go straight to the amount. There is
     // no field menu for them — payment is the only thing they may touch.
@@ -2513,40 +2563,8 @@ switch (state) {
       break;
     }
 
-    const target = paymentTarget(d, pay);
-    d.payTarget = target;
-    d.payMethod = pay;
-    if (target.kind === 'booking') {
-      // The booking's own row: طريقة الدفع is this method already, or it had
-      // none. اجمالي ما تم دفعه is cumulative there, as it always has been.
-      editSet(d, 'اجمالي ما تم دفعه', num(paidSoFar(d) + added));
-      editSet(d, 'طريقة الدفع', pay);
-    } else {
-      // A line of its own — either one that already carries this method, whose
-      // cells simply grow, or a row that does not exist yet. Both are written
-      // by the payment_line branch, and neither touches طريقة الدفع on the
-      // booking's row. That cell describes the money on ITS row.
-      //
-      // The below-zero check in EDIT_PAID cannot cover this, and did not: it
-      // runs a turn earlier, before the method is known, and it tests the
-      // BOOKING's own paid cell. The row the money actually lands on is only
-      // decided here. A booking with 500 كاش on its row and 300 انستاباي on a
-      // line would let a −400 انستاباي refund through — 500 − 400 ≥ 0 — and
-      // write −100 into that line's paid cell. Since المتبقي is L − M and L is
-      // blank on a line, the row's المتبقي would then read +100 while the guest
-      // was 400 short. Worse when no line carried the method yet: the same
-      // refund INSERTED a row, shifted every row below it, stamped column U and
-      // recorded a −400 payment, all to take money off a cell that was elsewhere.
-      //
-      // A refund can only come out of what that line actually holds.
-      const lineTotal = target.base + added;
-      if (lineTotal < 0) {
-        reply(t('line_paid_below_zero',
-                { method: pay, current: num(target.base) }));
-        break;
-      }
-      d.lineTotal = num(lineTotal);
-    }
+    const refusal = applyPaymentChoice(d, pay, added);
+    if (refusal) { reply(refusal); break; }
     // A receipt is asked for the two transfer methods only. Admins may skip
     // it; a cashier is recording someone else's money, so there is no skip.
     //
