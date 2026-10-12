@@ -6,9 +6,11 @@
 
 ## 2026-10-12 — the bot no longer uses Postgres
 
-**LIVE since 2026-10-12, but not yet exercised by a real Telegram message.**
-Workflow `hzMYegbL3yifl7KN`, activeVersionId `2cefc898-16f8-403f-805c-0d338361445d`,
-67 nodes (was 72), no Postgres node, live Brain byte-identical to `booking_bot/brain.js`.
+**LIVE since 2026-10-12 and exercised by a real message** (execution 7820: an AI edit,
+"حجز عبد النبي دفع 2800 كاش" on row 42, confirmed; the row was written and the group posted).
+Workflow `hzMYegbL3yifl7KN`, activeVersionId `8393b052-1a3c-48d5-82c1-0764290a9d41`
+(first publish was `2cefc898…`, see "Found live" below), 67 nodes (was 72), no Postgres node,
+live Brain byte-identical to `booking_bot/brain.js`.
 **Rollback:** `restore_workflow_version` to `4555ef7a-38f1-4d4e-a1dc-f71038a6d6f8` (the
 Postgres version that was live this morning), then `publish_workflow`. Spec:
 `docs/superpowers/specs/2026-10-12-sheet-only-bot-design.md`; plan: `…/plans/2026-10-12-sheet-only-bot.md`.
@@ -50,10 +52,19 @@ applied the migration to a copy of the live graph (87 operations, 72 → 67 node
 run found only parameter refreshes. (4) The draft was read back from the server and compared
 with the generator before publishing.
 
-**First-message checklist (nobody has done this yet).** `/start` → ✏️ or 🤖, type an existing
-ID, then **إلغاء**: the card must name the right guest. Then one real payment on a booking you
-choose and check the right row. Look at the next execution for a red node; if a lookup, a
-session node or a write is red, roll back.
+**Found live, on the first Confirm (execution 7820), and fixed.** The payment wrote correctly,
+but `Save Session` ran AFTER `Clear Session` and put the finished session back to
+`EDIT_CONFIRM` (with its `savingAt` lock), so an old Confirm card could have saved the same
+payment again once the lock lapsed. Cause: retyping a node removes and re-adds it, and
+`addConnection` only appends, so `Brain → Save Session` came back last in Brain's branch list
+and `Send Saved → Clear Session` came back after the group post. n8n runs one output's branches
+in the order they were connected. `sheet_only_ops` now restores the generator's order (live-only
+branches such as the availability tap stay after it), tests pin it, and the graph was re-applied
+and republished as `8393b052…`. The stale row for the admin chat was set to `''` / `{}` by hand.
+**If you ever retype a node again, check `Brain`'s and `Send Saved`'s branch order afterwards.**
+
+**Still worth doing.** One real payment *after* the fix, and look at that execution: `Save
+Session` must run before `Send Reply`/the writers, and the session row must end `state ''`.
 
 **Things that behave differently.**
 - Conversations in progress at the switch lost their session (they lived in `bot_sessions`).

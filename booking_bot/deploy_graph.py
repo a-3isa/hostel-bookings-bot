@@ -317,6 +317,29 @@ def sheet_only_ops(wf, target, sheets_cred, prior_ops=()):
         unlink(gate, reader, idx)
         if downstream and downstream in present():
             link(reader, downstream)
+
+    # 4. Branch ORDER. n8n runs the branches of one output in the order they were
+    #    connected, and addConnection can only append — so a node that was removed
+    #    and added again comes back LAST. Save Session did (execution 7820, the
+    #    first live Confirm): it ran after Clear Session and put the finished session
+    #    back to EDIT_CONFIRM, which left an old Confirm card able to save the same
+    #    payment again. The generator's order wins for the nodes it knows; anything
+    #    only the live graph has (the availability tap, say) stays after them.
+    for src, spec in target["connections"].items():
+        for idx, branch in enumerate(spec.get("main", [])):
+            cur_brs = sim["connections"].get(src, {}).get("main", [])
+            if len(branch) < 2 or idx >= len(cur_brs):
+                continue
+            cur = [c["node"] for c in cur_brs[idx]]
+            desired = [c["node"] for c in branch]
+            ranked = [n for n in desired if n in cur] + [n for n in cur if n not in desired]
+            if cur == ranked:
+                continue
+            first = next(i for i, (a, b) in enumerate(zip(cur, ranked)) if a != b)
+            for n in cur[first:]:
+                unlink(src, n, idx)
+            for n in ranked[first:]:
+                link(src, n, idx)
     return new_ops
 
 
