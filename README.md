@@ -1,24 +1,22 @@
 # hostel-bookings-bot
 
 A Telegram bot that runs bookings and expenses for the hostel. Staff use it in
-Arabic. It writes to a Google Sheet, which is the source of truth, and copies
-the data into a Supabase Postgres database that a small web dashboard reads.
+Arabic. It reads and writes one Google Sheet, which is the only store: since
+2026-10-12 the bot no longer touches a database.
 
 ```
-Telegram ──► n8n workflow (brain.js) ──► Google Sheet   (authoritative)
-                     │                         ▲
-                     └──► Supabase Postgres ◄──┘ daily reconcile / mirror
-                                  ▲
-                                  └── webui (Next.js dashboard)
+Telegram ──► n8n workflow (brain.js) ──► Google Sheet   (the only store)
+                     │
+                     └── conversation state: an n8n Data Table, one row per chat
 ```
 
 ## What's in the repo
 
 | Folder | What it is | Status |
 |---|---|---|
-| [`booking_bot/`](booking_bot/) | The n8n workflow: `brain.js` is the conversation state machine, `nodes/` holds the other Code and Postgres nodes, and `build_workflow.py` generates the importable graph. | **Live** |
-| [`supabase/`](supabase/) | Postgres schema, migrations, the sheet backfill, and the mirror and reconcile scripts. | Mirror of the sheet |
-| [`webui/`](webui/) | A Next.js 15 dashboard for bookings, expenses, deposits, reports and reconcile. It connects to Postgres directly. | Deployed on Vercel |
+| [`booking_bot/`](booking_bot/) | The n8n workflow: `brain.js` is the conversation state machine, `nodes/` holds the other Code nodes (including the ones that read the sheet), and `build_workflow.py` generates the importable graph. | **Live** |
+| [`supabase/`](supabase/) | Postgres schema, migrations, the sheet backfill, and the mirror and reconcile scripts. | **Retired 2026-10-12.** The bot no longer reads or writes it |
+| [`webui/`](webui/) | A Next.js 15 dashboard for bookings, expenses, deposits, reports and reconcile. It connects to Postgres directly. | **Retired 2026-10-12.** Its data is no longer updated |
 | [`python_version/`](python_version/) | The original python-telegram-bot implementation. | **Retired.** Kept for reference only |
 | [`docs/`](docs/) | Plans and the running handoff log (`HANDOFF.md`). | — |
 
@@ -53,6 +51,8 @@ the next build.
 ```bash
 node booking_bot/test_brain.mjs          # state machine, offline
 node booking_bot/test_reports.mjs        # report builders, offline
+node booking_bot/test_sheet_lookup.mjs   # the sheet lookups, offline
+python -m pytest booking_bot             # generator, migration, validator
 python booking_bot/build_workflow.py     # regenerate the workflow JSON
 python booking_bot/validate_workflow.py  # check connections in the JSON
 
@@ -64,18 +64,12 @@ python booking_bot/deploy_graph.py --publish
 [`booking_bot/README.md`](booking_bot/README.md) covers deployment, rebuilding
 into a fresh n8n instance, and the manual import path.
 
-## Web dashboard
+## Web dashboard (retired)
 
-```bash
-cd webui
-npm install
-npm run dev
-```
-
-It needs the Supabase pooler connection string. See
-[`webui/README.md`](webui/README.md) for the environment variables. **Edits made
-in the dashboard go to Postgres only.** They show up as differences in the
-daily reconcile until the same change is made in the sheet.
+The dashboard and its Supabase database are no longer part of the system: the
+admin edits the sheet by hand, so the database could not stay current, and a
+bot that read it wrote payments onto the wrong guest's row. The code is kept
+for reference only. Nothing here updates it, and nothing in it affects the bot.
 
 ## Secrets
 

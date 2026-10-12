@@ -17,12 +17,14 @@ number, so it keeps tracking L − M as payments land.
 | File | Purpose |
 |---|---|
 | `brain.js` | The whole conversation state machine. Lives in the *Brain* Code node. |
-| `nodes/*.js`, `nodes/*.sql` | The bodies of every other Code and Postgres node. |
+| `nodes/*.js` | The bodies of every other Code node, including the three that read the sheet (`build_bookings_lookup.js`, `build_locations.js`, `compute_next_booking_id.js`). |
 | `build_workflow.py` | Renders the core graph as importable workflow JSON. |
 | `bookings-bot.workflow.json` | **Generated.** For *Import from File*. |
 | `validate_workflow.py` | Checks the JSON for dangling connections / orphan nodes. |
 | `test_workflow.py` | The generated graph still matches what the JS expects. |
-| `deploy_graph.py` | Adds the reports / shadow / reconcile / mirror branch to a live workflow. |
+| `deploy_graph.py` | Adds the reports and availability branches to a live workflow, and migrates it to sheet-only (`sheet_only_ops`: idempotent, batched). |
+| `test_sheet_lookup.mjs` | Offline tests for the sheet lookups, on fixtures from the real tab. |
+| `check_sheet_lookup.py` | Read-only: what the bookings lookup makes of the LIVE tab (`--rows 36-42`). |
 | `push_brain.py` | Pushes `brain.js` and the Config access lists into a live workflow. |
 | `test_brain.mjs` | Offline assertions driving every flow end to end (600+). |
 | `ai_intent.py` | The AI edit's model contract: JSON schema, prompt, model id. |
@@ -34,6 +36,41 @@ Edit the `.js` files, then:
 node booking_bot/test_brain.mjs        # the state machine, offline
 python booking_bot/push_brain.py       # deploy (see below)
 ```
+
+## No database (since 2026-10-12)
+
+The bot reads the sheet in the same turn it writes it. It used to read a Postgres
+mirror that only ever heard about the bot's own writes, while the sheet is edited
+by hand; the row number it handed over drifted and a payment landed on the guest
+above or below. Now:
+
+```
+Needs Bookings? -> Fetch Bookings Formulas -> Fetch Bookings Values -> Read Bookings For Edit
+Needs Locations? -> Fetch Locations -> Read Locations                  (the الإتاحة tab, A2:B)
+Needs Booking ID? -> Fetch Booking Ids -> Read Next Booking ID         (column B)
+```
+
+- **Fetch …** are HTTP requests to the Sheets API (`values.get`), not the Sheets
+  node: the API returns rows from row 1 with interior blanks kept, so a row's
+  number is its index + 1. The two bookings reads are `FORMULA` and
+  `UNFORMATTED_VALUE` of `A1:U2000`; formulas show an open stay (`=TODAY()-J…`)
+  and a nightly-rate total (`=500*I10`), values give the numbers.
+- **Read …** are Code nodes that return the rows `brain.js` always got, with
+  `row_number`, `booking_id` (= the row), `lines`, `block_end` and
+  `total_is_formula`. A *line* is a payment in a second method: the row directly
+  under a booking with the same identity, a blank price and its own paid/method.
+  Anything else, including the same guest on a later arrival, is its own booking.
+- **Sessions** are the `bookings_bot_sessions` Data Table (`chat_id`, `state`,
+  `data`, `updated_at`). It was abandoned on 2026-08-14 because it "looked up
+  cleanly and wrote nothing"; `build_workflow.session_params` carries the shapes
+  proven against the real node on 2026-10-12.
+- `Write Line Id` still stamps `<row>-<seq>` on a payment line: `build_reports.js`
+  skips such rows so the reports do not list a guest twice.
+- A fetch that follows a node emitting many items (`Fetch Locations`,
+  `Fetch Booking Ids`) is `executeOnce`, and every Code node is `alwaysOutputData`:
+  an empty or failed read still lets the Brain run.
+- `python booking_bot/check_sheet_lookup.py --rows 36-42` shows what the lookup
+  makes of the live tab. Nothing is written.
 
 ## AI edit
 
@@ -285,9 +322,9 @@ year, no "منذ", no "غرفة" (user, 2026-09-21). The occupied/empty split th
 replaced made you subtract two lists in your head to answer the only question
 the report is ever asked: is there a bed in انبي 2 tonight.
 
-- The room list comes from the registry: `Read Report Locations`, the same
-  `read_locations.sql` the Telegram branch runs, wired at the head of the chain
-  so it costs one query rather than one per row. A guest in a room — or a whole
+- The room list comes from the registry: `Fetch Report Locations` ->
+  `Read Report Locations`, the same read the Telegram branch runs, wired at the
+  head of the chain so it costs one request rather than one per row. A guest in a room — or a whole
   apartment — the registry does not list is **appended** rather than dropped.
   If the registry cannot be read at all (the node errors, or an older deploy
   does not carry it) the report falls back to the occupied rooms only, under a
@@ -319,29 +356,18 @@ Both sheet reads carry `executeOnce`. `Read Report Values` always did; `Read
 Report Formulas` needs it too now that 26 registry rows arrive at its input, or
 it would re-read the whole tab once per room.
 
-Two things stay off:
+One thing stays off: the old **☀️ daily digest** — arrivals and open stays past
+30 days — behind `SEND_DAILY_DIGEST` at the top of `nodes/build_reports.js`, where
+the user put it on 2026-08-28. `test_reports.mjs` still exercises it by compiling a
+copy of the source with the flag flipped. Its departures section duplicates the
+availability report's, so turning it back on announces departures twice.
 
-- the old **☀️ daily digest** — arrivals and open stays past 30 days — behind
-  `SEND_DAILY_DIGEST` at the top of `nodes/build_reports.js`, where the user put
-  it on 2026-08-28. `test_reports.mjs` still exercises it by compiling a copy of
-  the source with the flag flipped. Its departures section duplicates the
-  availability report's, so turning it back on announces departures twice.
-- the **daily reconcile message**. `Build Reconcile Message` still runs and must
-  keep returning one item — `Read Unmirrored Bookings` hangs off its output, and
-  that is what publishes dashboard-born bookings into the sheet — but its wire
-  into `Send Report` stays cut.
-
-> **The live instance had silenced this branch a different way: every node in it
-> was *disabled*, so the 08:00 trigger never even registered** (`triggerCount`
-> was 1, and there is not one scheduled execution in the history). Re-enabled on
-> 2026-09-21. Cutting `Build Reconcile Message → Send Report` was required rather
-> than tidy: a disabled node forwards its input downstream, so with that wire in
-> place the disabled reconcile chain would have pushed raw sheet rows into
-> `Send Report`.
-
-The branch stays wired end to end because it carries the day's real work — the
-sheet reads, the snapshot, `reconcile_bookings`, and the mirror append. Never
-silence it by deleting the trigger or the branch. See `docs/HANDOFF.md`.
+> **The live instance once silenced this branch by *disabling* every node in it, so
+> the 08:00 trigger never even registered** (`triggerCount` was 1, and there is not
+> one scheduled execution in the history). Re-enabled on 2026-09-21. Never silence
+> the branch by disabling nodes or deleting the trigger; cut a wire instead. See
+> `docs/HANDOFF.md`. (The daily reconcile and the mirror append that used to hang
+> off it were removed with the database on 2026-10-12.)
 
 Per-booking announcements are a different thing and are unaffected: `Post To
 Group`, a different chat, fired by the Telegram trigger.
@@ -354,8 +380,7 @@ leaving for months. FORMULA alone cannot replace the first read either — ال�
 and, on nightly-rate rows, اجمالي سعر الحجز come back as formula text.
 
 Both stay wired regardless of what is being sent: `Read Report Values` runs
-*after* the formula read, and it is what the snapshot, the reconcile and the
-mirror append all hang off.
+*after* the formula read, and `Build Reports` needs both.
 
 The trigger fires at 08:00 in the **workflow's** timezone, which is pinned to
 `Africa/Cairo` as of 2026-09-21 — so 08:00 means 08:00 local. It used to be

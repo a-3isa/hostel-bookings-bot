@@ -1,5 +1,7 @@
 # webui — a read/write dashboard over the bookings database
 
+> **RETIRED 2026-10-12.** The bot no longer reads or writes this. The admin edits the sheet by hand and never uses the dashboard, so this data went stale, and a bot that read it wrote payments onto the wrong guest's row. Kept for reference only; nothing in `booking_bot/` depends on it, and running `backfill.py`, `reindex.py` or `mirror.py` no longer has any effect on the bot.
+
 A small Next.js app that talks to the same Supabase Postgres the bot mirrors
 into. It connects **as `postgres` over the transaction pooler**, exactly as the
 bot and the backfill do — not through PostgREST. That matters: every table has

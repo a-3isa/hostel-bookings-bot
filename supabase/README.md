@@ -1,5 +1,7 @@
 # supabase/
 
+> **RETIRED 2026-10-12.** The bot no longer reads or writes this. The admin edits the sheet by hand and never uses the dashboard, so this data went stale, and a bot that read it wrote payments onto the wrong guest's row. Kept for reference only; nothing in `booking_bot/` depends on it, and running `backfill.py`, `reindex.py` or `mirror.py` no longer has any effect on the bot.
+
 The Postgres side of the bot. **Not live yet** — nothing in `booking_bot/` talks
 to it. See [`../docs/2026-08-08-supabase-migration-scope.md`](../docs/2026-08-08-supabase-migration-scope.md)
 for the plan and the reasoning.
