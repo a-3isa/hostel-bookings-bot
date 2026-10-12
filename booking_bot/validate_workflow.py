@@ -76,14 +76,8 @@ def load():
         return json.load(fh)
 
 
-def main():
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError):
-            pass
-
-    wf = load()
+def check(wf):
+    """Every structural problem in `wf`, as strings. An empty list means clean."""
     nodes = {n["name"]: n for n in wf["nodes"]}
     conns = wf.get("connections", {})
     problems = []
@@ -92,10 +86,13 @@ def main():
     for src, spec in conns.items():
         if src not in nodes:
             problems.append(f"connection from unknown node {src!r}")
-        for branch in spec.get("main", []):
-            for link in branch:
-                if link["node"] not in nodes:
-                    problems.append(f"{src} -> unknown node {link['node']!r}")
+        # Every connection kind: `main` is the data flow; ai_languageModel and
+        # friends plug a model or a tool into the node that uses it.
+        for kind, branches in spec.items():
+            for branch in branches:
+                for link in branch:
+                    if link["node"] not in nodes:
+                        problems.append(f"{src} -{kind}-> unknown node {link['node']!r}")
 
     # 2. Reachability. A node nothing reaches never runs, and n8n will not say so.
     triggers = [n for n in wf["nodes"] if any(t in n["type"] for t in TRIGGER_TYPES)]
@@ -110,6 +107,20 @@ def main():
         seen.add(cur)
         for branch in conns.get(cur, {}).get("main", []):
             queue += [l["node"] for l in branch if l["node"] in nodes]
+    # A sub-node (a chat model, a tool) has no inbound `main`. It hangs off the
+    # node it serves through an ai_* connection and runs whenever that node does,
+    # so it is reached exactly when its parent is.
+    changed = True
+    while changed:
+        changed = False
+        for src, spec in conns.items():
+            if src in seen or src not in nodes:
+                continue
+            for kind, branches in spec.items():
+                if kind != "main" and any(l["node"] in seen for br in branches for l in br):
+                    seen.add(src)
+                    changed = True
+                    break
     for name in nodes:
         if name not in seen:
             problems.append(f"orphan: {name!r} is not reachable from any trigger")
@@ -185,6 +196,31 @@ def main():
                 f"{node['name']}: {params['operation']} has no 'file' parameter"
                 " — the file id belongs in `file`, and any other name is dropped")
 
+    # 8. An extractor or agent with no language model plugged in fails the first
+    #    time it runs, with an error that does not name the missing wire.
+    needs_model = [n["name"] for n in wf["nodes"]
+                   if n["type"].endswith(("informationExtractor", ".agent"))]
+    for name in needs_model:
+        wired = any(l["node"] == name
+                    for spec in conns.values()
+                    for br in spec.get("ai_languageModel", []) for l in br)
+        if not wired:
+            problems.append(f"{name}: no language model is plugged into it")
+
+    return problems
+
+
+def main():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+    wf = load()
+    problems = check(wf)
+    nodes = wf["nodes"]
+    conns = wf.get("connections", {})
     print(f"{wf['name']}: {len(nodes)} nodes, {len(conns)} with outgoing connections")
     if problems:
         print(f"\n{len(problems)} problem(s):")
