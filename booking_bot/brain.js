@@ -1287,9 +1287,47 @@ function openAiBooking(intent) {
   applyAiIntent(hits[0], intent);
 }
 
-/** Task 4 turns this into the real thing. */
+/**
+ * Money from the request, through the same helper the manual step uses.
+ * Returns null when applied, or the text to refuse with.
+ */
+function applyAiPayment(p) {
+  // EDIT_PAID's own rule, one step earlier than the method is known: the booking
+  // row's paid cell may not go below zero.
+  const current = paidSoFar(d);
+  if (current + p.amount < 0) return t('edit_paid_below_zero', { current: num(current) });
+  d.paidAdded = num(p.amount);
+  d.paidTouched = true;
+  return applyPaymentChoice(d, payLabel(p.key), p.amount);
+}
+
+/**
+ * Apply a checked request to the booking at `hit` and draw the review card.
+ *
+ * Built in the order the manual flow builds its session — the payment leads — so
+ * the card and the group message read the same. Anything refused throws the
+ * half-built session away: the admin is back in AI_TEXT with nothing touched.
+ */
 function applyAiIntent(hit, intent) {
-  reply(t('ai_not_understood', { reason: '' }));
+  delete d.aiIntent;
+  loadEditBooking(hit);
+  d.aiMode = true;              // afterEditStep / showEditConfirm behave differently
+  d.leaveAsked = true;          // the request already says whether the guest left
+  d.aiClashes = '';
+  const refuse = (msg) => { reply(msg); setState('AI_TEXT', {}); };
+
+  if (intent.payment) {
+    const bad = applyAiPayment(intent.payment);
+    if (bad) { refuse(bad); return; }
+  }
+
+  // A transfer needs its receipt, as in the manual flow (admins may skip it).
+  if (intent.payment && RECEIPT_PAYMENT_KEYS.indexOf(intent.payment.key) !== -1) {
+    reply(t('ask_receipt'), skipKb('xreceipt_skip'));
+    setState('EDIT_RECEIPT', d);
+    return;
+  }
+  afterEditStep(d);
 }
 
 /** Menu of editable fields, plus finish and cancel-the-booking. */
@@ -1576,6 +1614,7 @@ function applyPick(hit) {
  *  - anything else: back to the field menu.
  */
 function afterEditStep(dd) {
+  if (dd.aiMode) { showEditConfirm(dd); return; }     // the AI edit has no field menu
   if (dd.paidOnly) { showPaidConfirm(dd); return; }
   if (dd.paidTouched && !dd.leaveAsked) {
     reply(t('edit_ask_left'), {
@@ -1593,9 +1632,14 @@ function afterEditStep(dd) {
 /** Final review of everything this edit session changed, before it is written. */
 function showEditConfirm(dd) {
   const warn = overpayNote(dd);
-  reply(t('edit_confirm_summary', { changes: changeLines(dd) }) + (warn ? '\n\n' + warn : ''), {
+  // The AI edit echoes what it was asked and warns about clashes (computed on the
+  // turn that had the bookings loaded). Both are empty for the manual flow.
+  const echo = dd.aiMode ? t('ai_echo', { request: mdEscape(dd.aiText || '') }) + '\n\n' : '';
+  const clash = dd.aiMode && dd.aiClashes ? '\n\n' + dd.aiClashes : '';
+  reply(echo + t('edit_confirm_summary', { changes: changeLines(dd) })
+    + (warn ? '\n\n' + warn : '') + clash, {
     inline_keyboard: [
-      [{ text: t('btn_confirm'), callback_data: 'xedone' }],
+      [{ text: t(clash ? 'btn_confirm_anyway' : 'btn_confirm'), callback_data: 'xedone' }],
       [{ text: t('btn_cancel'), callback_data: 'xecancel' }],
     ],
   }, true);

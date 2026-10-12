@@ -2175,6 +2175,92 @@ check('the buttons carry the sheet rows',
   r.reply.reply_markup.inline_keyboard);
 check('waiting in AI_PICK', r.sessionState === 'AI_PICK', r.sessionState);
 
+function manualPay(id, amount, payCb) {
+  resetSession();
+  sheetRows = AI_SHEET;
+  run(msg('/start')); run(cb('choice_edit')); run(msg(id));
+  run(cb('ef_paid')); run(msg(String(amount))); run(cb(payCb));
+}
+
+section('ai edit: a payment on the booking\'s own row');
+aiOpen();
+r = aiSay('booking 31 paid 300 cash', { output: { booking_id: '31', payment: { amount: 300, method: 'cash' } } });
+check('the card echoes the request', r.reply.text.startsWith('🤖 فهمت: «booking 31 paid 300 cash»'), r.reply.text);
+check('and is the ordinary edit review', r.reply.text.includes('📋 *مراجعة التعديل:*'), r.reply.text);
+check('the paid change is spelled out (500 ← 800)', r.reply.text.includes('اجمالي ما تم دفعه: 500 ← 800'), r.reply.text);
+check('nothing is saved yet', r.hasSave === false);
+check('Confirm and Cancel are the existing buttons',
+  r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() === 'xedone,xecancel',
+  r.reply.reply_markup.inline_keyboard);
+check('it waits in EDIT_CONFIRM', r.sessionState === 'EDIT_CONFIRM', r.sessionState);
+check('it does not ask whether the guest has left — the request already said', !r.reply.text.includes('هل غادر'));
+r = run(msg('and something else'));                  // Review Focus 2
+check('typing on the card points at the buttons', r.reply.text.startsWith('👆'), r.reply.text);
+check('and saves nothing', r.hasSave === false);
+check('and does not leave the card', r.sessionState === 'EDIT_CONFIRM', r.sessionState);
+r = run(cb('xedone'));
+check('Confirm saves', r.hasSave === true);
+const viaAi = saveOf(r.save);
+manualPay('31', 300, 'xpay_cash'); run(cb('xleft_no')); r = run(cb('xedone'));
+check('the save is identical to the one the manual flow builds for the same payment',
+  viaAi === saveOf(r.save), { ai: viaAi, manual: saveOf(r.save) });
+
+aiOpen();
+aiSay('booking 31 paid 300 cash', { output: { booking_id: '31', payment: { amount: 300, method: 'cash' } } });
+r = run(cb('xecancel'));
+check('Cancel writes nothing and ends the session', r.hasSave === false && r.sessionState === '',
+  [r.hasSave, r.sessionState]);
+
+aiOpen();
+aiSay('booking 31 paid 300 cash', { output: { booking_id: '31', payment: { amount: 300, method: 'cash' } } });
+run(cb('xedone')); r = run(cb('xedone'));
+check('a second Confirm inside the lock writes nothing', r.hasSave === false);
+
+section('ai edit: a payment in a method the booking does not have');
+aiOpen();
+r = aiSay('booking 31 paid 200 instapay', { output: { booking_id: '31', payment: { amount: 200, method: 'instapay' } } });
+check('a transfer asks for the receipt first, and the admin may skip it',
+  r.sessionState === 'EDIT_RECEIPT' && JSON.stringify(r.reply.reply_markup).includes('xreceipt_skip'),
+  [r.sessionState, r.reply.reply_markup]);
+r = run(photo('RCPT9'));
+check('then the review names the separate line',
+  r.reply.text.includes('➕ دفعة 200 بطريقة انستاباي — سطر منفصل (إجمالي السطر: 200)'), r.reply.text);
+check('and still echoes the request', r.reply.text.startsWith('🤖 فهمت'), r.reply.text);
+r = run(cb('xedone'));
+check('it is saved as a payment line', r.save.flow === 'payment_line', r.save.flow);
+check('with the receipt attached', r.save.receiptFileId === 'RCPT9', r.save.receiptFileId);
+
+section('ai edit: dollars stay dollars');
+aiOpen();
+r = aiSay('booking 31 paid 100 usd', { output: { booking_id: '31', payment: { amount: 100, method: 'usd' } } });
+check('foreign money goes on a line of its own, with no receipt asked',
+  r.reply.text.includes('➕ دفعة 100 بطريقة دولار — سطر منفصل') && r.sessionState === 'EDIT_CONFIRM',
+  [r.reply.text, r.sessionState]);
+check('and no overpay warning for money in another currency', !r.reply.text.includes('أكبر من سعر الحجز'));
+
+section('ai edit: refunds and overpaying');
+aiOpen();
+r = aiSay('booking 31 refund 900 cash', { output: { booking_id: '31', payment: { amount: -900, method: 'cash' } } });
+check('a refund larger than what was paid is refused',
+  r.reply.text === '❌ المدفوع لا يمكن أن يقل عن صفر. المدفوع حالياً: 500', r.reply.text);
+check('and the session stays in AI_TEXT for another try', r.sessionState === 'AI_TEXT', r.sessionState);
+r = aiSay('booking 31 refund 200 cash', { output: { booking_id: '31', payment: { amount: -200, method: 'cash' } } });
+check('a refund within what was paid reaches the card (500 ← 300)',
+  r.reply.text.includes('اجمالي ما تم دفعه: 500 ← 300'), r.reply.text);
+aiOpen();
+r = aiSay('booking 31 paid 2000 cash', { output: { booking_id: '31', payment: { amount: 2000, method: 'cash' } } });
+check('overpaying is warned about, not blocked',
+  r.reply.text.includes('⚠️ المدفوع بعد هذه الدفعة (2500) أكبر من سعر الحجز (1500) بـ 1000') &&
+  r.reply.reply_markup.inline_keyboard[0][0].callback_data === 'xedone', r.reply.text);
+
+section('ai edit: a picked booking gets the stored request');
+aiOpen();
+aiSay('حجز ٥٥ دفع ٥٠ كاش', { output: { booking_id: '٥٥', payment: { amount: 50, method: 'cash' } } });
+r = run(cb('epick_7'));
+check('picking applies the request to that booking (100 ← 150)',
+  r.reply.text.includes('اجمالي ما تم دفعه: 100 ← 150'), r.reply.text);
+check('and the card is the AI one', r.reply.text.startsWith('🤖 فهمت'), r.reply.text);
+
 // ─── Result ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all checks passed'}`);
