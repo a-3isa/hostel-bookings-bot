@@ -1302,6 +1302,38 @@ function applyAiPayment(p) {
 }
 
 /**
+ * A stay change from the request. Only عدد الليالي is written; تاريخ المغادرة is
+ * the sheet's own J + I formula, so `d.departure` exists to show the date on the
+ * card and in the group message, exactly as the checkout question does.
+ * Returns null when applied, or the text to refuse with.
+ */
+function applyAiStay(stay) {
+  const o = d.editOrig || {};
+  const arrival = String(o['تاريخ البداية'] || '').trim();
+  if (!validIsoDate(arrival)) return t('ai_no_arrival');
+  let nights;
+  if (stay.kind === 'extend') {
+    const raw = o['عدد الليالي'];
+    // An open-ended stay's nights is a live =TODAY()-J formula; extending it
+    // would replace the formula with a fixed number.
+    if (String(raw === undefined || raw === null ? '' : raw).trim().startsWith('=')) {
+      return t('ai_open_ended');
+    }
+    const cur = parseNum(raw);
+    if (cur === null) return t('ai_nights_unknown');
+    nights = Math.trunc(cur) + stay.nights;
+  } else {
+    const date = stay.date || todayIso();
+    nights = daysBetween(arrival, date);
+    if (nights === null) return t('ai_bad_date');
+    if (nights < 0) return t('ai_departure_before', { departure: date, arrival });
+  }
+  editSet(d, 'عدد الليالي', nights);
+  d.departure = isoAddDays(arrival, nights);
+  return null;
+}
+
+/**
  * Apply a checked request to the booking at `hit` and draw the review card.
  *
  * Built in the order the manual flow builds its session — the payment leads — so
@@ -1318,6 +1350,11 @@ function applyAiIntent(hit, intent) {
 
   if (intent.payment) {
     const bad = applyAiPayment(intent.payment);
+    if (bad) { refuse(bad); return; }
+  }
+
+  if (intent.stay) {
+    const bad = applyAiStay(intent.stay);
     if (bad) { refuse(bad); return; }
   }
 

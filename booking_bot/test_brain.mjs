@@ -2261,6 +2261,69 @@ check('picking applies the request to that booking (100 ← 150)',
   r.reply.text.includes('اجمالي ما تم دفعه: 100 ← 150'), r.reply.text);
 check('and the card is the AI one', r.reply.text.startsWith('🤖 فهمت'), r.reply.text);
 
+section('ai edit: extend, until, leave');
+aiOpen();
+r = aiSay('booking 31 extend 2 nights', { output: { booking_id: '31', stay: { kind: 'extend', nights: 2 } } });
+check('extending shows 3 ← 5', r.reply.text.includes('عدد الليالي: 3 ← 5'), r.reply.text);
+check('and the new departure date, which is never written',
+  r.reply.text.includes('📅 تاريخ المغادرة: 2026-10-06'), r.reply.text);
+r = run(cb('xedone'));
+check('only the nights cell is written', r.save.fields['عدد الليالي'] === 5 &&
+  !('تاريخ المغادرة' in r.save.fields) && Object.keys(r.save.fields).length === 1, r.save.fields);
+check('no payment is recorded', r.save.payment === null, r.save.payment);
+
+aiOpen(USER, AI_SHEET);
+r = aiSay('booking 32 extend 2', { output: { booking_id: '32', stay: { kind: 'extend', nights: 2 } } });
+check('an open-ended stay cannot be extended', r.reply.text.startsWith('❌ هذه إقامة مفتوحة'), r.reply.text);
+check('and the formula is left alone (no card, nothing saved)',
+  r.sessionState === 'AI_TEXT' && r.hasSave === false, [r.sessionState, r.hasSave]);
+
+aiOpen(USER, SHEET);                                  // the older fixtures have no nights cell
+r = aiSay('booking 77777 extend 2', { output: { booking_id: '77777', stay: { kind: 'extend', nights: 2 } } });
+check('a booking with no recorded nights is refused, never written as NaN',   // Review Focus 1
+  r.reply.text.startsWith('❌ عدد الليالي الحالي غير مسجّل'), r.reply.text);
+check('and the session is clean', r.sessionState === 'AI_TEXT' && r.hasSave === false);
+
+aiOpen();
+r = aiSay('booking 31 until the 8th', { output: { booking_id: '31', stay: { kind: 'until', date: '2026-10-08' } } });
+check('"until" works out the nights from the arrival (3 ← 7)', r.reply.text.includes('عدد الليالي: 3 ← 7') &&
+  r.reply.text.includes('📅 تاريخ المغادرة: 2026-10-08'), r.reply.text);
+
+aiOpen();
+r = aiSay('booking 31 left on the 3rd', { output: { booking_id: '31', stay: { kind: 'leave', date: '2026-10-03' } } });
+check('a leave date sets the nights (3 ← 2)', r.reply.text.includes('عدد الليالي: 3 ← 2'), r.reply.text);
+aiOpen();
+r = aiSay('booking 31 left the 1st', { output: { booking_id: '31', stay: { kind: 'leave', date: '2026-10-01' } } });
+check('leaving on the arrival day is 0 nights, not an error', r.reply.text.includes('عدد الليالي: 3 ← 0'), r.reply.text);
+aiOpen();
+r = aiSay('booking 31 left', { output: { booking_id: '31', stay: { kind: 'leave', date: '2026-09-30' } } });
+check('leaving before arriving is refused, with both dates',
+  r.reply.text.startsWith('❌ المغادرة (2026-09-30) قبل تاريخ البداية (2026-10-01)'), r.reply.text);
+aiOpen();
+r = aiSay('booking 31 left', { output: { booking_id: '31', stay: { kind: 'leave', date: '2026-02-31' } } });
+check('a date that does not exist is refused', r.reply.text.startsWith('❌ التاريخ غير واضح'), r.reply.text);
+aiOpen();
+r = aiSay('booking 31 until tomorrow', { output: { booking_id: '31', stay: { kind: 'until', date: 'tomorrow' } } });
+check('a date that is not a date is refused', r.reply.text.startsWith('❌ التاريخ غير واضح'), r.reply.text);
+
+aiOpen();
+r = aiSay('booking 31 left today', { output: { booking_id: '31', stay: { kind: 'leave' } } });
+const cairoToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo' }).format(new Date());
+const nightsToToday = Math.round((Date.parse(cairoToday) - Date.parse('2026-10-01')) / 86400000);
+check('a leave with no date means today (Cairo)',
+  r.reply.text.includes(`عدد الليالي: 3 ← ${nightsToToday}`) &&
+  r.reply.text.includes(`📅 تاريخ المغادرة: ${cairoToday}`), r.reply.text);
+
+section('ai edit: a payment and a leave in one message equal the manual checkout flow');
+aiOpen();
+aiSay('booking 31 paid 300 cash and left on the 3rd', { output: { booking_id: '31',
+  payment: { amount: 300, method: 'cash' }, stay: { kind: 'leave', date: '2026-10-03' } } });
+r = run(cb('xedone'));
+const viaAiLeave = saveOf(r.save);
+manualPay('31', 300, 'xpay_cash'); run(cb('xleft_yes')); run(cb('cal_day_2026_10_03')); r = run(cb('xedone'));
+check('the save matches the one the checkout question builds, group text included',
+  viaAiLeave === saveOf(r.save), { ai: viaAiLeave, manual: saveOf(r.save) });
+
 // ─── Result ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all checks passed'}`);
