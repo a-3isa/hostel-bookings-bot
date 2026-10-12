@@ -60,6 +60,11 @@ let locationRows = Object.entries(REAL_ROOMS).flatMap(([apt, n]) =>
 let nextBookingId = null;
 let expenseRows = null;
 
+// What "AI Extract" returned this turn: { output: {...} } on success, { error }
+// on failure. null means the node did not run, which is the truth on every turn
+// that is not a plain text message arriving while the loaded state is AI_TEXT.
+let aiOutput = null;
+
 function run(update) {
   const $ = (name) => {
     const map = { Config: CONFIG, 'Telegram Trigger': update, 'Load Session': sessionRow };
@@ -84,7 +89,8 @@ function run(update) {
       // the availability check runs — the only moment the room and the dates are
       // both known and nothing has been written yet.
       const st = sessionRow.state;
-      if (sheetRows === null || !['EDIT_FIND', 'EDIT_PICK', 'NOTES'].includes(st)) {
+      if (sheetRows === null ||
+          !['EDIT_FIND', 'EDIT_PICK', 'NOTES', 'AI_TEXT', 'AI_PICK'].includes(st)) {
         throw new Error('Referenced node is unexecuted');
       }
       // The node reads A:T and adds row_number, so the double must too — an
@@ -93,6 +99,15 @@ function run(update) {
       return {
         all: () => sheetRows.map((j, i) => ({ json: { ...j, row_number: i + 2 } })),
       };
+    }
+    if (name === 'AI Extract') {
+      // Faithful to the graph: "Needs AI?" lets this node run only on a text
+      // message that is not a command, while the LOADED state is AI_TEXT.
+      const msgText = (update.message || {}).text || '';
+      if (aiOutput === null || sessionRow.state !== 'AI_TEXT' || !/^[^/]/.test(msgText)) {
+        throw new Error('Referenced node is unexecuted');
+      }
+      return { first: () => ({ json: aiOutput }) };
     }
     return { first: () => ({ json: map[name] }) };
   };
@@ -191,14 +206,14 @@ check('unlisted user tapping a button gets nothing', r === null, r);
 
 r = run(msg('/start'));
 check('admin by id gets the full menu', r.reply.text === 'اختر العملية:', r.reply.text);
-check('admin menu has booking, expense, edit, payment and availability',
+check('admin menu has booking, expense, edit, payment, AI edit and availability',
   r.reply.reply_markup.inline_keyboard.map(row => row[0].callback_data).join() ===
-  'choice_booking,choice_expense,choice_edit,choice_paid,choice_avail',
+  'choice_booking,choice_expense,choice_edit,choice_paid,choice_ai,choice_avail',
   r.reply.reply_markup.inline_keyboard);
 
 r = run(msg('/start', { id: 627334825, first_name: 'Abdulrahman' }));
 check('the admin resolved from @AbdulrahmanMohamed5 gets the full menu by id',
-  r.reply.reply_markup.inline_keyboard.length === 5, r.reply.reply_markup.inline_keyboard);
+  r.reply.reply_markup.inline_keyboard.length === 6, r.reply.reply_markup.inline_keyboard);
 
 r = run(msg('/start', CASHIER_BY_NAME));
 check('@seiiffseiif no longer grants anything', r.reply.text === '⛔ غير مصرح لك باستخدام هذا البوت.',
@@ -220,7 +235,7 @@ check('the cashier resolved from @Seifgamal24 matches by id, without a username'
 // Dropping either would silently lock a working receptionist out of the live bot.
 r = run(msg('/start', { id: 5793725130, first_name: 'Mostafa' }));
 check('the second receptionist kept full access',
-  r.reply.reply_markup.inline_keyboard.length === 5, r.reply.reply_markup.inline_keyboard);
+  r.reply.reply_markup.inline_keyboard.length === 6, r.reply.reply_markup.inline_keyboard);
 
 r = run(msg('/start', EXPUSER));
 check('cashier gets a two-option menu', r.reply.text === 'اختر العملية:', r.reply.text);
@@ -2024,6 +2039,102 @@ r = run(cb('choice_avail', OTHER));
 check('a stranger cannot', r === null || r.hasAvailability !== true, r);
 r = run(msg('/start'));
 check('an ordinary turn does not fire the report', r.hasAvailability === false, r.hasAvailability);
+
+// ─── AI edit (2026-10-12) ─────────────────────────────────────────────────────
+
+// Rows as "Read Bookings For Edit" returns them; the harness numbers them from 2.
+const AI_SHEET = [
+  // row 2: a fixed 3-night stay in انبي 2 / 1, 500 of 1500 paid in cash
+  { 'بوكنج ID': '', 'ID': '31', 'اسم المقيم': 'Hana Ali', 'اسم الشقة': 'انبي 2', 'رقم الغرفة': 1,
+    'تاريخ البداية': '2026-10-01', 'عدد الليالي': 3, 'اجمالي سعر الحجز': 1500,
+    'اجمالي ما تم دفعه': 500, 'طريقة الدفع': 'كاش', 'ملاحظات': '',
+    booking_id: 41, lines: [], block_end: 2, total_is_formula: false },
+  // row 3: open-ended (nights is the sheet's own formula)
+  { 'بوكنج ID': '', 'ID': '32', 'اسم المقيم': 'Omar Nabil', 'اسم الشقة': 'انبي 2', 'رقم الغرفة': 2,
+    'تاريخ البداية': '2026-10-05', 'عدد الليالي': '=TODAY()-J3', 'اجمالي سعر الحجز': 900,
+    'اجمالي ما تم دفعه': 0, 'طريقة الدفع': 'غير مدفوع', 'ملاحظات': '',
+    booking_id: 42, lines: [], block_end: 3, total_is_formula: false },
+  // row 4: انبي 2 / 3 from 10-02 for 5 nights (what a room move can clash with)
+  { 'بوكنج ID': '', 'ID': '33', 'اسم المقيم': 'Dina Samir', 'اسم الشقة': 'انبي 2', 'رقم الغرفة': 3,
+    'تاريخ البداية': '2026-10-02', 'عدد الليالي': 5, 'اجمالي سعر الحجز': 2000,
+    'اجمالي ما تم دفعه': 2000, 'طريقة الدفع': 'كاش', 'ملاحظات': '',
+    booking_id: 43, lines: [], block_end: 4, total_is_formula: false },
+  // row 5: انبي 2 / 1 from 10-06 for 2 nights (extending row 2 by 3 nights reaches it)
+  { 'بوكنج ID': '', 'ID': '34', 'اسم المقيم': 'Karim Adel', 'اسم الشقة': 'انبي 2', 'رقم الغرفة': 1,
+    'تاريخ البداية': '2026-10-06', 'عدد الليالي': 2, 'اجمالي سعر الحجز': 700,
+    'اجمالي ما تم دفعه': 700, 'طريقة الدفع': 'كاش', 'ملاحظات': '',
+    booking_id: 44, lines: [], block_end: 5, total_is_formula: false },
+  // rows 6 and 7: the same ID twice (IDs restart each month)
+  { 'بوكنج ID': '', 'ID': '55', 'اسم المقيم': 'Mona Hany', 'اسم الشقة': 'انبي 3', 'رقم الغرفة': 1,
+    'تاريخ البداية': '2026-09-03', 'عدد الليالي': 2, 'اجمالي سعر الحجز': 600,
+    'اجمالي ما تم دفعه': 600, 'طريقة الدفع': 'كاش', 'ملاحظات': '',
+    booking_id: 45, lines: [], block_end: 6, total_is_formula: false },
+  { 'بوكنج ID': '', 'ID': '55', 'اسم المقيم': 'Tarek Said', 'اسم الشقة': 'انبي 3', 'رقم الغرفة': 2,
+    'تاريخ البداية': '2026-10-04', 'عدد الليالي': 4, 'اجمالي سعر الحجز': 800,
+    'اجمالي ما تم دفعه': 100, 'طريقة الدفع': 'كاش', 'ملاحظات': '',
+    booking_id: 46, lines: [], block_end: 7, total_is_formula: false },
+];
+
+/** A request typed in AI_TEXT, with the model's answer for that one turn. */
+function aiSay(text, output, from = USER) {
+  aiOutput = output;
+  const res = run(msg(text, from));
+  aiOutput = null;
+  return res;
+}
+
+/** /start -> 🤖, with the bookings the lookup would have loaded. */
+function aiOpen(from = USER, rows = AI_SHEET) {
+  resetSession();
+  sheetRows = rows;
+  run(msg('/start', from));
+  return run(cb('choice_ai', from));
+}
+
+// Key order is not part of a save's meaning, and `ref` embeds a timestamp.
+const canon = (v) => Array.isArray(v) ? v.map(canon)
+  : (v && typeof v === 'object')
+    ? Object.fromEntries(Object.keys(v).sort().map(k => [k, canon(v[k])]))
+    : v;
+const saveOf = (save) => {
+  const c = canon(save);
+  if (c && c.payment) delete c.payment.ref;
+  return JSON.stringify(c);
+};
+
+section('ai edit: the button, and what happens when the model is not there');
+resetSession();
+r = run(msg('/start'));
+check('the admin menu offers the AI button',
+  r.reply.reply_markup.inline_keyboard.some(row => row[0].callback_data === 'choice_ai'));
+r = run(msg('/start', EXPUSER));
+check('the cashier menu does not',
+  !r.reply.reply_markup.inline_keyboard.some(row => row[0].callback_data === 'choice_ai'));
+r = aiOpen();
+check('tapping it asks for the request', r.reply.text.startsWith('🤖 اكتب التعديل المطلوب'), r.reply.text);
+check('and waits in AI_TEXT', r.sessionState === 'AI_TEXT', r.sessionState);
+
+r = aiSay('booking 31 paid 300 cash', { error: 'boom' });
+check('a failed model call says the AI is unavailable',
+  r.reply.text.startsWith('⚠️ الذكاء الاصطناعي غير متاح'), r.reply.text);
+check('and keeps the session so the user can retry', r.sessionState === 'AI_TEXT', r.sessionState);
+check('and writes nothing', r.hasSave === false);
+r = run(msg('hello'));                               // the double throws: node did not run
+check('a node that never ran reads the same as a failed one',
+  r.reply.text.startsWith('⚠️ الذكاء الاصطناعي غير متاح'), r.reply.text);
+r = run(photo('PH1'));
+check('a photo in AI_TEXT is ignored, not reported as an outage', r.hasReply === false, r.reply);
+check('and leaves the session where it was', r.sessionState === 'AI_TEXT', r.sessionState);
+r = run(msg('/cancel'));
+check('/cancel leaves AI_TEXT', r.sessionState === '', r.sessionState);
+r = run(cb('choice_ai', EXPUSER));
+check('a cashier cannot open it even with the raw callback', r.hasReply === false);
+
+section('ai edit: every AI string the Brain names exists');
+const aiQuoted = [...new Set([...brainSrc.matchAll(/'(ai_[a-z_]+)'/g)].map(m => m[1]))];
+const aiDefined = new Set([...brainSrc.matchAll(/^  (ai_[a-z_]+):/gm)].map(m => m[1]));
+check('no ai_* key is used without being defined in S',
+  aiQuoted.every(k => aiDefined.has(k)), aiQuoted.filter(k => !aiDefined.has(k)));
 
 // ─── Result ───────────────────────────────────────────────────────────────────
 
