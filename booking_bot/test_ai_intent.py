@@ -59,6 +59,9 @@ def test_n8n_rendering_is_an_expression_with_two_live_parts():
     assert text.count("{{") == 2
     assert "Africa/Cairo" in text
     assert "$('Read Locations')" in text
+    # The apartment list is best-effort (spec 5.2): an unexecuted Read Locations
+    # must not make the whole extraction throw, as it did on the first live message.
+    assert "$('Read Locations').isExecuted" in text
 
 
 def test_plain_rendering_fills_both_tokens():

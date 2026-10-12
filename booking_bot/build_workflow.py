@@ -194,13 +194,22 @@ class Graph:
         return self._creds
 
 
-def state_conditions(states):
-    """An IF that fires when the loaded session state is any of `states`."""
+def state_conditions(states, from_session=False):
+    """An IF that fires when the loaded session state is any of `states`.
+
+    By default the state is read off the item in front of the gate, which is only
+    right for a gate that follows Load Session directly. A gate that follows a
+    lookup must name the session instead: its item is then the lookup's row (a
+    booking, say) and has no `state`, so the gate quietly says no. Needs Locations?
+    was that gate the moment AI_TEXT joined both state lists, and the registry was
+    never read — see "from_session" in the two callers.
+    """
+    left = "={{ $('Load Session').first().json.state }}" if from_session else "={{ $json.state }}"
     return {
         "options": {"caseSensitive": True, "leftValue": "",
                     "typeValidation": "loose", "version": 1},
         "conditions": [
-            {"id": f"is-{s.lower()}", "leftValue": "={{ $json.state }}",
+            {"id": f"is-{s.lower()}", "leftValue": left,
              "rightValue": s, "operator": {"type": "string", "operation": "equals"}}
             for s in states
         ],
@@ -512,7 +521,7 @@ def build():
             "query": read_source("read_bookings_for_edit.sql"), "options": {}},
            (360, 180), cred=POSTGRES_CRED, **lookup_settings)
     g.node("Needs Locations?", "n8n-nodes-base.if", 2.3,
-           {"conditions": state_conditions(LOCATION_STATES),
+           {"conditions": state_conditions(LOCATION_STATES, from_session=True),
             "looseTypeValidation": True, "options": {}}, (560, 300))
     g.node("Read Locations", "n8n-nodes-base.postgres", 2.6,
            {"operation": "executeQuery",

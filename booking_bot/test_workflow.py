@@ -290,6 +290,23 @@ def test_the_registry_read_runs_once_when_it_follows_the_bookings_read(nodes):
     assert "executeOnce" not in dg.read_settings("Read Bookings For Edit")
 
 
+def _left_values(node):
+    return [c["leftValue"] for c in node["parameters"]["conditions"]["conditions"]]
+
+
+def test_the_registry_gate_reads_the_session_not_the_item_in_front_of_it(nodes):
+    """First live message, 2026-10-12: "Node 'Read Locations' hasn't been executed".
+    Needs Locations? sits AFTER Read Bookings For Edit on the AI turns, so the item
+    it sees is a booking row, which has no `state` — the gate said no, the registry
+    was never read, and the extractor's prompt (which lists the apartments) threw.
+    The two state lists never overlapped before, so nothing had ever hit this.
+    Needs Bookings? follows Load Session directly and keeps reading $json."""
+    for left in _left_values(nodes["Needs Locations?"]):
+        assert "$('Load Session')" in left, left
+    for left in _left_values(nodes["Needs Bookings?"]):
+        assert left == "={{ $json.state }}", left
+
+
 def test_the_offline_merge_wires_the_brain_once(monkeypatch, tmp_path):
     """deploy_graph.py --offline writes the file people import by hand. It used to
     keep the old expense-gate -> Brain wires next to the new AI ones, so the Brain
@@ -306,3 +323,6 @@ def test_the_offline_merge_wires_the_brain_once(monkeypatch, tmp_path):
                         for br in spec.get("main", []) for l in br if l["node"] == "Brain")
     assert into_brain == ["AI Extract", "Needs AI?"], into_brain
     assert vw.check(full) == []
+    # and the registry gate the deploy rewrites keeps reading the session
+    gate = next(n for n in full["nodes"] if n["name"] == "Needs Locations?")
+    assert all("$('Load Session')" in left for left in _left_values(gate))
