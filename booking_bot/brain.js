@@ -370,6 +370,33 @@ const S = {
   // ── On demand: the morning availability report, now ──
   btn_availability: '🏠 تقرير الإتاحة',
   avail_sent: '🏠 جاري إرسال تقرير الإتاحة إلى الجروب.',
+  // ── AI edit: one free-text request, reviewed before anything is written ──
+  btn_ai_edit: '🤖 تعديل بالذكاء الاصطناعي',
+  ai_ask:
+    '🤖 اكتب التعديل المطلوب، مثل:\n' +
+    '• حجز 3 دفع 400 كاش\n' +
+    '• حجز 12 غرفة 3 وزود ليلتين\n' +
+    '• حجز 7 غادر النهاردة\n\n' +
+    'أو أرسل /cancel للتراجع:',
+  ai_unavailable:
+    '⚠️ الذكاء الاصطناعي غير متاح الآن. حاول مرة أخرى، أو استخدم ✏️ تعديل حجز من /start.',
+  ai_not_understood:
+    '❓ لم أفهم الطلب.{reason}\nاكتبه مرة أخرى بالـ ID وما تريد تغييره، أو أرسل /cancel:',
+  ai_bad_amount: '❌ المبلغ غير واضح. اكتب الطلب مرة أخرى:',
+  ai_bad_date: '❌ التاريخ غير واضح. اكتب الطلب مرة أخرى:',
+  ai_departure_before:
+    '❌ المغادرة ({departure}) قبل تاريخ البداية ({arrival}). اكتب الطلب مرة أخرى:',
+  ai_open_ended:
+    '❌ هذه إقامة مفتوحة (بدون عدد ليالٍ ثابت) فلا يمكن تمديدها. اذكر تاريخ المغادرة، '
+    + 'أو عدّل عدد الليالي من ✏️ تعديل حجز.',
+  ai_nights_unknown:
+    '❌ عدد الليالي الحالي غير مسجّل لهذا الحجز فلا يمكن حساب التمديد. '
+    + 'اذكر تاريخ المغادرة بدلاً من ذلك:',
+  ai_no_arrival:
+    '❌ تاريخ بداية هذا الحجز غير صالح في الشيت، فلا يمكن حساب الإقامة. عدّله من ✏️ تعديل حجز.',
+  ai_room_unknown:
+    '🏠 لم أتعرف على هذه الشقة أو الغرفة. الشقق المتاحة: {list}\nاكتب الطلب مرة أخرى:',
+  ai_echo: '🤖 فهمت: «{request}»',
   paid_ask_id: '🔎 أدخل الـ ID الخاص بالحجز:',
   paid_ask_amount: '💵 أدخل المبلغ المدفوع:\n{status}',
   // What the booking has been paid across ALL its rows, not just its own one —
@@ -1159,6 +1186,28 @@ function showExpConfirm() {
 
 function startEdit() { reply(t('edit_ask_id'), null); setState('EDIT_FIND', {}); }
 
+function startAi() { reply(t('ai_ask')); setState('AI_TEXT', {}); }
+
+/**
+ * The model's answer for an AI_TEXT message, checked field by field. Task 3
+ * fills in the checks; until then anything the model returns is "not understood".
+ * `item` is the AI Extract node's item: { output } on success, whatever n8n
+ * puts there on an error, or null when the node did not run.
+ */
+function readAiIntent(item) {
+  const o = item && item.output;
+  if (!o || typeof o !== 'object') return { fail: 'ai_unavailable' };
+  return { fail: 'ai_not_understood' };
+}
+
+function replyAiFail(got) {
+  if (got.fail === 'ai_not_understood') {
+    reply(t('ai_not_understood', { reason: got.reason ? `\n(${got.reason})` : '' }));
+  } else {
+    reply(t(got.fail));
+  }
+}
+
 /** Menu of editable fields, plus finish and cancel-the-booking. */
 function showEditMenu(dd) {
   const rows = EDIT_FIELDS.map(f => [{ text: t(f.labelKey), callback_data: `ef_${f.key}` }]);
@@ -1809,6 +1858,7 @@ if (cmd === '/start' || (cmd || '').startsWith('/start@')) {
         // booking, take the money, done. The cashier has had the shortcut
         // since the beginning and the admin, who does it more often, did not.
         [{ text: t('btn_add_paid'), callback_data: 'choice_paid' }],
+        [{ text: t('btn_ai_edit'), callback_data: 'choice_ai' }],
         [{ text: t('btn_availability'), callback_data: 'choice_avail' }],
       ],
     });
@@ -1849,6 +1899,7 @@ if (!state && cbData && cbData.indexOf('choice_') === 0) {
   else if (cbData === 'choice_paid' && (isAdmin || isCashier)) startPaid();
   else if (cbData === 'choice_booking' && isAdmin) startBooking();
   else if (cbData === 'choice_edit' && isAdmin) startEdit();
+  else if (cbData === 'choice_ai' && isAdmin) startAi();
   else if (cbData === 'choice_avail' && (isAdmin || isCashier)) sendAvailability();
   return [{ json: out }];
 }
@@ -1866,6 +1917,7 @@ switch (state) {
     else if (cbData === 'choice_paid' && (isAdmin || isCashier)) startPaid();
     else if (cbData === 'choice_booking' && isAdmin) startBooking();
     else if (cbData === 'choice_edit' && isAdmin) startEdit();
+    else if (cbData === 'choice_ai' && isAdmin) startAi();
     else if (cbData === 'choice_avail' && (isAdmin || isCashier)) sendAvailability();
     break;
 
@@ -2253,6 +2305,18 @@ switch (state) {
       savedNoGroupText: t('saved_no_group'),
       errorText: t('error'),
     };
+    break;
+  }
+
+  // ── AI edit ───────────────────────────────────────────────────────────────
+
+  case 'AI_TEXT': {
+    if (cq) break;
+    if (!isAdmin) { endSession(); break; }
+    if (!text) break;                       // a photo or a file: nothing to read
+    let item = null;
+    try { item = $('AI Extract').first().json; } catch (e) { item = null; }
+    replyAiFail(readAiIntent(item));
     break;
   }
 
@@ -2740,6 +2804,7 @@ if (out.hasSave && out.save) {
     buttons.push([{ text: t('btn_add_expense'), callback_data: 'choice_expense' }]);
     buttons.push([{ text: t('btn_edit_booking'), callback_data: 'choice_edit' }]);
     buttons.push([{ text: t('btn_add_paid'), callback_data: 'choice_paid' }]);
+    buttons.push([{ text: t('btn_ai_edit'), callback_data: 'choice_ai' }]);
   } else {
     buttons.push([{ text: t('btn_add_expense'), callback_data: 'choice_expense' }]);
     buttons.push([{ text: t('btn_add_paid'), callback_data: 'choice_paid' }]);
