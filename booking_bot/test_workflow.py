@@ -629,3 +629,103 @@ def test_the_key_reads_retry_and_report_instead_of_hanging():
         assert worst < 60000, f"{reader} can take {worst} ms"
         failed = graph.connections[reader]["main"][1]
         assert [l["node"] for l in failed] == ["Send Save Error"], reader
+
+
+# ── Retyping a live node ──────────────────────────────────────────
+
+import sync_nodes as sn
+
+_LINE_WIRES = [
+    ("Build Line Rows", 0, "Write Line Rows", 0),
+    ("Write Line Rows", 0, "Has Group?", 0),
+    ("Write Line Rows", 0, "Write Line Id", 0),
+    ("Write Line Rows", 1, "Send Save Error", 0),
+]
+_SHEETS_CRED = {"googleSheetsOAuth2Api": {"id": "qXOwEKyHdq2gJy6B", "name": "Google Sheets account"}}
+
+
+def _retype(by_type=None, have_cred=True):
+    have = {"name": "Write Line Rows", "type": "n8n-nodes-base.googleSheets",
+            "typeVersion": 4.7, "position": [1776, 800], "onError": "continueErrorOutput",
+            "parameters": {"operation": "update"}}
+    if have_cred:
+        have["credentials"] = json.loads(json.dumps(_SHEETS_CRED))
+    want = {"name": "Write Line Rows", "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2, "position": [2160, 1020], "onError": "continueErrorOutput",
+            "parameters": {"method": "POST"},
+            "credentials": {"googleSheetsOAuth2Api": {"id": "REPLACE_ME", "name": "Google Sheets account"}}}
+    return sn.retype_ops("Write Line Rows", have, want, _LINE_WIRES, by_type or {})
+
+
+def test_a_retyped_node_carries_its_credential_on_the_addnode():
+    """2026-10-15: `Write Line Rows` was still a Sheets node live while the repo,
+    and the Build Line Rows in front of it, had moved to an HTTP batchUpdate. Every
+    payment that needed a new line failed with "Bad request" and stranded the
+    session. The retype cannot use setNodeCredential: the endpoint refuses
+    googleSheetsOAuth2Api on an HTTP node (HANDOFF landmine), and an addNode that
+    carries `credentials` is the only thing that binds it."""
+    ops = _retype()
+    kinds = [o["type"] for o in ops]
+    assert kinds[:2] == ["removeNode", "addNode"]
+    assert "setNodeCredential" not in kinds
+    node = ops[1]["node"]
+    assert node["type"] == "n8n-nodes-base.httpRequest" and node["typeVersion"] == 4.2
+    # The credential the live node already had works; the file's REPLACE_ME does not.
+    assert node["credentials"] == _SHEETS_CRED
+    assert node["position"] == [1776, 800]
+    # The endpoint drops onError on an addNode; it goes in as a settings operation.
+    assert "onError" not in node
+    settings = [o for o in ops if o["type"] == "setNodeSettings"]
+    assert [o["settings"] for o in settings] == [{"onError": "continueErrorOutput"}]
+
+
+def test_a_retyped_node_gets_its_wires_back_in_the_same_order():
+    """`Has Group?` has to stay ahead of `Write Line Id` on output 0: n8n runs one
+    output's branches in the order they were connected, and the receptionist's
+    confirmation must not wait for a column-U stamp."""
+    ops = _retype()
+    wires = [(o["source"], o["sourceIndex"], o["target"]) for o in ops if o["type"] == "addConnection"]
+    assert wires == [("Build Line Rows", 0, "Write Line Rows"),
+                     ("Write Line Rows", 0, "Has Group?"),
+                     ("Write Line Rows", 0, "Write Line Id"),
+                     ("Write Line Rows", 1, "Send Save Error")]
+    # connections come after the node exists and before its settings are applied
+    kinds = [o["type"] for o in ops]
+    assert kinds.index("addNode") < kinds.index("addConnection") < kinds.index("setNodeSettings")
+
+
+def test_a_retype_falls_back_to_the_instances_credential_and_refuses_none():
+    ops = _retype(by_type={"googleSheetsOAuth2Api": {"id": "abc", "name": "Other"}}, have_cred=False)
+    assert ops[1]["node"]["credentials"] == {"googleSheetsOAuth2Api": {"id": "abc", "name": "Other"}}
+    with pytest.raises(SystemExit):
+        _retype(by_type={}, have_cred=False)
+
+
+# ── The registry behind the reports ───────────────────────────────
+
+def test_the_report_registry_fetches_outlast_a_slow_google():
+    """Execution 8516 (2026-10-15 07:00 Cairo): Fetch Report Locations timed out
+    twice (2 x 15 s), its error was swallowed by continueRegularOutput, and
+    Build Reports fell back to the occupied rooms only, so the morning report
+    went out without a single free room. Nobody is waiting on the schedule or on
+    the availability tap, so these two fetches can afford to try harder."""
+    specs = bw.lookup_node_specs()
+    for name in ("Fetch Report Locations", "Fetch Availability Locations"):
+        _, _, params, settings, _ = specs[name]
+        assert settings["onError"] == "continueRegularOutput", name
+        assert settings["retryOnFail"] is True, name
+        assert settings["maxTries"] >= 4, name
+        assert settings["waitBetweenTries"] >= 5000, name
+        assert params["options"]["timeout"] >= 30000, name
+
+
+def test_the_conversation_lookups_keep_their_short_timeouts():
+    """The turn-by-turn lookups are the opposite case: a person is waiting and the
+    Brain's 60 s save lock is ticking. Widening the report fetches must not widen
+    these."""
+    specs = bw.lookup_node_specs()
+    for name in ("Fetch Locations", "Fetch Bookings Values", "Fetch Bookings Formulas",
+                 "Fetch Booking Ids"):
+        _, _, params, settings, _ = specs[name]
+        assert settings["maxTries"] == 2, name
+        assert params["options"]["timeout"] == 15000, name

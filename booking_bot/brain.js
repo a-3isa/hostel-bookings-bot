@@ -2266,7 +2266,21 @@ if (text === '/cancel' || (text || '').startsWith('/cancel@')) {
 //
 // This also fixes tapping a menu button from a conversation that has since
 // ended, which used to do nothing at all.
-if (!state && cbData && cbData.indexOf('choice_') === 0) {
+//
+// And from one that never cleanly ended. The session is kept until the sheet
+// write succeeds (so a failed write leaves Save usable), which means a write that
+// failed, or a Clear Session that never ran, leaves it parked on a *_CONFIRM
+// state with its savingAt. The CONFIRM cases ignore everything but their own
+// buttons, so every menu tap after that was dropped without a word until /start
+// (execution 8468, 2026-10-14: stuck from 23:45 to the next morning). A save that
+// was fired and whose lock has lapsed is over, one way or the other: the menu tap
+// ends it and is then handled exactly like a tap with no session at all, the same
+// permission checks included. Inside the lock the write may still be in flight, so
+// that tap is left alone, as before. A conversation that merely hasn't finished has
+// no savingAt and is untouched.
+const strandedSave = Boolean(state) && Boolean(d.savingAt) && !saveLocked(d);
+if ((!state || strandedSave) && cbData && cbData.indexOf('choice_') === 0) {
+  if (strandedSave) endSession();
   if (cbData === 'choice_expense') startExpense();
   else if (cbData === 'choice_paid' && (isAdmin || isCashier)) startPaid();
   else if (cbData === 'choice_booking' && isAdmin) startBooking();

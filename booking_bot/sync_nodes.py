@@ -103,6 +103,52 @@ def edges(conns, name):
     return out
 
 
+def retype_ops(name, have, want, wires, by_type):
+    """Operations that turn live node `have` into `want`, a node of another type.
+
+    A node's type cannot be edited in place. Remove it, add it back under the
+    same name, and restore every connection it had — in the order they were
+    made, because n8n runs one output's branches in connection order — with its
+    position kept so the canvas does not rearrange itself.
+
+    The credential goes on the addNode itself. `setNodeCredential` refuses
+    googleSheetsOAuth2Api on an HTTP node, while an addNode that carries
+    `credentials` binds it (HANDOFF landmine, proved 2026-10-12). It is the
+    credential the live node already had when there is one: the file only holds
+    REPLACE_ME, and the first credential of that type on the instance is a guess.
+
+    Settings are a separate operation, not a key on the addNode: the endpoint
+    drops `onError` there.
+    """
+    node = {"name": name, "type": want["type"],
+            "typeVersion": want["typeVersion"],
+            "parameters": want["parameters"],
+            "position": have.get("position") or want.get("position")}
+    credentials = {}
+    for key in (want.get("credentials") or {}):
+        cred = (have.get("credentials") or {}).get(key) or by_type.get(key)
+        if not cred:
+            raise SystemExit(f"{name} needs a {key} credential and this "
+                             "account has none")
+        credentials[key] = {"id": cred["id"], "name": cred["name"]}
+    if credentials:
+        node["credentials"] = credentials
+
+    ops = [{"type": "removeNode", "nodeName": name},
+           {"type": "addNode", "node": node}]
+    for src, idx, tgt, tidx in wires:
+        ops.append({"type": "addConnection", "source": src, "target": tgt,
+                    "sourceIndex": idx, "targetIndex": tidx})
+    # maxTries and waitBetweenTries belong here too: retryOnFail without
+    # them silently reverts to n8n's default count, so a node the file
+    # says retries twice would retry three times on the instance.
+    settings = {k: want[k] for k in SETTING_KEYS if k in want}
+    if settings:
+        ops.append({"type": "setNodeSettings", "nodeName": name,
+                    "settings": settings})
+    return ops
+
+
 def main():
     apply_ = "--apply" in sys.argv
     names = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -149,35 +195,8 @@ def main():
             continue
 
         if have["type"] != want["type"] or have.get("typeVersion") != want.get("typeVersion"):
-            # A node's type cannot be edited in place. Remove it, add it back
-            # under the same name, and restore every connection it had —
-            # position included, so the canvas does not rearrange itself.
             print(f"  TYPE   {name}: {have['type']} -> {want['type']}")
-            wires = edges(conns, name)
-            ops.append({"type": "removeNode", "nodeName": name})
-            node = {"name": name, "type": want["type"],
-                    "typeVersion": want["typeVersion"],
-                    "parameters": want["parameters"],
-                    "position": have.get("position") or want.get("position")}
-            ops.append({"type": "addNode", "node": node})
-            for src, idx, tgt, tidx in wires:
-                ops.append({"type": "addConnection", "source": src, "target": tgt,
-                            "sourceIndex": idx, "targetIndex": tidx})
-            for key in (want.get("credentials") or {}):
-                cred = by_type.get(key)
-                if not cred:
-                    raise SystemExit(f"{name} needs a {key} credential and this "
-                                     "account has none")
-                ops.append({"type": "setNodeCredential", "nodeName": name,
-                            "credentialKey": key, "credentialId": cred["id"],
-                            "credentialName": cred["name"]})
-            # maxTries and waitBetweenTries belong here too: retryOnFail without
-            # them silently reverts to n8n's default count, so a node the file
-            # says retries twice would retry three times on the instance.
-            settings = {k: want[k] for k in SETTING_KEYS if k in want}
-            if settings:
-                ops.append({"type": "setNodeSettings", "nodeName": name,
-                            "settings": settings})
+            ops.extend(retype_ops(name, have, want, edges(conns, name), by_type))
         else:
             keys = [k for k in set(want["parameters"]) | set(have.get("parameters") or {})
                     if want["parameters"].get(k) != (have.get("parameters") or {}).get(k)]

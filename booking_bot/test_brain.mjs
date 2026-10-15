@@ -2550,6 +2550,74 @@ check('the latest arrivals, newest first', pickIds(r).join() === '61,60,59,58,57
 check('with a line saying how many are shown and to narrow the name',
   r.reply.text.includes('أحدث 10 من 12'), r.reply.text);
 
+// ─── A save that never cleared its session ────────────
+
+section('a finished or failed save does not strand the menu buttons');
+{
+  // Execution 8468 (2026-10-14): the write failed, Clear Session never ran, and
+  // the session sat on a *_CONFIRM state with its savingAt lock until the next
+  // morning. The CONFIRM cases ignore everything but their own buttons, so every
+  // menu tap after that was dropped without a word and only /start got the bot
+  // talking again.
+  const stranded = (who) => {
+    resetSession();
+    run(msg('/start', who));
+    run(cb('choice_expense', who));
+    run(msg('E-91', who));
+    run(msg('كهرباء', who));
+    run(msg('120', who));
+    run(cb('eapt_none', who));
+    run(cb('epay_cash', who));
+    if (sessionRow.state === 'EXP_RECEIPT') run(cb('ereceipt_skip', who));
+    run(cb('enotes_skip', who));
+    return run(cb('esave', who));
+  };
+  const lapse = () => {
+    const dd = JSON.parse(sessionRow.data);
+    dd.savingAt = Date.now() - 61 * 1000;
+    sessionRow = { ...sessionRow, data: JSON.stringify(dd) };
+  };
+
+  let s = stranded(USER);
+  check('the save was fired and the session is parked on EXP_CONFIRM',
+    s.hasSave === true && sessionRow.state === 'EXP_CONFIRM', sessionRow.state);
+  r = run(cb('choice_booking'));
+  check('inside the lock a menu tap is still swallowed (the write may be in flight)',
+    r.hasReply === false && sessionRow.state === 'EXP_CONFIRM', [r.hasReply, sessionRow.state]);
+
+  lapse();
+  r = run(cb('choice_booking'));
+  check('once the lock has lapsed a menu tap starts the booking',
+    r.hasReply === true && sessionRow.state !== 'EXP_CONFIRM' && sessionRow.state !== '', sessionRow.state);
+  check('and the old save lock is gone with the old session',
+    !JSON.parse(sessionRow.data).savingAt, sessionRow.data);
+
+  stranded(USER); lapse();
+  r = run(cb('choice_avail'));
+  check('the availability button works from a stranded session', r.hasAvailability === true);
+  check('and leaves the session ended, so the next tap needs no /start', sessionRow.state === '', sessionRow.state);
+
+  stranded(EXPUSER); lapse();
+  r = run(cb('choice_booking', EXPUSER));
+  check('permissions are the same as ever: a cashier still cannot start a booking',
+    r.hasReply === false && r.hasSave === false, [r.hasReply, r.hasSave]);
+  check('but the dead session is ended', sessionRow.state === '', sessionRow.state);
+
+  stranded(USER); lapse();
+  r = run(cb('esave'));
+  check('the retry button on the same card still re-emits the write', r.hasSave === true);
+
+  // A conversation that is merely in progress is not touched: no save was fired.
+  resetSession();
+  run(msg('/start'));
+  run(cb('choice_expense'));
+  run(msg('E-92'));
+  run(msg('ماء'));
+  r = run(cb('choice_booking'));
+  check('a stray old menu tap mid-flow still changes nothing',
+    r.hasReply === false && sessionRow.state === 'EXP_AMOUNT', sessionRow.state);
+}
+
 // ─── Result ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all checks passed'}`);

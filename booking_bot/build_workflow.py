@@ -366,10 +366,23 @@ FETCH_SETTINGS = dict(onError="continueRegularOutput", retryOnFail=True, maxTrie
 LOOKUP_CODE_SETTINGS = dict(alwaysOutputData=True)
 
 
-def fetch_params(tab_expr, rng, render="UNFORMATTED_VALUE", literal=False):
+def fetch_params(tab_expr, rng, render="UNFORMATTED_VALUE", literal=False, timeout=15000):
     p = values_get(tab_expr, rng, render, literal)
-    p["options"] = {"timeout": 15000}
+    p["options"] = {"timeout": timeout}
     return p
+
+
+# The room registry behind the 08:00 schedule and the availability tap. Nobody is
+# waiting on either, so these try harder than the turn-by-turn lookups, whose
+# 15 s x 2 has to fit inside the Brain's 60 s save lock. Execution 8516
+# (2026-10-15): both tries timed out, continueRegularOutput swallowed the error,
+# the registry came back empty, and the report fell back to the occupied rooms
+# only. The fallback is deliberate (an empty registry must never read as "the
+# whole building is free"), so the cure is not to need it: 4 x 30 s with 5 s
+# between is about two and a half minutes of Google being slow before it does.
+REPORT_FETCH_SETTINGS = dict(onError="continueRegularOutput", retryOnFail=True, maxTries=4,
+                             waitBetweenTries=5000)
+REPORT_FETCH_TIMEOUT = 30000
 
 
 def session_params(operation):
@@ -439,13 +452,16 @@ def lookup_node_specs():
         "Fetch Booking Ids": (http, 4.2, fetch_params("BOOKINGS_TAB", "B1:B2000"), once, SHEETS_CRED),
         "Read Next Booking ID": (code, 2, {"jsCode": read_source("compute_next_booking_id.js")},
                                  dict(LOOKUP_CODE_SETTINGS), None),
-        "Fetch Report Locations": (http, 4.2, fetch_params(AVAILABILITY_TAB, "A2:B2000", literal=True),
-                                   dict(FETCH_SETTINGS), SHEETS_CRED),
+        "Fetch Report Locations": (http, 4.2,
+                                   fetch_params(AVAILABILITY_TAB, "A2:B2000", literal=True,
+                                                timeout=REPORT_FETCH_TIMEOUT),
+                                   dict(REPORT_FETCH_SETTINGS), SHEETS_CRED),
         "Read Report Locations": (code, 2, {"jsCode": read_source("build_locations.js")},
                                   dict(LOOKUP_CODE_SETTINGS), None),
         "Fetch Availability Locations": (http, 4.2,
-                                         fetch_params(AVAILABILITY_TAB, "A2:B2000", literal=True),
-                                         dict(FETCH_SETTINGS), SHEETS_CRED),
+                                         fetch_params(AVAILABILITY_TAB, "A2:B2000", literal=True,
+                                                      timeout=REPORT_FETCH_TIMEOUT),
+                                         dict(REPORT_FETCH_SETTINGS), SHEETS_CRED),
         "Read Availability Locations": (code, 2, {"jsCode": read_source("build_locations.js")},
                                         dict(LOOKUP_CODE_SETTINGS), None),
     }
