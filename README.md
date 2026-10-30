@@ -1,5 +1,7 @@
 # hostel-bookings-bot
 
+[![CI](https://github.com/a-3isa/hostel-bookings-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/a-3isa/hostel-bookings-bot/actions/workflows/ci.yml)
+
 A Telegram bot that runs bookings and expenses for the hostel. Staff use it in
 Arabic. It reads and writes one Google Sheet, which is the only store: since
 2026-10-12 the bot no longer touches a database.
