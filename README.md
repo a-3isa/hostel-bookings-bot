@@ -1,13 +1,21 @@
 # hostel-bookings-bot
 
+[![CI](https://github.com/a-3isa/hostel-bookings-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/a-3isa/hostel-bookings-bot/actions/workflows/ci.yml)
+
 A Telegram bot that runs bookings and expenses for the hostel. Staff use it in
 Arabic. It reads and writes one Google Sheet, which is the only store: since
 2026-10-12 the bot no longer touches a database.
 
-```
-Telegram ──► n8n workflow (brain.js) ──► Google Sheet   (the only store)
-                     │
-                     └── conversation state: an n8n Data Table, one row per chat
+```mermaid
+flowchart LR
+    staff[Staff on Telegram] --> wf
+    subgraph wf[n8n workflow]
+        brain[brain.js<br/>conversation state machine] --> nodes[Code nodes:<br/>rows, lookups, reports]
+    end
+    wf -->|read and write| sheet[(Google Sheet<br/>the only store)]
+    wf --- state[(n8n Data Table<br/>one row per chat)]
+    wf -->|edit requests only| ai[Anthropic API]
+    wf -->|bookings, expenses,<br/>morning reports| group[Telegram group chats]
 ```
 
 ## What's in the repo
@@ -77,3 +85,43 @@ These files are gitignored and must never be committed: `.env`,
 `service_account.json`, and `backups/`. Backups contain the bot token and guest
 names and phone numbers. `.env.example` lists the variables the retired Python
 bot used. The n8n workflow keeps its own settings on its Config node.
+
+## Tech stack
+
+- **Live bot:** n8n (Telegram Trigger, Google Sheets and Code nodes, a Data Table for
+  sessions), with the conversation logic in plain JavaScript (`booking_bot/brain.js`)
+  and the Anthropic API for the optional AI edit.
+- **Tooling:** Python 3 scripts that generate, validate and deploy the workflow; Node
+  scripts for the offline tests.
+- **Retired:** a Next.js 15 dashboard on Postgres (Supabase), and a python-telegram-bot
+  version with gspread.
+
+## Testing and CI
+
+Everything runs offline: no Telegram, Google or n8n access is needed.
+
+```bash
+node booking_bot/test_brain.mjs && node booking_bot/test_rows.mjs
+node booking_bot/test_reports.mjs && node booking_bot/test_sheet_lookup.mjs
+pip install -r python_version/requirements.txt "psycopg[binary]"
+python -m pytest booking_bot supabase python_version/tests
+cd webui && npm ci && npm run build && node --test lib/mirror.test.mjs
+```
+
+CI runs all of these on every pull request and on pushes to `main`.
+
+## Security notes
+
+- Only Telegram users on the admin or cashier list get a conversation; anyone else
+  gets one refusal to a command and silence otherwise. Admins and cashiers see
+  different menus, and each flow checks the role again.
+- The AI edit only reads the typed text. The change is shown for confirmation and
+  written by the same code path as the edit menu.
+- The retired dashboard signs its session cookie with HMAC-SHA256 and compares
+  signatures in constant time; it refuses everyone when `DASHBOARD_PASSWORD` is unset.
+- See [SECURITY.md](SECURITY.md) to report a vulnerability.
+
+## Author
+
+Built by Ahmed Ibrahim Hussien ([a-3isa](https://github.com/a-3isa)). No licence file:
+all rights reserved.

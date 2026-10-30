@@ -206,8 +206,13 @@ def load_servers():
     """
     env_url, env_token = env_override()
 
-    with open(os.path.expanduser(r"~\.claude.json"), encoding="utf-8") as fh:
-        cfg = json.load(fh)
+    # Missing file = no servers registered with Claude Code; the env override
+    # can still supply one. "~/" so the path also resolves outside Windows.
+    try:
+        with open(os.path.expanduser("~/.claude.json"), encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except FileNotFoundError:
+        cfg = {}
 
     scopes = [cfg.get("mcpServers") or {}]
     scopes += [p.get("mcpServers") or {} for p in (cfg.get("projects") or {}).values()]
