@@ -8,9 +8,13 @@
     "start": "next start"
   },
   "dependencies": {
-    "next": "15.5.23",
+    "next": "15.5.28",
     "pg": "8.13.1",
     "react": "19.1.0",
     "react-dom": "19.1.0"
+  },
+  "overrides": {
+    "postcss": "^8.5.32",
+    "sharp": "^0.35.5"
   }
 }
