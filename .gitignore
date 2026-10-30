@@ -2,6 +2,10 @@
 # the service account out of the repo but also silently swallowed every config,
 # fixture and workflow export alongside it.
 .env
+.env.*
+!.env.example
+*.pem
+*.key
 service_account.json
 *credentials*.json
 *service_account*.json
