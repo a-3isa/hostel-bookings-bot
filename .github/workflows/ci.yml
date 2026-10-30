@@ -37,6 +37,11 @@ jobs:
           node booking_bot/test_sheet_lookup.mjs
       - name: Workflow build and checks (Python)
         run: python -m pytest -q booking_bot
+        env:
+          # push_brain.py picks an n8n server when imported. These placeholders
+          # satisfy it; nothing in the tests connects to them.
+          N8N_MCP_URL: http://n8n.invalid/mcp-server/http
+          N8N_MCP_TOKEN: placeholder
       - name: Retired Supabase scripts (Python)
         run: python -m pytest -q supabase
       - name: Retired Python bot (Python)
