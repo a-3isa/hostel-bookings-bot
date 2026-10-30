@@ -26,3 +26,8 @@ booking_bot/.workflow_id
 # BOT_TOKEN in its Config node, and the sheet and database carry guests' names
 # and phone numbers.
 backups/
+
+# The backfill's output: every booking from the live sheet, with guests' names
+# and phone numbers. Generate it locally; never commit it.
+supabase/seed.sql
+supabase/*.seed.sql
